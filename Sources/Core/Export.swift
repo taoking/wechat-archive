@@ -35,7 +35,7 @@ public struct CSVExporter: ArchiveExporter {
         let header = "timestamp,conversation,sender,type,content,media_path"
         let rows = messages.map { message in
             [
-                ISO8601DateFormatter.archive.string(from: message.timestamp), conversationName,
+                ISO8601DateFormatter.makeArchiveFormatter().string(from: message.timestamp), conversationName,
                 message.sender.displayName, message.type.rawValue, message.content ?? "",
                 message.media.map(\.relativePath).joined(separator: ";")
             ].map(escapeCSV).joined(separator: ",")
@@ -76,7 +76,7 @@ public struct HTMLExporter: ArchiveExporter {
     }
 
     private func render(_ message: Message) -> String {
-        let time = ISO8601DateFormatter.archive.string(from: message.timestamp)
+        let time = ISO8601DateFormatter.makeArchiveFormatter().string(from: message.timestamp)
         let content: String
         if let text = message.content {
             content = escapeHTML(text)

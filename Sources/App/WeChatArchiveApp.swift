@@ -162,12 +162,16 @@ private struct ImportView: View {
     }
 
     private func validateKey() {
-        guard databaseURL != nil else { return }
+        guard let databaseURL else { return }
         do {
-            _ = try WeChatDatabaseKey(hex: databaseKey)
-            status = "密钥格式有效。此构建需要注入已审计的 SQLCipher 解密器后，才能验证数据库密钥。"
+            let key = try WeChatDatabaseKey(hex: databaseKey)
+            let decryptor = try SQLCipherDatabaseDecryptor()
+            try decryptor.validate(databaseURL: databaseURL, key: key)
+            status = "✓ Database key valid。已通过只读快照验证；密钥未被保存。"
+        } catch let error as ArchiveError {
+            status = error.localizedDescription
         } catch {
-            status = ArchiveError.keyInvalid.localizedDescription
+            status = ArchiveError.databaseDecryptionFailed.localizedDescription
         }
         if doNotPersist { databaseKey = "" }
     }

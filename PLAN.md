@@ -10,7 +10,7 @@
 
 ## Phase 2 — Production import adapters
 
-- Add a locally linked, audited SQLCipher decryptor implementation.
+- SQLCipher local decryptor, read-only source snapshot and synthetic end-to-end verification (implemented).
 - Implement schema inspection plus each supported WeChat macOS Adapter with artificial fixtures.
 - Add JSON/NDJSON archive import UI with preview, progress, cancellation and resumable source copies.
 - Add CSV/TXT/HTML adapters with explicit field mapping rather than heuristic loss of data.

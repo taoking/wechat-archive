@@ -17,9 +17,9 @@ Assets include private messages, media, local database files and database keys. 
 
 ## Key limitations
 
-Swift `Data` is not a guaranteed secure-memory primitive. Providers minimize lifetime and copies, but a production SQLCipher integration should review its own secure-memory and process-dump exposure. Do not log keys or pass them to diagnostics.
+Swift `Data` is not a guaranteed secure-memory primitive. Providers minimize lifetime and copies; the raw-key literal is generated only in-process for SQLCipher and is never passed to a subprocess, file, log, crash report or diagnostics. Do not log keys or pass them to diagnostics.
 
-The included decryptor intentionally returns `Database decryption failed`; it does not implement SQLCipher. A future implementation must be local, audited, read-only against the original source and have artificial fixture tests. It must never shell out with a key in arguments or write plaintext keys to disk.
+`SQLCipherDatabaseDecryptor` dynamically loads a locally installed SQLCipher runtime, validates a source snapshot read-only, then creates an encrypted snapshot in a `0700` work directory for export. The temporary plaintext output is `0600`; source files are not opened for writing. End-to-end tests use random key material and a generated synthetic database only. Never add a shell-out path that places a key in arguments or writes it to disk.
 
 ## Secure development requirements
 

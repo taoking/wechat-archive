@@ -1,7 +1,9 @@
 import Foundation
+import CryptoKit
+import XCTest
 @testable import WeChatArchiveCore
 
-final class ArchiveCoreTests {
+final class ArchiveCoreTests: XCTestCase {
 
     func testArchiveWriterPartitionsMessagesByConversationAndYearAndPreservesUnknownPayload() throws {
         let directory = try makeTemporaryDirectory()
@@ -148,6 +150,69 @@ final class ArchiveCoreTests {
         try expectEqual(Set(providers.map(\.source)), Set(ImportSource.allCases))
     }
 
+    func testSQLCipherDecryptorValidatesCorrectKeyAndRejectsWrongKey() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        let keyHex = randomKeyHex()
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: keyHex)
+        let decryptor = try SQLCipherDatabaseDecryptor()
+        let key = try WeChatDatabaseKey(hex: keyHex)
+
+        try decryptor.validate(databaseURL: encryptedDatabase, key: key)
+        let wrongKey = try WeChatDatabaseKey(hex: randomKeyHex())
+        try expectThrows(ArchiveError.databaseDecryptionFailed) {
+            try decryptor.validate(databaseURL: encryptedDatabase, key: wrongKey)
+        }
+    }
+
+    func testSQLCipherDecryptorExportsPlaintextToProtectedWorkingDirectoryWithoutChangingSource() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        let keyHex = randomKeyHex()
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: keyHex)
+        let originalHash = SHA256.hash(data: try Data(contentsOf: encryptedDatabase)).map { String(format: "%02x", $0) }.joined()
+        let workingDirectory = directory.appending(path: "working")
+        let plaintextDatabase = try SQLCipherDatabaseDecryptor().decrypt(
+            databaseURL: encryptedDatabase,
+            key: try WeChatDatabaseKey(hex: keyHex),
+            into: workingDirectory
+        )
+
+        try expectTrue(plaintextDatabase.path().hasPrefix(workingDirectory.path()))
+        try expectEqual(Data(try Data(contentsOf: plaintextDatabase).prefix(16)), Data("SQLite format 3\0".utf8))
+        try expectEqual(try readPlaintextFixtureBody(from: plaintextDatabase), "synthetic fixture only")
+        try expectEqual(originalHash, SHA256.hash(data: try Data(contentsOf: encryptedDatabase)).map { String(format: "%02x", $0) }.joined())
+        let permissions = try FileManager.default.attributesOfItem(atPath: plaintextDatabase.path())[.posixPermissions] as? Int
+        try expectTrue((permissions ?? 0o777) & 0o077 == 0)
+    }
+
+    func testSQLCipherDecryptorRejectsNonRawKeyLengthsBeforeOpeningDatabase() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: randomKeyHex())
+        let shortKey = try WeChatDatabaseKey(hex: String(repeating: "ab", count: 16))
+
+        try expectThrows(ArchiveError.keyInvalid) {
+            try SQLCipherDatabaseDecryptor().validate(databaseURL: encryptedDatabase, key: shortKey)
+        }
+    }
+
+    func testSQLCipherDecryptorRejectsNonPowerOfTwoPageSizesBeforeOpeningDatabase() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        let keyHex = randomKeyHex()
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: keyHex)
+        let decryptor = try SQLCipherDatabaseDecryptor(configuration: .init(pageSize: 1_536))
+
+        try expectThrows(ArchiveError.invalidInput) {
+            try decryptor.validate(databaseURL: encryptedDatabase, key: try WeChatDatabaseKey(hex: keyHex))
+        }
+    }
+
     private func makeMessage(
         id: String,
         timestamp: Date,
@@ -183,6 +248,54 @@ final class ArchiveCoreTests {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    private func randomKeyHex() -> String {
+        (0..<32).map { _ in String(format: "%02x", UInt8.random(in: UInt8.min...UInt8.max)) }.joined()
+    }
+
+    private func makeEncryptedTestDatabase(at url: URL, keyHex: String) throws {
+        let script = """
+            .bail on
+            PRAGMA key = "x'\(keyHex)'";
+            CREATE TABLE test_messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+            INSERT INTO test_messages(body) VALUES ('synthetic fixture only');
+            """
+        try runSQLCipher(databaseURL: url, script: script)
+    }
+
+    private func runSQLCipher(databaseURL: URL, script: String) throws {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/sqlcipher")
+        guard FileManager.default.isExecutableFile(atPath: executable.path()) else {
+            throw TestFailure(description: "SQLCipher runtime is not installed")
+        }
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        process.executableURL = executable
+        process.arguments = ["-batch", databaseURL.path()]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        input.fileHandleForWriting.write(Data(script.utf8))
+        input.fileHandleForWriting.closeFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw TestFailure(description: "Synthetic SQLCipher fixture creation failed") }
+    }
+
+    private func readPlaintextFixtureBody(from databaseURL: URL) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [databaseURL.path(), "SELECT body FROM test_messages"]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw TestFailure(description: "Plaintext export cannot be queried by SQLite") }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 private struct TestFailure: Error, CustomStringConvertible {
@@ -199,4 +312,16 @@ private func expectTrue(_ value: Bool, file: StaticString = #filePath, line: UIn
 
 private func expectFalse(_ value: Bool, file: StaticString = #filePath, line: UInt = #line) throws {
     guard !value else { throw TestFailure(description: "Expected false at \(file):\(line)") }
+}
+
+private func expectThrows<T: Error & Equatable>(_ expected: T, _ work: () throws -> Void) throws {
+    do {
+        try work()
+    } catch let error as T {
+        try expectEqual(error, expected)
+        return
+    } catch {
+        throw TestFailure(description: "Expected \(expected), got \(error)")
+    }
+    throw TestFailure(description: "Expected \(expected) to be thrown")
 }

@@ -22,9 +22,9 @@ Explicitly selected local source
 - `SQLiteArchiveIndex.swift` owns migration, transactions, FTS and parameterized SQL only.
 - `Import.swift` defines source-neutral providers and batch coordinator.
 - `Export.swift` defines independent exporters; no exporter mutates the archive.
-- `WeChatSecurity.swift` contains scoped key providers and decryptor protocol.
+- `WeChatSecurity.swift` and `SQLCipherDatabaseDecryptor.swift` contain scoped key providers, SQLCipher raw-key handling and the local decryptor.
 - `WeChatDatabase.swift` contains snapshot and Adapter detection boundaries.
-- `Sources/App` is presentation-only; it does not run SQL or decrypt databases.
+- `Sources/App` orchestrates Core services only; it never executes SQL, handles raw SQLCipher APIs or parses database rows directly.
 
 ## Data and error contracts
 

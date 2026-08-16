@@ -2,13 +2,15 @@
 
 ## Status
 
-This repository provides the safety and extension boundaries for macOS WeChat database imports. It does **not** currently ship a SQLCipher decryptor or claim compatibility with a specific released WeChat database build. No real user database or key is included in the repository.
+This repository ships `SQLCipherDatabaseDecryptor` for user-provided, 64-character hexadecimal SQLCipher raw keys. It dynamically loads the locally installed SQLCipher runtime (`brew install sqlcipher` / `brew bundle`), so the runtime is not copied into the repository. No real user database or key is included in the repository.
+
+The decryptor has synthetic end-to-end coverage for correct-key validation, wrong-key rejection, protected plaintext export and source immutability. It does not claim compatibility with a specific released WeChat database build; parsing remains adapter-gated.
 
 ## Supported pathway today
 
 1. User explicitly selects a local database they are authorized to access.
 2. `DatabaseSnapshotter` copies the database plus optional `.db-wal` and `.db-shm` into a dedicated working directory.
-3. A `WeChatKeyProvider` supplies local key material to an injected `WeChatDatabaseDecryptor`.
+3. A `WeChatKeyProvider` supplies local key material to `SQLCipherDatabaseDecryptor`.
 4. `WeChatDatabaseDetector` selects a versioned Adapter using tables, columns and metadata.
 5. The Adapter emits normalized values for the archive pipeline.
 
@@ -31,7 +33,7 @@ Each production adapter must document: supported application/database version ra
 
 ## Temporary decryption lifecycle
 
-The decrypted database is temporary working data, never the archive output. Delete it after the import unless the user explicitly selects “Keep decrypted database copy” behind a clear privacy warning. Never put it in the project directory or commit it.
+The decrypted database is temporary working data, never the archive output. The decryptor creates a `0700` work directory and marks the generated plaintext database `0600`; callers must delete it when the import ends unless the user explicitly selects “Keep decrypted database copy” behind a clear privacy warning. Never put it in the project directory or commit it.
 
 ## Media and message coverage
 

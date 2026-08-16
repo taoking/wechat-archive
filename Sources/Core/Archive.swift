@@ -268,7 +268,7 @@ extension JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
-            try container.encode(ISO8601DateFormatter.archive.string(from: date))
+            try container.encode(ISO8601DateFormatter.makeArchiveFormatter().string(from: date))
         }
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return encoder
@@ -287,7 +287,7 @@ extension JSONDecoder {
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let value = try container.decode(String.self)
-            guard let date = ISO8601DateFormatter.archive.date(from: value) else { throw ArchiveError.invalidArchive }
+            guard let date = ISO8601DateFormatter.makeArchiveFormatter().date(from: value) else { throw ArchiveError.invalidArchive }
             return date
         }
         return decoder
