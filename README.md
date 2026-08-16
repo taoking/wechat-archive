@@ -22,9 +22,15 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 `all_keys.json` 和 key 仅在内存中使用，不写入导出目录、日志、命令行参数、普通文件或 Git。导出的根目录/子目录权限为 `0700`，数据库文件为 `0600`；同名文件默认跳过，不覆盖。首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。详细步骤见 [USAGE.md](USAGE.md)。
 
+## Phase 2: Plain SQLite Schema Discovery
+
+选择第一阶段生成的普通 SQLite 根目录后，**Schema Discovery** 会递归以只读方式打开 `*.db`，采集 SQLite 版本、页数、表/索引/视图/触发器数量、字段、主键、索引、外键和聚合行数。它只使用 `SQLITE_OPEN_READONLY`，不需要 `all_keys.json` 或数据库密钥，也不会读取聊天文本、联系人字段值、BLOB 或字符串样本。
+
+分析会根据路径、表名、字段名、索引和表结构，将数据库标记为 Detected、Likely 或 Unknown，并输出消息、联系人、会话、群聊、媒体等候选。报告写入所选导出根目录下的 `SchemaReports/`：包含 `schema-summary.json`、`schema-summary.md` 和每个数据库的 Markdown 报告。报告目录权限为 `0700`，报告文件为 `0600`；其中不包含绝对路径、数据库值、密钥或聊天内容。
+
 ## Not in this phase
 
-本阶段不解析聊天消息、联系人或媒体，也不提供 JSON、NDJSON、HTML、CSV、Word、PDF、Excel、全文搜索或 schema 分析。验收目标仅为：根据 `all_keys.json` 导出可由普通 SQLite 工具打开的数据库。
+本阶段不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Schema 分类是下一阶段 Adapter 开发的结构性线索，不是内容解析结果。
 
 ## Backup
 

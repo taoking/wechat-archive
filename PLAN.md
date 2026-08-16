@@ -8,10 +8,15 @@
 - Offline HTML/CSV/JSON/NDJSON exports and archive verification.
 - SwiftUI navigation shell and local-only import/key UX.
 
-## Phase 2 — Production import adapters
+## Phase 2 — Plain SQLite schema discovery (implemented)
 
-- SQLCipher local decryptor, read-only source snapshot and synthetic end-to-end verification (implemented).
-- Implement schema inspection plus each supported WeChat macOS Adapter with artificial fixtures.
+- Recursively discover Phase 1 plain SQLite exports, inspect schemas read-only and produce protected JSON/Markdown reports.
+- Classify likely message, contact, conversation, group, media, index and configuration databases from structural signals; group identical schemas by a structure-only SHA-256 fingerprint.
+- Do not read database values, parse messages or export chat content.
+
+## Phase 3 — First real message adapter
+
+- Select a confirmed message schema group and implement a minimal, fixture-backed adapter for normalized messages.
 - Add JSON/NDJSON archive import UI with preview, progress, cancellation and resumable source copies.
 - Add CSV/TXT/HTML adapters with explicit field mapping rather than heuristic loss of data.
 

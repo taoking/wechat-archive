@@ -1,6 +1,6 @@
 # 使用说明
 
-WeChat Archive 第一阶段只做一件事：读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。本阶段不解析聊天消息、联系人、媒体或数据库 schema。
+WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现；不解析或导出完整聊天消息、联系人或媒体内容。
 
 ## 准备环境
 
@@ -43,6 +43,28 @@ WeChat Archive 第一阶段只做一件事：读取用户选择的 wx-cli `all_k
    ```
 
 `all_keys.json` 只会在内存中读取；不会复制到导出目录、写入日志、数据库、普通文件或 Git。密钥不会作为命令行参数传递。导出完成后，应用会丢弃会话中保存的匹配密钥；如需再次导出，请重新 Scan 和 Validate。
+
+## Schema Discovery（普通 SQLite 结构发现）
+
+1. 打开应用的 **Schema Discovery** 页面。
+2. 点击 **Choose Folder**，选择第一阶段导出的普通 SQLite 根目录；若文件选择器不便使用，也可粘贴完整绝对路径后点 **Use Path**。
+3. 点击 **Analyze Databases**。此阶段不读取 `all_keys.json`、不需要密钥，也不会触碰原 SQLCipher 数据库。
+4. 页面会逐库显示进度，并在完成后汇总数据库、表、Schema Group、消息/联系人/会话/媒体候选数。
+5. 点击 **Open Report Folder** 查看所选根目录下的 `SchemaReports/`：
+
+   ```text
+   SchemaReports/
+   ├── schema-summary.json
+   ├── schema-summary.md
+   └── databases/
+       └── …-<stable-id>.md
+   ```
+
+扫描器仅以 `SQLITE_OPEN_READONLY` 打开常规 `*.db` 文件，逐库/逐表执行 schema 查询和 `COUNT(*)`，不会一次加载数据库内容到内存。报告仅包含相对路径、表/字段/索引/外键名称、声明类型、约束、聚合行数、分类和 Schema fingerprint；不会包含聊天文本、联系人姓名、wxid、BLOB 数据、TEXT sample、密钥或用户主目录路径。FTS virtual table 与 shadow table 会标识为索引结构，不会被当成业务消息表。
+
+分类使用路径和结构启发式，因此 **Detected** 表示存在结构证据，**Likely** 表示主要是路径或较弱信号，**Unknown** 表示没有足够证据；它不是对数据库内容的确定性声明。重复结构的数据库按 schema fingerprint 分组，为下一阶段选择 Message/Contact/Conversation Adapter 提供起点。
+
+`SchemaReports/` 及其 `databases/` 子目录会设为 `0700`，报告文件为 `0600`。真实数据库和真实报告已被 `.gitignore` 排除；不要将它们提交到 Git。
 
 ## 快照与临时明文数据
 

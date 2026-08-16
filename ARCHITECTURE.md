@@ -24,6 +24,8 @@ Explicitly selected local source
 - `Export.swift` defines independent exporters; no exporter mutates the archive.
 - `WeChatSecurity.swift` and `SQLCipherDatabaseDecryptor.swift` contain scoped key providers, SQLCipher raw-key handling and the local decryptor.
 - `WeChatDatabase.swift` contains snapshot and Adapter detection boundaries.
+- `SQLiteSchemaScanner.swift` owns Phase 2 plain-SQLite, read-only schema inspection, safe identifier quoting, FTS-internal-table recognition, structural classification and schema fingerprints. It never reads database values.
+- `SQLiteSchemaReportWriter.swift` writes Phase 2 JSON/Markdown reports with `0700` directories, `0600` files and report-path redaction; it never opens source databases.
 - `Sources/App` orchestrates Core services only; it never executes SQL, handles raw SQLCipher APIs or parses database rows directly.
 
 ## Data and error contracts
@@ -35,6 +37,8 @@ Inputs at the file/provider boundary are treated as untrusted. They are decoded 
 ## Concurrency and safety
 
 The index opens with SQLite FULLMUTEX and each import batch is one transaction. Completed batches survive an interruption; a source can be re-imported safely. A snapshot uses SQLite's `-wal` and `-shm` sidecars, owns a `0700` working directory, sets copied files to `0600`, and compares the source file set plus attributes before and after copying. A changed source fails with a close-WeChat-and-retry error rather than silently importing a partial database. These checks are best effort, not proof of one SQLite transaction snapshot; the UI and documentation require WeChat to be fully quit before real imports.
+
+Phase 2 operates only after Phase 1 export. It discovers `.db` files below the user-selected export root, rejects symlinks and path escapes, and opens each file using `SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX`. It queries `sqlite_master`, PRAGMA metadata and aggregate `COUNT(*)`, using quoted identifiers from schema metadata. No stored database value is selected. Source-relative paths stay local to the UI; reports omit absolute paths and redact wxid-like path components.
 
 ## Dependency decision
 

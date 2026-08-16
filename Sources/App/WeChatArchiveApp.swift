@@ -19,6 +19,7 @@ struct WeChatArchiveApp: App {
 private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case archive = "Archive"
     case databaseExport = "Database Export"
+    case schemaDiscovery = "Schema Discovery"
     case settings = "Settings"
 
     var id: String { rawValue }
@@ -26,6 +27,7 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .archive: "archivebox"
         case .databaseExport: "cylinder.split.1x2"
+        case .schemaDiscovery: "magnifyingglass.circle"
         case .settings: "gearshape"
         }
     }
@@ -44,6 +46,7 @@ private struct ArchiveShellView: View {
             switch section ?? .archive {
             case .archive: DashboardView()
             case .databaseExport: DatabaseExportView()
+            case .schemaDiscovery: SchemaDiscoveryView()
             case .settings: SettingsView()
             }
         }
@@ -56,18 +59,18 @@ private struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("WeChat Archive").font(.largeTitle.bold())
-                Text("第一阶段：将已匹配密钥的本地 SQLCipher 数据库导出为普通 SQLite。")
+                Text("本机导出普通 SQLite，并在不读取聊天内容的前提下发现数据库结构。")
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                    StatisticCard(value: "1", label: "Export phase", symbol: "cylinder.split.1x2")
+                    StatisticCard(value: "2", label: "Current phase", symbol: "magnifyingglass.circle")
                     StatisticCard(value: "Local", label: "Processing", symbol: "macbook")
                     StatisticCard(value: "0", label: "Network uploads", symbol: "network.slash")
-                    StatisticCard(value: "—", label: "Message parsing", symbol: "text.badge.xmark")
+                    StatisticCard(value: "Schema only", label: "Message parsing", symbol: "text.badge.xmark")
                 }
                 GroupBox("Current Scope") {
                     HStack {
                         Image(systemName: "checkmark.shield").foregroundStyle(.green)
-                        Text("选择数据库目录和 wx-cli key map，逐个验证后导出普通 SQLite；不解析聊天消息或媒体。")
+                        Text("导出完成后，可在 Schema Discovery 中只读分析普通 SQLite 的表、字段、索引、外键和聚合行数；不读取聊天文本或联系人值。")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -342,6 +345,233 @@ private struct DatabaseExportView: View {
     }
 }
 
+private struct SchemaDiscoveryView: View {
+    @State private var exportRoot: URL?
+    @State private var exportRootPath = ""
+    @State private var report: SQLiteSchemaDiscoveryReport?
+    @State private var reportDirectory: URL?
+    @State private var progress: SQLiteSchemaScanProgress?
+    @State private var isWorking = false
+    @State private var status = "Choose the Phase 1 plain SQLite export directory. No key map is needed."
+
+    private var canAnalyze: Bool {
+        exportRoot != nil && !isWorking
+    }
+
+    var body: some View {
+        Form {
+            Section("Schema Discovery") {
+                LabeledContent("Plain SQLite Directory") {
+                    if let exportRoot {
+                        Label(displayRelativePath(exportRoot), systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("Not selected").foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Button("Choose Folder", action: chooseExportRoot)
+                    TextField("Paste absolute export path", text: $exportRootPath)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(useEnteredExportRoot)
+                    Button("Use Path", action: useEnteredExportRoot)
+                }
+                .disabled(isWorking)
+                Text("选择第一阶段生成的普通 SQLite 根目录。分析只以只读方式打开 `*.db`，不需要 all_keys.json 或密钥。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(isWorking ? "Analyzing…" : "Analyze Databases", action: analyze)
+                    .disabled(!canAnalyze)
+                if let progress, isWorking {
+                    Label(
+                        "\(progress.completedDatabaseCount) / \(progress.totalDatabaseCount) databases — \(redactedRelativePath(progress.currentRelativePath))",
+                        systemImage: "cylinder.split.1x2"
+                    )
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                }
+            }
+
+            if let report {
+                Section("Analysis Complete") {
+                    HStack(spacing: 18) {
+                        SummaryValue(label: "Databases", value: report.summary.databaseCount)
+                        SummaryValue(label: "Tables", value: report.summary.tableCount)
+                        SummaryValue(label: "Schema Groups", value: report.schemaGroups.count)
+                        SummaryValue(label: "Rows", value: report.summary.rowCount)
+                    }
+                    HStack(spacing: 18) {
+                        SummaryValue(label: "Messages", value: report.summary.messageDatabases)
+                        SummaryValue(label: "Contacts", value: report.summary.contactDatabases)
+                        SummaryValue(label: "Sessions", value: report.summary.conversationDatabases)
+                        SummaryValue(label: "Media", value: report.summary.mediaDatabases)
+                        SummaryValue(label: "Unknown", value: report.summary.unknownDatabases)
+                    }
+                    if let reportDirectory {
+                        Button("Open Report Folder") {
+                            NSWorkspace.shared.open(reportDirectory)
+                        }
+                    }
+                    Text("Reports contain schema names, declared types, constraints, indexes, foreign keys and aggregate row counts only. They do not include text samples, BLOB data, contact values or keys.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Database List") {
+                    List(report.databases) { database in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(redactedRelativePath(database.relativePath)).textSelection(.enabled)
+                            Text("\(database.classification.displayName) · \(database.rowCount) rows · \(database.tableCount) tables")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(minHeight: 180, maxHeight: 320)
+                    if !report.failures.isEmpty {
+                        Text("\(report.failures.count) database(s) could not be inspected as plain SQLite. Their paths are listed only in the local report.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section("Status") {
+                Text(status).textSelection(.enabled)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .navigationTitle("Schema Discovery")
+    }
+
+    private func chooseExportRoot() {
+        let panel = directoryPanel(message: "选择第一阶段导出的普通 SQLite 根目录")
+        if panel.runModal() == .OK, let url = panel.url {
+            setExportRoot(url)
+        }
+    }
+
+    private func useEnteredExportRoot() {
+        do {
+            try setExportRoot(LocalDatabaseDirectoryPath.resolve(exportRootPath))
+        } catch {
+            status = "路径必须是一个存在的本地绝对目录。"
+        }
+    }
+
+    private func setExportRoot(_ url: URL) {
+        exportRoot = url.standardizedFileURL
+        exportRootPath = exportRoot?.path() ?? ""
+        report = nil
+        reportDirectory = nil
+        progress = nil
+        status = "Plain SQLite directory selected. Click Analyze Databases."
+    }
+
+    private func analyze() {
+        guard let exportRoot else { return }
+        isWorking = true
+        report = nil
+        reportDirectory = nil
+        progress = nil
+        status = "Analyzing database schemas…"
+        var continuation: AsyncStream<SQLiteSchemaScanProgress>.Continuation?
+        let stream = AsyncStream<SQLiteSchemaScanProgress>(bufferingPolicy: .bufferingNewest(1)) {
+            continuation = $0
+        }
+        guard let continuation else {
+            isWorking = false
+            status = "Could not start schema analysis."
+            return
+        }
+        let outputDirectory = exportRoot.appending(path: "SchemaReports")
+        let worker = Task.detached(priority: .userInitiated) {
+            defer { continuation.finish() }
+            return SchemaDiscoveryOperationResult(
+                exportRoot: exportRoot,
+                outputDirectory: outputDirectory,
+                progress: { continuation.yield($0) },
+                shouldCancel: { Task.isCancelled }
+            )
+        }
+        Task { @MainActor in
+            for await update in stream {
+                progress = update
+            }
+        }
+        Task { @MainActor in
+            let result = await worker.value
+            report = result.report
+            reportDirectory = result.reportDirectory
+            progress = nil
+            status = result.status
+            isWorking = false
+        }
+    }
+
+    private func directoryPanel(message: String) -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = message
+        return panel
+    }
+
+    private func displayRelativePath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path()
+        let path = url.path()
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
+    private func redactedRelativePath(_ path: String) -> String {
+        path
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map { component in
+                let value = String(component)
+                let lower = value.lowercased()
+                return lower.hasPrefix("wxid_") || lower.hasPrefix("wxid-") ? "<redacted>" : value
+            }
+            .joined(separator: "/")
+    }
+}
+
+private struct SchemaDiscoveryOperationResult: Sendable {
+    let report: SQLiteSchemaDiscoveryReport?
+    let reportDirectory: URL?
+    let status: String
+
+    init(
+        exportRoot: URL,
+        outputDirectory: URL,
+        progress: @escaping @Sendable (SQLiteSchemaScanProgress) -> Void,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) {
+        do {
+            let report = try SQLiteSchemaScanner().scan(
+                exportRoot: exportRoot,
+                progress: progress,
+                shouldCancel: shouldCancel
+            )
+            let locations = try SQLiteSchemaReportWriter().write(report, to: outputDirectory)
+            self.report = report
+            reportDirectory = locations.directoryURL
+            status = "Analysis complete. \(report.summary.databaseCount) databases, \(report.summary.tableCount) tables, \(report.schemaGroups.count) schema groups."
+        } catch is CancellationError {
+            report = nil
+            reportDirectory = nil
+            status = "Schema analysis cancelled."
+        } catch {
+            report = nil
+            reportDirectory = nil
+            status = "Schema analysis could not complete. Verify that the selected folder contains plain SQLite databases."
+        }
+    }
+}
+
 private struct BatchOperationResult: Sendable {
     let databases: [ScannedWeChatDatabase]?
     let failureMessage: String?
@@ -371,11 +601,21 @@ private struct BatchOperationResult: Sendable {
 
 private struct SummaryValue: View {
     let label: String
-    let value: Int
+    let value: String
+
+    init(label: String, value: Int) {
+        self.label = label
+        self.value = "\(value)"
+    }
+
+    init(label: String, value: Int64) {
+        self.label = label
+        self.value = "\(value)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(value)").font(.headline.monospacedDigit())
+            Text(value).font(.headline.monospacedDigit())
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
     }

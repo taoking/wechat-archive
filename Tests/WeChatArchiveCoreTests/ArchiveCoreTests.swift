@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SQLite3
 import XCTest
 @testable import WeChatArchiveCore
 
@@ -500,6 +501,161 @@ final class ArchiveCoreTests: XCTestCase {
         try expectTrue(session.canScan)
     }
 
+    func testSQLiteSchemaScannerCollectsMetadataIndexesForeignKeysAndRowCountsReadOnly() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE conversation (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL
+            );
+            CREATE TABLE message (
+                local_id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                create_time INTEGER,
+                sender TEXT NOT NULL,
+                payload BLOB DEFAULT X'00',
+                FOREIGN KEY(conversation_id) REFERENCES conversation(id)
+            );
+            CREATE INDEX message_sender_index ON message(sender);
+            INSERT INTO conversation(title) VALUES ('synthetic fixture');
+            INSERT INTO message(conversation_id, create_time, sender, payload) VALUES (1, 1, 'fixture', X'01');
+            INSERT INTO message(conversation_id, create_time, sender, payload) VALUES (1, 2, 'fixture', X'02');
+            """)
+        let hashBefore = try sha256Hex(of: databaseURL)
+
+        let report = try SQLiteSchemaScanner().scan(exportRoot: exportRoot)
+
+        try expectEqual(report.databases.count, 1)
+        let database = try unwrap(report.databases.first)
+        try expectEqual(database.relativePath, "message/message_0.db")
+        try expectTrue(database.fileSize > 0)
+        try expectTrue(!database.sqliteVersion.isEmpty)
+        try expectTrue(database.pageCount > 0)
+        try expectTrue(database.pageSize > 0)
+        try expectEqual(database.tableCount, 2)
+        try expectEqual(database.indexCount, 1)
+        try expectEqual(database.viewCount, 0)
+        try expectEqual(database.triggerCount, 0)
+        try expectEqual(database.classification.category, .message)
+        try expectEqual(database.classification.certainty, .detected)
+
+        let message = try unwrap(database.tables.first(where: { $0.name == "message" }))
+        try expectEqual(message.rowCount, 2)
+        let localID = try unwrap(message.columns.first(where: { $0.name == "local_id" }))
+        try expectEqual(localID.declaredType, "INTEGER")
+        try expectTrue(localID.isPrimaryKey)
+        try expectFalse(localID.isNullable)
+        let payload = try unwrap(message.columns.first(where: { $0.name == "payload" }))
+        try expectTrue(payload.hasDefaultValue)
+        try expectEqual(message.indexes.first?.name, "message_sender_index")
+        try expectEqual(message.indexes.first?.columns, ["sender"])
+        try expectEqual(message.foreignKeys.first?.referencedTable, "conversation")
+        try expectEqual(message.foreignKeys.first?.columns, ["conversation_id"])
+        try expectEqual(message.foreignKeys.first?.referencedColumns, ["id"])
+        try expectEqual(try sha256Hex(of: databaseURL), hashBefore)
+    }
+
+    func testSQLiteSchemaScannerRecognizesVirtualAndFTSShadowTablesAndGroupsIdenticalSchemas() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let first = exportRoot.appending(path: "message/message_0.db")
+        let second = exportRoot.appending(path: "message/message_1.db")
+        try FileManager.default.createDirectory(at: first.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let schema = """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, create_time INTEGER, sender TEXT, payload BLOB);
+            CREATE VIRTUAL TABLE message_search USING fts5(content);
+            """
+        try createPlainSQLiteDatabase(at: first, sql: schema + "INSERT INTO message(create_time, sender, payload) VALUES (1, 'fixture', X'01');")
+        try createPlainSQLiteDatabase(at: second, sql: schema + "INSERT INTO message(create_time, sender, payload) VALUES (2, 'fixture', X'02');")
+
+        let report = try SQLiteSchemaScanner().scan(exportRoot: exportRoot)
+        let database = try unwrap(report.databases.first(where: { $0.relativePath == "message/message_0.db" }))
+        let virtualTable = try unwrap(database.tables.first(where: { $0.name == "message_search" }))
+        try expectTrue(virtualTable.isVirtual)
+        try expectTrue(database.tables.contains(where: { $0.isFTSShadowTable }))
+        try expectTrue(database.tables.filter(\.isFTSShadowTable).allSatisfy { $0.rowCount == nil })
+        try expectEqual(report.schemaGroups.count, 1)
+        try expectEqual(report.schemaGroups.first?.relativePaths, ["message/message_0.db", "message/message_1.db"])
+    }
+
+    func testSQLiteSchemaScannerSafelyQuotesSchemaProvidedIdentifiers() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "misc/quoted.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE "odd""table" (id INTEGER PRIMARY KEY, value TEXT);
+            INSERT INTO "odd""table"(value) VALUES ('synthetic fixture');
+            """)
+
+        let report = try SQLiteSchemaScanner().scan(exportRoot: exportRoot)
+        let table = try unwrap(report.databases.first?.tables.first(where: { $0.name == "odd\"table" }))
+
+        try expectEqual(table.rowCount, 1)
+        try expectEqual(table.columns.map(\.name), ["id", "value"])
+    }
+
+    func testSQLiteSchemaClassifierUsesSchemaSignalsInsteadOfPathAlone() throws {
+        let messageTable = SQLiteTableInfo(
+            name: "records",
+            rowCount: 3,
+            columns: [
+                .init(name: "local_id", declaredType: "INTEGER", isNullable: false, primaryKeyPosition: 1, hasDefaultValue: false),
+                .init(name: "create_time", declaredType: "INTEGER", isNullable: false, primaryKeyPosition: 0, hasDefaultValue: false),
+                .init(name: "sender", declaredType: "TEXT", isNullable: false, primaryKeyPosition: 0, hasDefaultValue: false),
+                .init(name: "payload", declaredType: "BLOB", isNullable: true, primaryKeyPosition: 0, hasDefaultValue: false)
+            ],
+            indexes: [],
+            foreignKeys: [],
+            isVirtual: false,
+            isFTSShadowTable: false
+        )
+
+        let pathOnly = WeChatDatabaseClassifier().classify(relativePath: "message/opaque.db", tables: [])
+        let schemaBacked = WeChatDatabaseClassifier().classify(relativePath: "misc/opaque.db", tables: [messageTable])
+
+        try expectEqual(pathOnly.category, .message)
+        try expectEqual(pathOnly.certainty, .likely)
+        try expectEqual(schemaBacked.category, .message)
+        try expectEqual(schemaBacked.certainty, .detected)
+        try expectTrue(schemaBacked.confidence > pathOnly.confidence)
+    }
+
+    func testSchemaReportWriterCreatesPrivateReportsWithoutAbsolutePathsOrValues() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "contact/contact.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE contact (id INTEGER PRIMARY KEY, username TEXT, nickname TEXT, avatar BLOB);
+            INSERT INTO contact(username, nickname, avatar) VALUES ('private-wxid', 'private-name', X'01');
+            """)
+        let report = try SQLiteSchemaScanner().scan(exportRoot: exportRoot)
+        let reportDirectory = directory.appending(path: "SchemaReports")
+
+        let locations = try SQLiteSchemaReportWriter().write(report, to: reportDirectory)
+        let markdown = try String(contentsOf: locations.summaryMarkdownURL, encoding: .utf8)
+        let json = try String(contentsOf: locations.summaryJSONURL, encoding: .utf8)
+
+        try expectTrue(FileManager.default.fileExists(atPath: locations.databaseReportURLs.first?.path() ?? ""))
+        try expectEqual(try permissionBits(at: reportDirectory), 0o700)
+        try expectEqual(try permissionBits(at: locations.summaryMarkdownURL), 0o600)
+        try expectEqual(try permissionBits(at: locations.summaryJSONURL), 0o600)
+        try expectFalse(markdown.contains(directory.path()))
+        try expectFalse(json.contains(directory.path()))
+        try expectFalse(markdown.contains("private-wxid"))
+        try expectFalse(markdown.contains("private-name"))
+        try expectFalse(json.contains("private-wxid"))
+        try expectFalse(json.contains("private-name"))
+    }
+
     func testDatabaseScannerAndBatchExporterMatchRelativePathsExportPlainSQLiteAndPreserveSource() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -664,6 +820,19 @@ final class ArchiveCoreTests: XCTestCase {
         try runSQLCipher(databaseURL: url, script: script)
     }
 
+    private func createPlainSQLiteDatabase(at url: URL, sql: String) throws {
+        var database: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(url.path(), &database, flags, nil) == SQLITE_OK, let database else {
+            if let database { sqlite3_close(database) }
+            throw TestFailure(description: "Could not create synthetic SQLite fixture")
+        }
+        defer { sqlite3_close(database) }
+        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+            throw TestFailure(description: "Could not populate synthetic SQLite fixture")
+        }
+    }
+
     private func runSQLCipher(databaseURL: URL, script: String) throws {
         guard let executable = sqlcipherExecutableURL() else {
             throw TestFailure(description: "SQLCipher runtime is not installed")
@@ -733,6 +902,11 @@ private func expectTrue(_ value: Bool, file: StaticString = #filePath, line: UIn
 
 private func expectFalse(_ value: Bool, file: StaticString = #filePath, line: UInt = #line) throws {
     guard !value else { throw TestFailure(description: "Expected false at \(file):\(line)") }
+}
+
+private func unwrap<T>(_ value: T?, file: StaticString = #filePath, line: UInt = #line) throws -> T {
+    guard let value else { throw TestFailure(description: "Expected non-nil value at \(file):\(line)") }
+    return value
 }
 
 private func expectThrows<T: Error & Equatable>(_ expected: T, _ work: () throws -> Void) throws {
