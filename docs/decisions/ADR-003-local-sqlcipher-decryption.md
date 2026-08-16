@@ -10,7 +10,7 @@ The archive needs to process a user’s own encrypted local database without upl
 
 ## Decision
 
-Use a locally installed SQLCipher dylib through a narrow dynamic C API. Validate a `64`-hex-character raw key with SQLCipher’s documented `x'…'` representation, without logging or exposing it. Validate only a read-only consistent snapshot. For export, make a second encrypted snapshot inside a `0700` working directory, open only that snapshot read-write, and create a new `0600` plaintext output using `sqlcipher_export`.
+Use a locally installed SQLCipher dylib through a narrow dynamic C API. Validate a `64`-hex-character raw key with SQLCipher’s documented `x'…'` representation, without logging or exposing it. Validate only a read-only protected file snapshot. The snapshotter copies the database with canonical `-wal` / `-shm` sidecars into a new `0700` directory, sets copied files to `0600`, and rejects changes detected before versus after copying. For export, make a second encrypted snapshot inside a `0700` working directory, open only that snapshot read-write, and create a new `0600` plaintext output using `sqlcipher_export`.
 
 ## Alternatives considered
 
@@ -20,4 +20,4 @@ Use a locally installed SQLCipher dylib through a narrow dynamic C API. Validate
 
 ## Consequences
 
-Users install SQLCipher with Homebrew or package it through a controlled release pipeline. The source database is never written. The app must remove temporary plaintext output after parsing unless the user explicitly opts to retain it. Adapter detection remains independent of decryption and rejects unknown WeChat schemas.
+Users install SQLCipher with Homebrew or package it through a controlled release pipeline. The source database is never written. The app must remove temporary plaintext output and `-wal` / `-shm` / `-journal` sidecars after parsing unless the user explicitly opts to retain it. Attribute checks are not a transaction-consistency guarantee, so users must fully quit WeChat before validating or importing a real database. Adapter detection remains independent of decryption and rejects unknown WeChat schemas.

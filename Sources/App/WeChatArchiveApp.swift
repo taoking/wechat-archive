@@ -111,7 +111,8 @@ private struct StatisticCard: View {
 private struct ImportView: View {
     @State private var databaseURL: URL?
     @State private var databaseKey = ""
-    @State private var doNotPersist = true
+    @State private var clearKeyAfterValidation = true
+    @State private var isValidating = false
     @State private var status = "选择用户本人有权访问的本地数据库或导入文件。"
 
     var body: some View {
@@ -124,13 +125,17 @@ private struct ImportView: View {
                     Button("Choose Database", action: chooseDatabase)
                     if databaseURL != nil { Button("Clear", role: .destructive) { databaseURL = nil } }
                 }
-                SecureField("Database Key", text: $databaseKey)
+                SecureField("Database Key（64 hexadecimal characters）", text: $databaseKey)
                     .textContentType(.password)
-                Toggle("Do not persist key", isOn: $doNotPersist)
-                Text("默认开启。密钥仅用于当前验证/导入任务，绝不会写入归档、日志或网络。")
+                    .disabled(isValidating)
+                Toggle("验证后清除密钥", isOn: $clearKeyAfterValidation)
+                    .disabled(isValidating)
+                Text("默认开启。密钥只保留在当前输入状态中，不会写入文件、日志或归档。")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("Validate Key", action: validateKey)
-                    .disabled(databaseURL == nil || databaseKey.isEmpty)
+                Text("为避免遗漏尚未 checkpoint 的 WAL 数据，请完全退出微信后再验证或导入。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button(isValidating ? "Validating…" : "Validate Key", action: validateKey)
+                    .disabled(databaseURL == nil || databaseKey.isEmpty || isValidating)
             }
             Section("Archive / Export File") {
                 Text("JSON、NDJSON 与 CSV 读取器在 Core 中独立于微信数据库适配器实现。")
@@ -150,7 +155,7 @@ private struct ImportView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.message = "选择您本人有权访问的微信本地数据库"
-        if panel.runModal() == .OK { databaseURL = panel.url; status = "数据库已选择；将以只读快照方式处理。" }
+        if panel.runModal() == .OK { databaseURL = panel.url; status = "数据库已选择；请完全退出微信后再验证密钥。" }
     }
 
     private func chooseImportFiles() {
@@ -162,18 +167,41 @@ private struct ImportView: View {
     }
 
     private func validateKey() {
-        guard let databaseURL else { return }
-        do {
-            let key = try WeChatDatabaseKey(hex: databaseKey)
-            let decryptor = try SQLCipherDatabaseDecryptor()
-            try decryptor.validate(databaseURL: databaseURL, key: key)
-            status = "✓ Database key valid。已通过只读快照验证；密钥未被保存。"
-        } catch let error as ArchiveError {
-            status = error.localizedDescription
-        } catch {
-            status = ArchiveError.databaseDecryptionFailed.localizedDescription
+        guard let databaseURL, !isValidating else { return }
+        let enteredKey = databaseKey
+        let shouldClearKey = clearKeyAfterValidation
+        isValidating = true
+        status = "Validating…"
+
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) { () -> String in
+                do {
+                    guard enteredKey.trimmingCharacters(in: .whitespacesAndNewlines).count == 64 else {
+                        return "Expected a 64-character hexadecimal key."
+                    }
+                    let key = try WeChatDatabaseKey(hex: enteredKey)
+                    let decryptor = try SQLCipherDatabaseDecryptor()
+                    try decryptor.validate(databaseURL: databaseURL, key: key)
+                    return "✓ Database key valid. 已通过受保护的本地文件快照验证。"
+                } catch let error as ArchiveError {
+                    switch error {
+                    case .keyInvalid:
+                        return "Expected a 64-character hexadecimal key."
+                    case .decryptionRuntimeUnavailable:
+                        return "SQLCipher runtime unavailable. Install with: brew bundle"
+                    case .databaseInUse:
+                        return "Database is in use. Please quit WeChat and try again."
+                    default:
+                        return error.localizedDescription
+                    }
+                } catch {
+                    return ArchiveError.databaseDecryptionFailed.localizedDescription
+                }
+            }.value
+            status = result
+            isValidating = false
+            if shouldClearKey { databaseKey = "" }
         }
-        if doNotPersist { databaseKey = "" }
     }
 }
 

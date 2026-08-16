@@ -132,10 +132,10 @@ public struct UnavailableSQLCipherDecryptor: WeChatDatabaseDecryptor {
     public init() {}
 
     public func validate(databaseURL: URL, key: WeChatDatabaseKey) throws {
-        throw ArchiveError.databaseDecryptionFailed
+        throw ArchiveError.decryptionRuntimeUnavailable
     }
 
     public func decrypt(databaseURL: URL, key: WeChatDatabaseKey, into workingDirectory: URL) throws -> URL {
-        throw ArchiveError.databaseDecryptionFailed
+        throw ArchiveError.decryptionRuntimeUnavailable
     }
 }

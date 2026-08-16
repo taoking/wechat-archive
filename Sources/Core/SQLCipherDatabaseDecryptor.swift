@@ -59,13 +59,27 @@ public struct SQLCipherConfiguration: Sendable, Equatable {
 /// literal is applied in-process, and only a protected plaintext copy is written.
 public struct SQLCipherDatabaseDecryptor: WeChatDatabaseDecryptor, @unchecked Sendable {
     private let api: SQLCipherAPI
+    private let plaintextHeaderValidator: @Sendable (URL) throws -> Void
     public let configuration: SQLCipherConfiguration
 
     /// Finds a locally installed SQLCipher runtime. Supply `libraryURL` only for
     /// an explicitly bundled/managed SQLCipher dylib; it is never fetched.
     public init(configuration: SQLCipherConfiguration = .init(), libraryURL: URL? = nil) throws {
+        try self.init(
+            configuration: configuration,
+            libraryURL: libraryURL,
+            plaintextHeaderValidator: { url in try Self.validatePlaintextHeader(at: url) }
+        )
+    }
+
+    init(
+        configuration: SQLCipherConfiguration = .init(),
+        libraryURL: URL? = nil,
+        plaintextHeaderValidator: @escaping @Sendable (URL) throws -> Void
+    ) throws {
         api = try SQLCipherAPI(libraryURL: libraryURL)
         self.configuration = configuration
+        self.plaintextHeaderValidator = plaintextHeaderValidator
     }
 
     public func validate(databaseURL: URL, key: WeChatDatabaseKey) throws {
@@ -99,10 +113,9 @@ public struct SQLCipherDatabaseDecryptor: WeChatDatabaseDecryptor, @unchecked Se
         let manager = FileManager.default
         do {
             let snapshot = try DatabaseSnapshotter().snapshot(databaseURL: databaseURL, into: snapshotDirectory)
-            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: snapshotDirectory.path())
             try exportSnapshot(snapshot, key: key, to: destination)
-            try validatePlaintextHeader(at: destination)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path())
+            try plaintextHeaderValidator(destination)
+            try restrictSQLiteArtifacts(at: destination, using: manager)
             try manager.removeItem(at: snapshotDirectory)
             return destination
         } catch {
@@ -149,19 +162,28 @@ public struct SQLCipherDatabaseDecryptor: WeChatDatabaseDecryptor, @unchecked Se
             try manager.createDirectory(at: workingDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: workingDirectory.path())
-        return workingDirectory.appending(path: "decrypted-\(UUID().uuidString).sqlite")
+        let destination = workingDirectory.appending(path: "decrypted-\(UUID().uuidString).sqlite")
+        guard destination.deletingLastPathComponent().standardizedFileURL == workingDirectory.standardizedFileURL else {
+            throw ArchiveError.invalidInput
+        }
+        return destination
     }
 
-    private func validatePlaintextHeader(at url: URL) throws {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+    private static func validatePlaintextHeader(at url: URL) throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 16) ?? Data()
         guard data.starts(with: Data("SQLite format 3\0".utf8)) else { throw ArchiveError.databaseDecryptionFailed }
     }
 
-    private func removeExportArtifacts(at destination: URL) {
-        let manager = FileManager.default
-        for url in [destination, destination.appendingPathExtension("wal"), destination.appendingPathExtension("shm")] {
-            try? manager.removeItem(at: url)
+    private func restrictSQLiteArtifacts(at databaseURL: URL, using manager: FileManager) throws {
+        for artifact in SQLiteSidecar.allArtifacts(for: databaseURL) where manager.fileExists(atPath: artifact.path()) {
+            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: artifact.path())
         }
+    }
+
+    private func removeExportArtifacts(at destination: URL) {
+        removeSQLiteArtifacts(for: destination)
     }
 }
 

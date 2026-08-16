@@ -7,6 +7,8 @@
 - Full Xcode is required to compile/run the SwiftUI app and XCTest. Command Line Tools alone can compile Core but omit SwiftUI macro plugins and XCTest.
 - SQLCipher 4.17+ for encrypted database import: `brew bundle` (recommended) or `brew install sqlcipher`.
 
+The runtime loader reports a missing SQLCipher dylib distinctly. It does not yet enforce a loaded-library version check; maintain the SQLCipher 4.17+ requirement until that follow-up is implemented.
+
 ## Layout
 
 ```text
@@ -24,11 +26,13 @@ The core tests are intentionally synthetic: no real WeChat record, image, key or
 swift test
 ```
 
-The suite covers model serialization, NDJSON partitioning, SHA-256 media deduplication, incremental import, SQLite FTS filtering, offline export escaping, archive verification, and SQLCipher correct-key/wrong-key/plaintext-export behavior. Add tests before every behavior change.
+The suite covers model serialization, NDJSON partitioning, SHA-256 media deduplication, incremental import, SQLite FTS filtering, offline export escaping, archive verification, SQLCipher correct-key/wrong-key/plaintext-export behavior, `-wal` / `-shm` snapshot copying, mutation rejection, protected permissions and plaintext-sidecar cleanup. Add tests before every behavior change.
 
 ## Local app build
 
 Open the package in a full Xcode installation and select the `WeChatArchive` executable product. The package is intentionally dependency-light. No network package should be added without a threat-model and license review.
+
+For end-user setup, safe key validation and runtime troubleshooting, see [USAGE.md](USAGE.md).
 
 ## Coding rules
 

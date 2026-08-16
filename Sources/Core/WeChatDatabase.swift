@@ -50,37 +50,104 @@ public struct WeChatDatabaseDetector: Sendable {
     }
 }
 
-/// Creates a copy in a caller-controlled working directory and includes SQLite
-/// WAL/SHM sidecars. The before/after attributes guard against silently taking
-/// an inconsistent copy while WeChat is still writing.
+/// Canonical SQLite companion-file names. SQLite appends these suffixes to the
+/// database filename; they are not filename extensions.
+enum SQLiteSidecar {
+    static func wal(for databaseURL: URL) -> URL {
+        URL(fileURLWithPath: databaseURL.path() + "-wal")
+    }
+
+    static func shm(for databaseURL: URL) -> URL {
+        URL(fileURLWithPath: databaseURL.path() + "-shm")
+    }
+
+    static func journal(for databaseURL: URL) -> URL {
+        URL(fileURLWithPath: databaseURL.path() + "-journal")
+    }
+
+    static func snapshotFiles(for databaseURL: URL) -> [URL] {
+        [databaseURL, wal(for: databaseURL), shm(for: databaseURL)]
+    }
+
+    static func allArtifacts(for databaseURL: URL) -> [URL] {
+        [databaseURL, wal(for: databaseURL), shm(for: databaseURL), journal(for: databaseURL)]
+    }
+}
+
+/// Removes a database and every SQLite sidecar that could contain matching data.
+/// Call this only for files created in an application-owned working directory,
+/// never for the user-selected source database.
+func removeSQLiteArtifacts(for databaseURL: URL, using manager: FileManager = .default) {
+    for artifact in SQLiteSidecar.allArtifacts(for: databaseURL) {
+        try? manager.removeItem(at: artifact)
+    }
+}
+
+/// Creates a protected, best-effort stable file snapshot in a new
+/// caller-controlled working directory. It copies the database plus WAL/SHM
+/// sidecars and compares the source set and attributes before and after
+/// copying. This detects changes but is not a transaction-consistent SQLite
+/// backup, so callers must ask users to quit WeChat before archival import.
 public struct DatabaseSnapshotter: Sendable {
-    public init() {}
+    private let copyFile: @Sendable (URL, URL) throws -> Void
+
+    public init() {
+        copyFile = { source, destination in
+            try FileManager.default.copyItem(at: source, to: destination)
+        }
+    }
+
+    init(copyFile: @escaping @Sendable (URL, URL) throws -> Void) {
+        self.copyFile = copyFile
+    }
 
     public func snapshot(databaseURL: URL, into workingDirectory: URL) throws -> URL {
         let manager = FileManager.default
-        guard manager.fileExists(atPath: databaseURL.path()) else { throw ArchiveError.invalidInput }
-        let sourceFiles = [databaseURL, databaseURL.appendingPathExtension("wal"), databaseURL.appendingPathExtension("shm")]
-            .filter { manager.fileExists(atPath: $0.path()) }
+        let sourceValues = try databaseURL.resourceValues(forKeys: [.isRegularFileKey])
+        guard sourceValues.isRegularFile == true else { throw ArchiveError.invalidInput }
+        guard !manager.fileExists(atPath: workingDirectory.path()) else { throw ArchiveError.invalidInput }
+
+        let sourceFiles = existingSnapshotFiles(for: databaseURL, using: manager)
         let before = try attributes(for: sourceFiles)
-        try manager.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
-        for source in sourceFiles {
-            let destination = workingDirectory.appending(path: source.lastPathComponent)
-            if manager.fileExists(atPath: destination.path()) { try manager.removeItem(at: destination) }
-            try manager.copyItem(at: source, to: destination)
-        }
-        let after = try attributes(for: sourceFiles)
-        guard before == after else {
+        do {
+            try manager.createDirectory(
+                at: workingDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: workingDirectory.path())
+            for source in sourceFiles {
+                let destination = workingDirectory.appending(path: source.lastPathComponent)
+                try copyFile(source, destination)
+                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path())
+            }
+
+            let afterFiles = existingSnapshotFiles(for: databaseURL, using: manager)
+            let after = try attributes(for: afterFiles)
+            guard sourceFiles == afterFiles, before == after else {
+                throw ArchiveError.databaseInUse
+            }
+            return workingDirectory.appending(path: databaseURL.lastPathComponent)
+        } catch {
             try? manager.removeItem(at: workingDirectory)
-            throw ArchiveError.databaseInUse
+            if let archiveError = error as? ArchiveError { throw archiveError }
+            throw ArchiveError.ioFailure
         }
-        return workingDirectory.appending(path: databaseURL.lastPathComponent)
+    }
+
+    private func existingSnapshotFiles(for databaseURL: URL, using manager: FileManager) -> [URL] {
+        SQLiteSidecar.snapshotFiles(for: databaseURL)
+            .filter { manager.fileExists(atPath: $0.path()) }
     }
 
     private func attributes(for urls: [URL]) throws -> [String: DatabaseFileAttributes] {
         try Dictionary(uniqueKeysWithValues: urls.map { url in
-            let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-            guard let size = values.fileSize, let modified = values.contentModificationDate else { throw ArchiveError.ioFailure }
-            return (url.path(), DatabaseFileAttributes(size: size, modified: modified))
+            let values = try FileManager.default.attributesOfItem(atPath: url.path())
+            guard let size = values[.size] as? NSNumber,
+                  let modified = values[.modificationDate] as? Date else {
+                throw ArchiveError.ioFailure
+            }
+            return (url.path(), DatabaseFileAttributes(size: size.intValue, modified: modified))
         })
     }
 }

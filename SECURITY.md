@@ -12,14 +12,16 @@ Assets include private messages, media, local database files and database keys. 
 - HTML export escapes text and attributes; it does not inject message content into raw markup.
 - Verification reports paths and failure classes, not message bodies, keys or full source paths.
 - Key providers are explicit and local. `ManualKeyProvider` consumes its in-memory value after retrieval.
-- Snapshotting includes SQLite WAL/SHM and fails if attributes change while copying.
+- Snapshotting uses SQLite's canonical `database-wal` / `database-shm` names, creates its own `0700` directory, marks copied files `0600`, and fails if the source file set, size or modification time changes while copying.
 - `.gitignore` excludes databases, keys, archives, media, decrypted files and local environment files.
 
 ## Key limitations
 
 Swift `Data` is not a guaranteed secure-memory primitive. Providers minimize lifetime and copies; the raw-key literal is generated only in-process for SQLCipher and is never passed to a subprocess, file, log, crash report or diagnostics. Do not log keys or pass them to diagnostics.
 
-`SQLCipherDatabaseDecryptor` dynamically loads a locally installed SQLCipher runtime, validates a source snapshot read-only, then creates an encrypted snapshot in a `0700` work directory for export. The temporary plaintext output is `0600`; source files are not opened for writing. End-to-end tests use random key material and a generated synthetic database only. Never add a shell-out path that places a key in arguments or writes it to disk.
+`SQLCipherDatabaseDecryptor` dynamically loads a locally installed SQLCipher runtime, validates a source snapshot read-only, then creates an encrypted snapshot in a `0700` work directory for export. The temporary plaintext database and any SQLite sidecars are `0600`; a failed export, detach or validation removes `database`, `database-wal`, `database-shm` and `database-journal`. Source files are not opened for writing and are never passed to cleanup. End-to-end tests use random key material and a generated synthetic database only. Never add a shell-out path that places a key in arguments or writes it to disk.
+
+File copying plus before/after attribute checks can detect a changing source but cannot prove a transaction-consistent SQLite snapshot. Users must completely quit WeChat before validating or importing a real database.
 
 ## Secure development requirements
 

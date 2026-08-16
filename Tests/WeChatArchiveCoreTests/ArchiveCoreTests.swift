@@ -213,6 +213,190 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testDatabaseSnapshotterCopiesOnlyDatabaseWhenNoSidecarsExist() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appending(path: "messages.db")
+        let snapshotDirectory = directory.appending(path: "snapshot")
+        try Data("database".utf8).write(to: database)
+
+        let snapshot = try DatabaseSnapshotter().snapshot(databaseURL: database, into: snapshotDirectory)
+
+        try expectTrue(FileManager.default.fileExists(atPath: snapshot.path()))
+        try expectFalse(FileManager.default.fileExists(atPath: URL(fileURLWithPath: database.path() + "-wal").path()))
+        try expectFalse(FileManager.default.fileExists(atPath: URL(fileURLWithPath: database.path() + "-shm").path()))
+    }
+
+    func testDatabaseSnapshotterCopiesDashNamedSQLiteSidecarsAndIgnoresDotExtensionLookalikes() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appending(path: "messages.db")
+        let wal = URL(fileURLWithPath: database.path() + "-wal")
+        let shm = URL(fileURLWithPath: database.path() + "-shm")
+        let incorrectWAL = database.appendingPathExtension("wal")
+        let incorrectSHM = database.appendingPathExtension("shm")
+        let snapshotDirectory = directory.appending(path: "snapshot")
+        try Data("database".utf8).write(to: database)
+        try Data("wal".utf8).write(to: wal)
+        try Data("shm".utf8).write(to: shm)
+        try Data("incorrect wal".utf8).write(to: incorrectWAL)
+        try Data("incorrect shm".utf8).write(to: incorrectSHM)
+        let databaseHash = try sha256Hex(of: database)
+        let walHash = try sha256Hex(of: wal)
+        let shmHash = try sha256Hex(of: shm)
+
+        _ = try DatabaseSnapshotter().snapshot(databaseURL: database, into: snapshotDirectory)
+
+        try expectTrue(FileManager.default.fileExists(atPath: snapshotDirectory.appendingPathComponent("messages.db").path()))
+        try expectTrue(FileManager.default.fileExists(atPath: snapshotDirectory.appendingPathComponent("messages.db-wal").path()))
+        try expectTrue(FileManager.default.fileExists(atPath: snapshotDirectory.appendingPathComponent("messages.db-shm").path()))
+        try expectFalse(FileManager.default.fileExists(atPath: snapshotDirectory.appendingPathComponent("messages.db.wal").path()))
+        try expectFalse(FileManager.default.fileExists(atPath: snapshotDirectory.appendingPathComponent("messages.db.shm").path()))
+        try expectEqual(try sha256Hex(of: database), databaseHash)
+        try expectEqual(try sha256Hex(of: wal), walHash)
+        try expectEqual(try sha256Hex(of: shm), shmHash)
+    }
+
+    func testDatabaseSnapshotterRejectsSourceMutationAndRemovesOnlyItsWorkingDirectory() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appending(path: "messages.db")
+        let wal = URL(fileURLWithPath: database.path() + "-wal")
+        let snapshotDirectory = directory.appending(path: "snapshot")
+        try Data("database".utf8).write(to: database)
+        try Data("wal".utf8).write(to: wal)
+
+        let snapshotter = DatabaseSnapshotter(copyFile: { source, destination in
+            try FileManager.default.copyItem(at: source, to: destination)
+            if source == database {
+                let handle = try FileHandle(forWritingTo: database)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                handle.write(Data("!".utf8))
+            }
+        })
+
+        try expectThrows(ArchiveError.databaseInUse) {
+            _ = try snapshotter.snapshot(databaseURL: database, into: snapshotDirectory)
+        }
+        try expectFalse(FileManager.default.fileExists(atPath: snapshotDirectory.path()))
+        try expectTrue(FileManager.default.fileExists(atPath: database.path()))
+        try expectTrue(FileManager.default.fileExists(atPath: wal.path()))
+    }
+
+    func testDatabaseSnapshotterSetsProtectedDirectoryAndFilePermissions() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appending(path: "messages.db")
+        let wal = URL(fileURLWithPath: database.path() + "-wal")
+        let snapshotDirectory = directory.appending(path: "snapshot")
+        try Data("database".utf8).write(to: database)
+        try Data("wal".utf8).write(to: wal)
+
+        _ = try DatabaseSnapshotter().snapshot(databaseURL: database, into: snapshotDirectory)
+
+        try expectEqual(try permissionBits(at: snapshotDirectory), 0o700)
+        try expectEqual(try permissionBits(at: snapshotDirectory.appendingPathComponent("messages.db")), 0o600)
+        try expectEqual(try permissionBits(at: snapshotDirectory.appendingPathComponent("messages.db-wal")), 0o600)
+    }
+
+    func testRemoveSQLiteArtifactsRemovesDatabaseAndAllSQLiteSidecars() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plaintext = directory.appending(path: "plaintext.sqlite")
+        let artifacts = [
+            plaintext,
+            URL(fileURLWithPath: plaintext.path() + "-wal"),
+            URL(fileURLWithPath: plaintext.path() + "-shm"),
+            URL(fileURLWithPath: plaintext.path() + "-journal")
+        ]
+        for artifact in artifacts {
+            try Data("sensitive plaintext".utf8).write(to: artifact)
+        }
+
+        removeSQLiteArtifacts(for: plaintext)
+
+        for artifact in artifacts {
+            try expectFalse(FileManager.default.fileExists(atPath: artifact.path()))
+        }
+    }
+
+    func testSQLCipherDecryptorRemovesPlaintextArtifactsWhenPostExportVerificationFails() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        let keyHex = randomKeyHex()
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: keyHex)
+        let recorder = PlaintextDestinationRecorder()
+        let decryptor = try SQLCipherDatabaseDecryptor(plaintextHeaderValidator: { destination in
+            recorder.destination = destination
+            for artifact in [
+                URL(fileURLWithPath: destination.path() + "-wal"),
+                URL(fileURLWithPath: destination.path() + "-shm"),
+                URL(fileURLWithPath: destination.path() + "-journal")
+            ] {
+                try Data("sensitive plaintext".utf8).write(to: artifact)
+            }
+            throw TestFailure(description: "force cleanup after export")
+        })
+
+        try expectThrows(ArchiveError.databaseDecryptionFailed) {
+            _ = try decryptor.decrypt(
+                databaseURL: encryptedDatabase,
+                key: try WeChatDatabaseKey(hex: keyHex),
+                into: directory.appending(path: "working")
+            )
+        }
+        guard let destination = recorder.destination else {
+            throw TestFailure(description: "The test must reach plaintext verification")
+        }
+        for artifact in [
+            destination,
+            URL(fileURLWithPath: destination.path() + "-wal"),
+            URL(fileURLWithPath: destination.path() + "-shm"),
+            URL(fileURLWithPath: destination.path() + "-journal")
+        ] {
+            try expectFalse(FileManager.default.fileExists(atPath: artifact.path()))
+        }
+    }
+
+    func testSQLCipherConfigurationRejectsOutOfRangeValues() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encryptedDatabase = directory.appending(path: "synthetic-encrypted.db")
+        let keyHex = randomKeyHex()
+        try makeEncryptedTestDatabase(at: encryptedDatabase, keyHex: keyHex)
+        let key = try WeChatDatabaseKey(hex: keyHex)
+        let invalidConfigurations: [SQLCipherConfiguration] = [
+            .init(pageSize: 256),
+            .init(pageSize: 131_072),
+            .init(kdfIterations: 999),
+            .init(kdfIterations: 10_000_001)
+        ]
+
+        for configuration in invalidConfigurations {
+            try expectThrows(ArchiveError.invalidInput) {
+                try SQLCipherDatabaseDecryptor(configuration: configuration).validate(databaseURL: encryptedDatabase, key: key)
+            }
+        }
+    }
+
+    func testSQLCipherDecryptorReportsUnavailableRuntime() throws {
+        try expectThrows(ArchiveError.decryptionRuntimeUnavailable) {
+            _ = try SQLCipherDatabaseDecryptor(libraryURL: URL(fileURLWithPath: "/nonexistent/sqlcipher.dylib"))
+        }
+    }
+
+    func testUnavailableSQLCipherDecryptorReportsUnavailableRuntime() throws {
+        let key = try WeChatDatabaseKey(hex: randomKeyHex())
+        try expectThrows(ArchiveError.decryptionRuntimeUnavailable) {
+            try UnavailableSQLCipherDecryptor().validate(
+                databaseURL: URL(fileURLWithPath: "/synthetic/database.db"),
+                key: key
+            )
+        }
+    }
+
     private func makeMessage(
         id: String,
         timestamp: Date,
@@ -249,8 +433,22 @@ final class ArchiveCoreTests: XCTestCase {
         return url
     }
 
+    private func permissionBits(at url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path())
+        guard let permissions = attributes[.posixPermissions] as? Int else {
+            throw TestFailure(description: "Missing permissions for test artifact")
+        }
+        return permissions & 0o777
+    }
+
     private func randomKeyHex() -> String {
         (0..<32).map { _ in String(format: "%02x", UInt8.random(in: UInt8.min...UInt8.max)) }.joined()
+    }
+
+    private func sha256Hex(of url: URL) throws -> String {
+        SHA256.hash(data: try Data(contentsOf: url))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func makeEncryptedTestDatabase(at url: URL, keyHex: String) throws {
@@ -264,8 +462,7 @@ final class ArchiveCoreTests: XCTestCase {
     }
 
     private func runSQLCipher(databaseURL: URL, script: String) throws {
-        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/sqlcipher")
-        guard FileManager.default.isExecutableFile(atPath: executable.path()) else {
+        guard let executable = sqlcipherExecutableURL() else {
             throw TestFailure(description: "SQLCipher runtime is not installed")
         }
         let process = Process()
@@ -296,6 +493,16 @@ final class ArchiveCoreTests: XCTestCase {
         return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private func sqlcipherExecutableURL() -> URL? {
+        ["/opt/homebrew/bin/sqlcipher", "/usr/local/bin/sqlcipher"]
+            .map(URL.init(fileURLWithPath:))
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0.path()) })
+    }
+}
+
+private final class PlaintextDestinationRecorder: @unchecked Sendable {
+    var destination: URL?
 }
 
 private struct TestFailure: Error, CustomStringConvertible {

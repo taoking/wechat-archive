@@ -16,9 +16,9 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 ## WeChat Database Import
 
-Core 使用 SQLCipher 支持用户主动提供的十六进制数据库密钥。它会对原始数据库（包括 WAL/SHM）创建一致性快照、以只读方式验证密钥，并只从受限工作目录中的快照生成临时明文副本；原库不会被修改。密钥不会写进归档、日志、命令行参数或普通文件。
+Core 使用 SQLCipher 支持用户主动提供的十六进制数据库密钥。它会将原始数据库及 SQLite 的 `-wal` / `-shm` sidecar 复制到受限本地工作目录、在复制前后检测源文件变化，并以只读方式验证密钥；原库不会被修改。该机制是受保护的、尽力保持稳定的文件快照，不是 transaction-consistent SQLite backup。为确保归档正确性，请在导入前完全退出微信。密钥不会写进归档、日志、命令行参数或普通文件。
 
-首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。当前支持的是 SQLCipher 解密层；微信各版本数据库解析仍由保守的 Adapter 检测控制，未知 schema 会拒绝解析而非猜测。详见 [WECHAT_DATABASE.md](WECHAT_DATABASE.md)。
+首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。当前支持的是 SQLCipher 解密层；微信各版本数据库解析仍由保守的 Adapter 检测控制，未知 schema 会拒绝解析而非猜测。详见 [WECHAT_DATABASE.md](WECHAT_DATABASE.md) 和 [USAGE.md](USAGE.md)。
 
 ## Import
 

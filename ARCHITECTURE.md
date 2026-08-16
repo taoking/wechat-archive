@@ -6,7 +6,7 @@ The portable archive is the source of truth. SQLite is an indexed projection tha
 
 ```text
 Explicitly selected local source
-  → read-only snapshot (.db + -wal + -shm)
+  → protected best-effort file snapshot (.db + -wal + -shm; quit WeChat first)
   → local key provider / local decryptor
   → versioned adapter and parser
   → normalized Message / Contact / Conversation / MediaAsset
@@ -34,7 +34,7 @@ Inputs at the file/provider boundary are treated as untrusted. They are decoded 
 
 ## Concurrency and safety
 
-The index opens with SQLite FULLMUTEX and each import batch is one transaction. Completed batches survive an interruption; a source can be re-imported safely. A snapshot includes WAL/SHM and compares source attributes before and after copying. A changed source fails with a close-WeChat-and-retry error rather than silently importing a partial database.
+The index opens with SQLite FULLMUTEX and each import batch is one transaction. Completed batches survive an interruption; a source can be re-imported safely. A snapshot uses SQLite's `-wal` and `-shm` sidecars, owns a `0700` working directory, sets copied files to `0600`, and compares the source file set plus attributes before and after copying. A changed source fails with a close-WeChat-and-retry error rather than silently importing a partial database. These checks are best effort, not proof of one SQLite transaction snapshot; the UI and documentation require WeChat to be fully quit before real imports.
 
 ## Dependency decision
 
