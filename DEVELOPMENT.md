@@ -26,13 +26,13 @@ The core tests are intentionally synthetic: no real WeChat record, image, key or
 swift test
 ```
 
-The suite covers model serialization, NDJSON partitioning, SHA-256 media deduplication, incremental import, SQLite FTS filtering, offline export escaping, archive verification, SQLCipher correct-key/wrong-key/plaintext-export behavior, `-wal` / `-shm` snapshot copying, mutation rejection, protected permissions and plaintext-sidecar cleanup. Add tests before every behavior change.
+The suite covers model serialization, NDJSON partitioning, SHA-256 media deduplication, incremental import, SQLite FTS filtering, offline export escaping, archive verification, SQLCipher correct-key/wrong-key/plaintext-export behavior, wx-cli key-map parsing, relative-path matching, sequential batch validation/export, `-wal` / `-shm` snapshot copying, mutation rejection, protected permissions, destination no-overwrite behavior and plaintext-sidecar cleanup. Add tests before every behavior change.
 
 ## Local app build
 
-Open the package in a full Xcode installation and select the `WeChatArchive` executable product. The package is intentionally dependency-light. No network package should be added without a threat-model and license review.
+Open the package in a full Xcode installation and select the `WeChatArchive` executable product. To launch from Terminal, run `./scripts/run-app.sh`; it creates a local `.app` wrapper so file panels can become the foreground macOS window. The package is intentionally dependency-light. No network package should be added without a threat-model and license review.
 
-For end-user setup, safe key validation and runtime troubleshooting, see [USAGE.md](USAGE.md).
+For end-user setup, safe batch export and runtime troubleshooting, see [USAGE.md](USAGE.md).
 
 ## Coding rules
 

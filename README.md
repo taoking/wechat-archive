@@ -4,7 +4,7 @@ WeChat Archive 是一个 macOS 本地优先的个人微信聊天记录归档项�
 
 ## Why not only Word/PDF?
 
-Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源。Archive v1 将消息保存在按会话和年份分区的 NDJSON 中，将媒体保存在普通文件中，并用 SQLite 作为可重建的搜索索引。即使本应用不再存在，仍可用任意 JSON、SQLite 和文件工具访问数据。
+Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源。长期归档格式将在后续阶段定义；当前阶段先把用户已有的加密数据库转换为可由标准 SQLite 工具读取的普通数据库。
 
 ## Archive Format
 
@@ -14,23 +14,17 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 所有导入、解密、索引、导出与校验都设计为在本机完成。项目没有服务器、遥测、Analytics 或 crash upload。数据库密钥不会写进归档、日志、普通文件或 Git。详见 [PRIVACY.md](PRIVACY.md) 与 [SECURITY.md](SECURITY.md)。
 
-## WeChat Database Import
+## Phase 1: Export Plain SQLite Databases
 
-Core 使用 SQLCipher 支持用户主动提供的十六进制数据库密钥。它会将原始数据库及 SQLite 的 `-wal` / `-shm` sidecar 复制到受限本地工作目录、在复制前后检测源文件变化，并以只读方式验证密钥；原库不会被修改。该机制是受保护的、尽力保持稳定的文件快照，不是 transaction-consistent SQLite backup。为确保归档正确性，请在导入前完全退出微信。密钥不会写进归档、日志、命令行参数或普通文件。
+第一阶段读取用户主动选择的微信 `db_storage` 目录和 wx-cli `all_keys.json`。应用递归扫描 `*.db`，以数据库相对路径（如 `contact/contact.db`）匹配 `enc_key`，逐个验证后将成功项导出成普通 SQLite 数据库。导出结果可直接由 `sqlite3` 或 SQLite GUI 打开；目录结构与原数据库根目录保持一致。
 
-首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。当前支持的是 SQLCipher 解密层；微信各版本数据库解析仍由保守的 Adapter 检测控制，未知 schema 会拒绝解析而非猜测。详见 [WECHAT_DATABASE.md](WECHAT_DATABASE.md) 和 [USAGE.md](USAGE.md)。
+每次操作都将原始数据库及其 `-wal` / `-shm` sidecar 复制到受限本地工作目录，并在复制前后检测源文件变化；原库不会被修改。该机制是受保护的、尽力保持稳定的文件快照，不是 transaction-consistent SQLite backup。为确保导出正确性，请在操作前完全退出微信。
 
-## Import
+`all_keys.json` 和 key 仅在内存中使用，不写入导出目录、日志、命令行参数、普通文件或 Git。导出的根目录/子目录权限为 `0700`，数据库文件为 `0600`；同名文件默认跳过，不覆盖。首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。详细步骤见 [USAGE.md](USAGE.md)。
 
-`ChatImportProvider` 让 JSON、NDJSON、CSV、TXT、HTML 和微信数据库来源保持解耦。JSON 和 NDJSON provider 已实现；其他来源以及各微信数据库 Adapter 是明确的后续适配工作。每次写入会生成 `ImportSession`，并使用 source ID 优先、保守回退指纹的去重策略。
+## Not in this phase
 
-## Export
-
-Core 提供 JSON、NDJSON、CSV 和完全离线的 HTML exporter。HTML 内嵌样式、不使用 CDN，并对消息文本进行 HTML 转义。DOCX/PDF exporter 保留为独立扩展点，避免影响长期归档格式。
-
-## Search
-
-`SQLiteArchiveIndex` 从第一版开始迁移 schema，并建立 SQLite FTS5 索引。支持关键词及会话、发送者、时间、消息类型筛选；列表查询必须设定 1–500 的上限。
+本阶段不解析聊天消息、联系人或媒体，也不提供 JSON、NDJSON、HTML、CSV、Word、PDF、Excel、全文搜索或 schema 分析。验收目标仅为：根据 `all_keys.json` 导出可由普通 SQLite 工具打开的数据库。
 
 ## Backup
 

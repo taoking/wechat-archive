@@ -397,6 +397,134 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testWXCLIKeyMapProviderMatchesOnlyNormalizedRelativePathsAndRejectsInvalidKeys() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let validKey = randomKeyHex()
+        let mapURL = directory.appending(path: "all_keys.json")
+        try Data("""
+        {
+          "contact/contact.db": { "enc_key": "\(validKey)" },
+          "message/message_0.db": { "enc_key": "\(randomKeyHex())" }
+        }
+        """.utf8).write(to: mapURL)
+
+        let provider = try WXCLIKeyMapProvider(url: mapURL)
+
+        try expectTrue(provider.key(forRelativePath: "contact/contact.db") != nil)
+        try expectTrue(provider.key(forRelativePath: "contact\\contact.db") != nil)
+        try expectTrue(provider.key(forRelativePath: "contact.db") == nil)
+        try expectTrue(provider.key(forRelativePath: "../contact/contact.db") == nil)
+
+        let invalidMapURL = directory.appending(path: "invalid-all_keys.json")
+        try Data("""
+        { "contact/contact.db": { "enc_key": "not-a-key" } }
+        """.utf8).write(to: invalidMapURL)
+        try expectThrows(ArchiveError.keyInvalid) {
+            _ = try WXCLIKeyMapProvider(url: invalidMapURL)
+        }
+    }
+
+    func testDatabaseScannerAndBatchExporterMatchRelativePathsExportPlainSQLiteAndPreserveSource() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sourceRoot = directory.appending(path: "db_storage")
+        let contactDirectory = sourceRoot.appending(path: "contact")
+        let messageDirectory = sourceRoot.appending(path: "message")
+        try FileManager.default.createDirectory(at: contactDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: messageDirectory, withIntermediateDirectories: true)
+        let contactDatabase = contactDirectory.appending(path: "contact.db")
+        let messageDatabase = messageDirectory.appending(path: "contact.db")
+        let contactKey = randomKeyHex()
+        try makeEncryptedTestDatabase(at: contactDatabase, keyHex: contactKey)
+        try makeEncryptedTestDatabase(at: messageDatabase, keyHex: randomKeyHex())
+        let sourceHash = try sha256Hex(of: contactDatabase)
+
+        let mapURL = directory.appending(path: "all_keys.json")
+        try Data("""
+        {
+          "contact/contact.db": { "enc_key": "\(contactKey)" },
+          "message/contact.db": { "enc_key": "\(randomKeyHex())" }
+        }
+        """.utf8).write(to: mapURL)
+
+        let scanned = try WeChatDatabaseScanner().scan(
+            databaseRoot: sourceRoot,
+            keyMap: try WXCLIKeyMapProvider(url: mapURL)
+        )
+        try expectEqual(scanned.map(\.relativePath), ["contact/contact.db", "message/contact.db"])
+        try expectTrue(scanned.allSatisfy(\.hasMatchedKey))
+
+        let coordinator = try WeChatDatabaseExportCoordinator(decryptor: SQLCipherDatabaseDecryptor())
+        let validated = coordinator.validateAll(scanned)
+        try expectEqual(validated[0].validationStatus, .valid)
+        try expectEqual(validated[1].validationStatus, .invalid)
+
+        let exportRoot = directory.appending(path: "Export")
+        let exported = try coordinator.exportValidatedDatabases(validated, to: exportRoot)
+        let output = exportRoot.appending(path: "contact/contact.db")
+        try expectEqual(exported[0].exportStatus, .exported)
+        try expectEqual(exported[1].exportStatus, .skippedInvalid)
+        try expectFalse(exported[0].hasAvailableKey)
+        try expectFalse(exported[1].hasAvailableKey)
+        try expectTrue(FileManager.default.fileExists(atPath: output.path()))
+        try expectEqual(Data(try Data(contentsOf: output).prefix(16)), Data("SQLite format 3\0".utf8))
+        try expectEqual(try readPlaintextFixtureBody(from: output), "synthetic fixture only")
+        try expectEqual(try sha256Hex(of: contactDatabase), sourceHash)
+        try expectEqual(try permissionBits(at: exportRoot), 0o700)
+        try expectEqual(try permissionBits(at: output.deletingLastPathComponent()), 0o700)
+        try expectEqual(try permissionBits(at: output), 0o600)
+    }
+
+    func testBatchExporterSkipsExistingDestinationsWithoutOverwritingThem() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sourceRoot = directory.appending(path: "db_storage")
+        let sourceDirectory = sourceRoot.appending(path: "contact")
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let sourceDatabase = sourceDirectory.appending(path: "contact.db")
+        let key = randomKeyHex()
+        try makeEncryptedTestDatabase(at: sourceDatabase, keyHex: key)
+        let mapURL = directory.appending(path: "all_keys.json")
+        try Data("{ \"contact/contact.db\": { \"enc_key\": \"\(key)\" } }".utf8).write(to: mapURL)
+        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: sourceRoot, keyMap: try WXCLIKeyMapProvider(url: mapURL))
+        let coordinator = try WeChatDatabaseExportCoordinator(decryptor: SQLCipherDatabaseDecryptor())
+        let validated = coordinator.validateAll(scanned)
+
+        let exportRoot = directory.appending(path: "Export")
+        let existing = exportRoot.appending(path: "contact/contact.db")
+        try FileManager.default.createDirectory(at: existing.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("do not overwrite".utf8).write(to: existing)
+
+        let exported = try coordinator.exportValidatedDatabases(validated, to: exportRoot)
+
+        try expectEqual(exported.first?.exportStatus, .destinationExists)
+        try expectEqual(try String(contentsOf: existing, encoding: .utf8), "do not overwrite")
+        try expectFalse(FileManager.default.contentsOfDirectory(atPath: exportRoot.path()).contains { $0.hasPrefix(".wechatarchive-staging-") })
+    }
+
+    func testBatchExporterCleansProtectedStagingWhenPlaintextVerificationFails() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sourceRoot = directory.appending(path: "db_storage")
+        let sourceDirectory = sourceRoot.appending(path: "contact")
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try Data("synthetic encrypted source".utf8).write(to: sourceDirectory.appending(path: "contact.db"))
+        let mapURL = directory.appending(path: "all_keys.json")
+        try Data("{ \"contact/contact.db\": { \"enc_key\": \"\(randomKeyHex())\" } }".utf8).write(to: mapURL)
+        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: sourceRoot, keyMap: try WXCLIKeyMapProvider(url: mapURL))
+        let coordinator = WeChatDatabaseExportCoordinator(decryptor: InvalidPlaintextDecryptor())
+        let validated = coordinator.validateAll(scanned)
+        try expectEqual(validated.first?.validationStatus, .valid)
+
+        let exportRoot = directory.appending(path: "Export")
+        let exported = try coordinator.exportValidatedDatabases(validated, to: exportRoot)
+
+        try expectEqual(exported.first?.exportStatus, .failed)
+        try expectFalse(FileManager.default.fileExists(atPath: exportRoot.appending(path: "contact/contact.db").path()))
+        try expectFalse(FileManager.default.contentsOfDirectory(atPath: exportRoot.path()).contains { $0.hasPrefix(".wechatarchive-staging-") })
+    }
+
     private func makeMessage(
         id: String,
         timestamp: Date,
@@ -503,6 +631,17 @@ final class ArchiveCoreTests: XCTestCase {
 
 private final class PlaintextDestinationRecorder: @unchecked Sendable {
     var destination: URL?
+}
+
+private struct InvalidPlaintextDecryptor: WeChatDatabaseDecryptor {
+    func validate(databaseURL: URL, key: WeChatDatabaseKey) throws {}
+
+    func decrypt(databaseURL: URL, key: WeChatDatabaseKey, into workingDirectory: URL) throws -> URL {
+        let output = workingDirectory.appending(path: "invalid-plaintext.sqlite")
+        try Data("not sqlite".utf8).write(to: output)
+        try Data("temporary sidecar".utf8).write(to: URL(fileURLWithPath: output.path() + "-wal"))
+        return output
+    }
 }
 
 private struct TestFailure: Error, CustomStringConvertible {

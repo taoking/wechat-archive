@@ -18,22 +18,14 @@ struct WeChatArchiveApp: App {
 
 private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case archive = "Archive"
-    case chats = "Chats"
-    case contacts = "Contacts"
-    case search = "Search"
-    case imports = "Imports"
-    case exports = "Exports"
+    case databaseExport = "Database Export"
     case settings = "Settings"
 
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .archive: "archivebox"
-        case .chats: "bubble.left.and.bubble.right"
-        case .contacts: "person.2"
-        case .search: "magnifyingglass"
-        case .imports: "square.and.arrow.down"
-        case .exports: "square.and.arrow.up"
+        case .databaseExport: "cylinder.split.1x2"
         case .settings: "gearshape"
         }
     }
@@ -51,11 +43,7 @@ private struct ArchiveShellView: View {
         } detail: {
             switch section ?? .archive {
             case .archive: DashboardView()
-            case .chats: EmptyStateView(title: "Chats", detail: "导入聊天记录后，会话将按需分页显示。", symbol: "bubble.left.and.bubble.right")
-            case .contacts: EmptyStateView(title: "Contacts", detail: "只显示导入数据中实际存在的联系人信息。", symbol: "person.2")
-            case .search: SearchView()
-            case .imports: ImportView()
-            case .exports: ExportView()
+            case .databaseExport: DatabaseExportView()
             case .settings: SettingsView()
             }
         }
@@ -68,18 +56,18 @@ private struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("WeChat Archive").font(.largeTitle.bold())
-                Text("本地、开放、可验证的个人聊天记录归档。")
+                Text("第一阶段：将已匹配密钥的本地 SQLCipher 数据库导出为普通 SQLite。")
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                    StatisticCard(value: "—", label: "Messages", symbol: "bubble.left")
-                    StatisticCard(value: "—", label: "Conversations", symbol: "person.2")
-                    StatisticCard(value: "—", label: "Photos", symbol: "photo")
-                    StatisticCard(value: "—", label: "Videos", symbol: "play.rectangle")
+                    StatisticCard(value: "1", label: "Export phase", symbol: "cylinder.split.1x2")
+                    StatisticCard(value: "Local", label: "Processing", symbol: "macbook")
+                    StatisticCard(value: "0", label: "Network uploads", symbol: "network.slash")
+                    StatisticCard(value: "—", label: "Message parsing", symbol: "text.badge.xmark")
                 }
-                GroupBox("Archive Health") {
+                GroupBox("Current Scope") {
                     HStack {
                         Image(systemName: "checkmark.shield").foregroundStyle(.green)
-                        Text("创建或选择归档后，可在此验证 JSON、媒体与 SHA-256 校验和。")
+                        Text("选择数据库目录和 wx-cli key map，逐个验证后导出普通 SQLite；不解析聊天消息或媒体。")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -108,143 +96,296 @@ private struct StatisticCard: View {
     }
 }
 
-private struct ImportView: View {
-    @State private var databaseURL: URL?
-    @State private var databaseKey = ""
-    @State private var clearKeyAfterValidation = true
-    @State private var isValidating = false
-    @State private var status = "选择用户本人有权访问的本地数据库或导入文件。"
+private struct DatabaseExportView: View {
+    @State private var databaseRoot: URL?
+    @State private var keyMapURL: URL?
+    @State private var exportRoot: URL?
+    @State private var databases: [ScannedWeChatDatabase] = []
+    @State private var isWorking = false
+    @State private var status = "完全退出微信后，选择数据库根目录和 all_keys.json。"
+
+    private var summary: WeChatDatabaseExportSummary {
+        WeChatDatabaseExportSummary(databases: databases)
+    }
 
     var body: some View {
         Form {
-            Section("WeChat Database") {
-                LabeledContent("Database") {
-                    Text(databaseURL?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+            Section("WeChat Database Export") {
+                LabeledContent("Database Directory") {
+                    Text(databaseRoot?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+                }
+                Button("Choose Folder", action: chooseDatabaseDirectory)
+                    .disabled(isWorking)
+                LabeledContent("Key Map") {
+                    Text(keyMapURL?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
                 }
                 HStack {
-                    Button("Choose Database", action: chooseDatabase)
-                    if databaseURL != nil { Button("Clear", role: .destructive) { databaseURL = nil } }
+                    Button("Use ~/.wx-cli/all_keys.json", action: useDefaultKeyMap)
+                    Button("Choose File", action: chooseKeyMap)
                 }
-                SecureField("Database Key（64 hexadecimal characters）", text: $databaseKey)
-                    .textContentType(.password)
-                    .disabled(isValidating)
-                Toggle("验证后清除密钥", isOn: $clearKeyAfterValidation)
-                    .disabled(isValidating)
-                Text("默认开启。密钥只保留在当前输入状态中，不会写入文件、日志或归档。")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Text("为避免遗漏尚未 checkpoint 的 WAL 数据，请完全退出微信后再验证或导入。")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Button(isValidating ? "Validating…" : "Validate Key", action: validateKey)
-                    .disabled(databaseURL == nil || databaseKey.isEmpty || isValidating)
+                .disabled(isWorking)
+                Text("导出前请完全退出微信，避免遗漏尚未 checkpoint 的 WAL 数据。all_keys.json 仅在内存读取，不会复制到导出目录。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(isWorking ? "Working…" : "Scan", action: scan)
+                    .disabled(databaseRoot == nil || keyMapURL == nil || isWorking)
             }
-            Section("Archive / Export File") {
-                Text("JSON、NDJSON 与 CSV 读取器在 Core 中独立于微信数据库适配器实现。")
-                Button("Select Files", action: chooseImportFiles)
+
+            Section("Scan Results") {
+                HStack(spacing: 18) {
+                    SummaryValue(label: "Databases", value: summary.detected)
+                    SummaryValue(label: "Matched Keys", value: summary.matched)
+                    SummaryValue(label: "Missing Keys", value: summary.missingKeys)
+                }
+                if !databases.isEmpty {
+                    List(databases) { database in
+                        DatabaseResultRow(database: database)
+                    }
+                    .frame(minHeight: 150, maxHeight: 280)
+                }
+                Button(isWorking ? "Working…" : "Validate All", action: validateAll)
+                    .disabled(!databases.contains(where: \.hasAvailableKey) || isWorking)
             }
-            Section("Status") {
+
+            Section("Export") {
+                LabeledContent("Export Directory") {
+                    Text(exportRoot?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+                }
+                Button("Choose Export Folder", action: chooseExportDirectory)
+                    .disabled(isWorking)
+                Text("输出目录和新建子目录权限为 0700，导出的普通 SQLite 数据库权限为 0600。已有同名文件会跳过，绝不覆盖。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(isWorking ? "Working…" : "Export Databases", action: exportDatabases)
+                    .disabled(exportRoot == nil || !databases.contains(where: {
+                        $0.validationStatus == .valid && $0.hasAvailableKey
+                    }) || isWorking)
+            }
+
+            Section("Report") {
+                HStack(spacing: 18) {
+                    SummaryValue(label: "Validated", value: summary.validated)
+                    SummaryValue(label: "Invalid", value: summary.invalid)
+                    SummaryValue(label: "Exported", value: summary.exported)
+                    SummaryValue(label: "Export Failed", value: summary.exportFailed)
+                }
                 Text(status).textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Import Data")
+        .navigationTitle("WeChat Database Export")
     }
 
-    private func chooseDatabase() {
+    private func chooseDatabaseDirectory() {
+        let panel = directoryPanel(message: "选择本人有权访问的微信 db_storage 目录")
+        if panel.runModal() == .OK {
+            databaseRoot = panel.url
+            databases = []
+            status = "数据库目录已选择；选择 key map 后点击 Scan。"
+        }
+    }
+
+    private func useDefaultKeyMap() {
+        let candidate = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".wx-cli/all_keys.json")
+        let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey])
+        guard values?.isRegularFile == true else {
+            status = "未找到默认 all_keys.json；请选择你本人保存的 key map 文件。"
+            return
+        }
+        keyMapURL = candidate
+        databases = []
+        status = "已选择默认 key map；点击 Scan。"
+    }
+
+    private func chooseKeyMap() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
+        panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.message = "选择您本人有权访问的微信本地数据库"
-        if panel.runModal() == .OK { databaseURL = panel.url; status = "数据库已选择；请完全退出微信后再验证密钥。" }
+        panel.allowedContentTypes = [.json]
+        panel.message = "选择 wx-cli 生成的 all_keys.json"
+        if panel.runModal() == .OK {
+            keyMapURL = panel.url
+            databases = []
+            status = "key map 已选择；点击 Scan。"
+        }
     }
 
-    private func chooseImportFiles() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.json, .commaSeparatedText, .plainText]
-        if panel.runModal() == .OK { status = "已选择 \(panel.urls.count) 个文件，等待导入确认。" }
+    private func chooseExportDirectory() {
+        let panel = directoryPanel(message: "选择普通 SQLite 数据库的导出目录")
+        if panel.runModal() == .OK {
+            exportRoot = panel.url
+            status = "导出目录已选择；验证完成后可导出。"
+        }
     }
 
-    private func validateKey() {
-        guard let databaseURL, !isValidating else { return }
-        let enteredKey = databaseKey
-        let shouldClearKey = clearKeyAfterValidation
-        isValidating = true
-        status = "Validating…"
-
+    private func scan() {
+        guard let databaseRoot, let keyMapURL else { return }
+        isWorking = true
+        status = "Scanning…"
         Task { @MainActor in
-            let result = await Task.detached(priority: .userInitiated) { () -> String in
-                do {
-                    guard enteredKey.trimmingCharacters(in: .whitespacesAndNewlines).count == 64 else {
-                        return "Expected a 64-character hexadecimal key."
-                    }
-                    let key = try WeChatDatabaseKey(hex: enteredKey)
-                    let decryptor = try SQLCipherDatabaseDecryptor()
-                    try decryptor.validate(databaseURL: databaseURL, key: key)
-                    return "✓ Database key valid. 已通过受保护的本地文件快照验证。"
-                } catch let error as ArchiveError {
-                    switch error {
-                    case .keyInvalid:
-                        return "Expected a 64-character hexadecimal key."
-                    case .decryptionRuntimeUnavailable:
-                        return "SQLCipher runtime unavailable. Install with: brew bundle"
-                    case .databaseInUse:
-                        return "Database is in use. Please quit WeChat and try again."
-                    default:
-                        return error.localizedDescription
-                    }
-                } catch {
-                    return ArchiveError.databaseDecryptionFailed.localizedDescription
+            let result = await Task.detached(priority: .userInitiated) {
+                BatchOperationResult { () throws in
+                    let keyMap = try WXCLIKeyMapProvider(url: keyMapURL)
+                    return try WeChatDatabaseScanner().scan(databaseRoot: databaseRoot, keyMap: keyMap)
                 }
             }.value
-            status = result
-            isValidating = false
-            if shouldClearKey { databaseKey = "" }
+            apply(result, success: "Scan complete")
+        }
+    }
+
+    private func validateAll() {
+        guard !databases.isEmpty else { return }
+        let input = databases
+        isWorking = true
+        status = "Validating…"
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                BatchOperationResult { () throws in
+                    let decryptor = try SQLCipherDatabaseDecryptor()
+                    return WeChatDatabaseExportCoordinator(decryptor: decryptor).validateAll(input)
+                }
+            }.value
+            apply(result, success: "Validation complete")
+        }
+    }
+
+    private func exportDatabases() {
+        guard let exportRoot else { return }
+        let input = databases
+        isWorking = true
+        status = "Exporting…"
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                BatchOperationResult { () throws in
+                    let decryptor = try SQLCipherDatabaseDecryptor()
+                    return try WeChatDatabaseExportCoordinator(decryptor: decryptor)
+                        .exportValidatedDatabases(input, to: exportRoot)
+                }
+            }.value
+            apply(result, success: "Export complete")
+        }
+    }
+
+    private func apply(_ result: BatchOperationResult, success: String) {
+        if let databases = result.databases {
+            self.databases = databases
+            let summary = WeChatDatabaseExportSummary(databases: databases)
+            status = "\(success). Detected: \(summary.detected), Matched: \(summary.matched), Validated: \(summary.validated), Exported: \(summary.exported)."
+        } else {
+            status = result.failureMessage ?? "Local database operation failed."
+        }
+        isWorking = false
+    }
+
+    private func directoryPanel(message: String) -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = message
+        return panel
+    }
+}
+
+private struct BatchOperationResult: Sendable {
+    let databases: [ScannedWeChatDatabase]?
+    let failureMessage: String?
+
+    init(_ operation: () throws -> [ScannedWeChatDatabase]) {
+        do {
+            databases = try operation()
+            failureMessage = nil
+        } catch let error as ArchiveError {
+            databases = nil
+            switch error {
+            case .decryptionRuntimeUnavailable:
+                failureMessage = "SQLCipher runtime unavailable. Run: brew bundle"
+            case .databaseInUse:
+                failureMessage = "Database is in use. Please quit WeChat and try again."
+            case .keyInvalid:
+                failureMessage = "Key map is invalid."
+            default:
+                failureMessage = "Local database operation failed."
+            }
+        } catch {
+            databases = nil
+            failureMessage = "Local database operation failed."
         }
     }
 }
 
-private struct SearchView: View {
-    @State private var keyword = ""
+private struct SummaryValue: View {
+    let label: String
+    let value: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Search Messages").font(.title.bold())
-            TextField("关键词", text: $keyword)
-                .textFieldStyle(.roundedBorder)
-            Text("搜索使用本地 SQLite FTS5，并可组合联系人、群聊、时间、类型和发送者筛选。")
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)").font(.headline.monospacedDigit())
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct DatabaseResultRow: View {
+    let database: ScannedWeChatDatabase
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(color)
+            Text(database.relativePath).lineLimit(1)
             Spacer()
+            Text(label).font(.caption).foregroundStyle(.secondary)
         }
-        .padding(32)
-        .navigationTitle("Search")
+        .accessibilityElement(children: .combine)
     }
-}
 
-private struct ExportView: View {
-    @State private var html = true
-    @State private var json = true
-    @State private var ndjson = false
-    @State private var csv = false
-
-    var body: some View {
-        Form {
-            Section("导出会话") {
-                Toggle("HTML（完全离线）", isOn: $html)
-                Toggle("JSON", isOn: $json)
-                Toggle("NDJSON", isOn: $ndjson)
-                Toggle("CSV", isOn: $csv)
-                Text("DOCX 与 PDF 导出会按年份拆分大型会话，避免产生不可管理的单一文件。")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("媒体") {
-                Text("消息只引用相对媒体路径；不会把图片、视频或语音 Base64 写入 JSON。")
+    private var symbol: String {
+        switch database.exportStatus {
+        case .exported: "checkmark.circle.fill"
+        case .destinationExists: "arrow.uturn.right.circle"
+        case .failed: "xmark.octagon.fill"
+        case .skippedMissingKey: "key.slash"
+        case .skippedInvalid: "xmark.circle"
+        case .skippedNotValidated: "exclamationmark.circle"
+        case .notExported:
+            switch database.validationStatus {
+            case .valid: "checkmark.circle"
+            case .invalid: "xmark.circle"
+            case .missingKey: "key.slash"
+            case .notValidated: database.hasMatchedKey ? "key.fill" : "key.slash"
             }
         }
-        .formStyle(.grouped)
-        .padding()
-        .navigationTitle("Exports")
+    }
+
+    private var color: Color {
+        switch database.exportStatus {
+        case .exported: .green
+        case .failed, .skippedInvalid: .red
+        case .destinationExists, .skippedMissingKey, .skippedNotValidated: .orange
+        case .notExported: database.validationStatus == .valid ? .green : .secondary
+        }
+    }
+
+    private var label: String {
+        switch database.exportStatus {
+        case .exported: "Exported"
+        case .destinationExists: "Destination exists"
+        case .failed: "Export failed"
+        case .skippedMissingKey: "Key missing"
+        case .skippedInvalid: "Key invalid"
+        case .skippedNotValidated: "Validate first"
+        case .notExported:
+            switch database.validationStatus {
+            case .valid: "Valid"
+            case .invalid: "Key invalid"
+            case .missingKey: "Key missing"
+            case .notValidated: database.hasMatchedKey ? "Key matched" : "Key missing"
+            }
+        }
     }
 }
 
