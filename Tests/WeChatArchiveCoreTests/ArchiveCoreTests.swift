@@ -442,6 +442,64 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testDefaultWXCLIKeyMapLocatorAcceptsOnlyRegularJSONFiles() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let json = directory.appending(path: "all_keys.json")
+        let nonJSON = directory.appending(path: "all_keys.txt")
+        try Data("{}".utf8).write(to: json)
+        try Data("{}".utf8).write(to: nonJSON)
+
+        try expectEqual(DefaultWXCLIKeyMapLocator(url: json).locate(), json.standardizedFileURL)
+        try expectTrue(DefaultWXCLIKeyMapLocator(url: nonJSON).locate() == nil)
+        try expectTrue(DefaultWXCLIKeyMapLocator(url: directory.appending(path: "missing.json")).locate() == nil)
+    }
+
+    func testDatabaseExportSessionAutoSelectsExistingDefaultKeyMapAndClearsPreviousScanResultsWhenDirectoryChanges() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appending(path: "first-db_storage")
+        let secondRoot = directory.appending(path: "second-db_storage")
+        let contactDirectory = firstRoot.appending(path: "contact")
+        try FileManager.default.createDirectory(at: contactDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        try Data("fixture".utf8).write(to: contactDirectory.appending(path: "contact.db"))
+        let keyMap = directory.appending(path: "all_keys.json")
+        try Data("{ \"contact/contact.db\": { \"enc_key\": \"\(randomKeyHex())\" } }".utf8).write(to: keyMap)
+        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: firstRoot, keyMap: try WXCLIKeyMapProvider(url: keyMap))
+        var session = DatabaseExportSession()
+
+        session.selectDatabaseDirectory(try LocalDatabaseDirectoryPath.resolve(firstRoot.path()), defaultKeyMapURL: DefaultWXCLIKeyMapLocator(url: keyMap).locate())
+        try expectEqual(session.databaseRoot, firstRoot.standardizedFileURL)
+        try expectEqual(session.keyMapURL, keyMap.standardizedFileURL)
+        try expectTrue(session.canScan)
+        session.setDatabases(scanned)
+        try expectEqual(session.databases.count, 1)
+
+        session.selectDatabaseDirectory(try LocalDatabaseDirectoryPath.resolve(secondRoot.path()), defaultKeyMapURL: nil)
+        try expectEqual(session.databaseRoot, secondRoot.standardizedFileURL)
+        try expectTrue(session.keyMapURL == nil)
+        try expectFalse(session.canScan)
+        try expectTrue(session.databases.isEmpty)
+    }
+
+    func testDatabaseExportSessionEnablesScanAfterManualKeyMapSelection() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appending(path: "db_storage")
+        let keyMap = directory.appending(path: "all_keys.json")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: keyMap)
+        var session = DatabaseExportSession()
+
+        session.selectDatabaseDirectory(try LocalDatabaseDirectoryPath.resolve(root.path()), defaultKeyMapURL: nil)
+        try expectFalse(session.canScan)
+        session.selectKeyMap(keyMap)
+
+        try expectEqual(session.keyMapURL, keyMap.standardizedFileURL)
+        try expectTrue(session.canScan)
+    }
+
     func testDatabaseScannerAndBatchExporterMatchRelativePathsExportPlainSQLiteAndPreserveSource() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

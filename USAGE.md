@@ -31,8 +31,8 @@ WeChat Archive 第一阶段只做一件事：读取用户选择的 wx-cli `all_k
 
 1. **完全退出微信。** 不要只关闭窗口；请从菜单退出并确认没有继续运行。这样能避免遗漏尚未 checkpoint 的 WAL 数据。
 2. 打开应用的 **Database Export** 页面。
-3. 点击 **Choose Folder**，选择微信 `db_storage` 根目录。若 macOS 文件选择器无法进入容器目录，可在同一行输入完整的绝对路径（支持 `~`），然后点击 **Use Path**；相对路径、普通文件和不存在的目录会被拒绝。
-4. 点击 **Use ~/.wx-cli/all_keys.json**；如果 key map 位于其他位置，点击 **Choose File** 选择它。
+3. 点击 **Choose Folder**，选择微信 `db_storage` 根目录。若 macOS 文件选择器无法进入容器目录，可在同一行输入完整的绝对路径（支持 `~`），然后点击 **Use Path**；相对路径、普通文件和不存在的目录会被拒绝。确认目录后，应用会检测默认的 `~/.wx-cli/all_keys.json`，但不会读取其中的 key。
+4. 如果默认 key map 存在，界面会显示 **Ready to scan**，可直接继续；否则点击 **Use ~/.wx-cli/all_keys.json** 或 **Choose File** 选择 key map。
 5. 点击 **Scan**。应用递归查找 `*.db`，将例如 `contact/contact.db` 作为相对路径与 `all_keys.json` 匹配。不会仅按文件名匹配。
 6. 点击 **Validate All**。每个已匹配的数据库会依次验证；某一项失败不会阻止其他项继续。
 7. 点击 **Choose Export Folder** 选择输出目录，然后点击 **Export Databases**。

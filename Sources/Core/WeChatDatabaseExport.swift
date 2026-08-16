@@ -16,6 +16,59 @@ public enum LocalDatabaseDirectoryPath {
     }
 }
 
+/// Locates the conventional wx-cli key map without opening or decoding it.
+/// Callers invoke this only after the user explicitly selects a database root.
+public struct DefaultWXCLIKeyMapLocator: Sendable {
+    public let url: URL
+
+    public init(url: URL? = nil) {
+        self.url = url ?? FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".wx-cli/all_keys.json")
+    }
+
+    public func locate() -> URL? {
+        let candidate = url.standardizedFileURL
+        guard candidate.pathExtension.lowercased() == "json" else { return nil }
+        let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values?.isRegularFile == true, values?.isSymbolicLink != true else { return nil }
+        return candidate
+    }
+}
+
+/// UI-facing state for one explicit database export session. Selecting either
+/// input invalidates any previous scan so results never represent another root
+/// or key map.
+public struct DatabaseExportSession: Sendable {
+    public private(set) var databaseRoot: URL?
+    public private(set) var keyMapURL: URL?
+    public private(set) var databases: [ScannedWeChatDatabase]
+
+    public init() {
+        databaseRoot = nil
+        keyMapURL = nil
+        databases = []
+    }
+
+    public var canScan: Bool {
+        databaseRoot != nil && keyMapURL != nil
+    }
+
+    public mutating func selectDatabaseDirectory(_ url: URL, defaultKeyMapURL: URL?) {
+        databaseRoot = url.standardizedFileURL
+        keyMapURL = defaultKeyMapURL?.standardizedFileURL
+        databases = []
+    }
+
+    public mutating func selectKeyMap(_ url: URL) {
+        keyMapURL = url.standardizedFileURL
+        databases = []
+    }
+
+    public mutating func setDatabases(_ databases: [ScannedWeChatDatabase]) {
+        self.databases = databases
+    }
+}
+
 /// Reads wx-cli's key map into memory for one local export session. It never
 /// copies the map or serializes keys into reports, logs, or export artifacts.
 public struct WXCLIKeyMapProvider: Sendable {

@@ -97,23 +97,32 @@ private struct StatisticCard: View {
 }
 
 private struct DatabaseExportView: View {
-    @State private var databaseRoot: URL?
+    @State private var session = DatabaseExportSession()
     @State private var databaseRootPath = ""
-    @State private var keyMapURL: URL?
     @State private var exportRoot: URL?
-    @State private var databases: [ScannedWeChatDatabase] = []
     @State private var isWorking = false
     @State private var status = "完全退出微信后，选择数据库根目录和 all_keys.json。"
 
     private var summary: WeChatDatabaseExportSummary {
-        WeChatDatabaseExportSummary(databases: databases)
+        WeChatDatabaseExportSummary(databases: session.databases)
+    }
+
+    private var canScan: Bool {
+        session.databaseRoot != nil && session.keyMapURL != nil && !isWorking
     }
 
     var body: some View {
         Form {
             Section("WeChat Database Export") {
                 LabeledContent("Database Directory") {
-                    Text(databaseRoot?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+                    if let databaseRoot = session.databaseRoot {
+                        Label(databaseRoot.path(), systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("Not selected").foregroundStyle(.secondary)
+                    }
                 }
                 HStack {
                     Button("Choose Folder", action: chooseDatabaseDirectory)
@@ -127,7 +136,14 @@ private struct DatabaseExportView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 LabeledContent("Key Map") {
-                    Text(keyMapURL?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+                    if let keyMapURL = session.keyMapURL {
+                        Label(displayPath(keyMapURL), systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("Not selected").foregroundStyle(.secondary)
+                    }
                 }
                 HStack {
                     Button("Use ~/.wx-cli/all_keys.json", action: useDefaultKeyMap)
@@ -137,8 +153,10 @@ private struct DatabaseExportView: View {
                 Text("导出前请完全退出微信，避免遗漏尚未 checkpoint 的 WAL 数据。all_keys.json 仅在内存读取，不会复制到导出目录。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                Label(canScan ? "Ready to scan" : "Choose a database directory and key map", systemImage: canScan ? "checkmark.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(canScan ? .green : .secondary)
                 Button(isWorking ? "Working…" : "Scan", action: scan)
-                    .disabled(databaseRoot == nil || keyMapURL == nil || isWorking)
+                    .disabled(!canScan)
             }
 
             Section("Scan Results") {
@@ -147,14 +165,14 @@ private struct DatabaseExportView: View {
                     SummaryValue(label: "Matched Keys", value: summary.matched)
                     SummaryValue(label: "Missing Keys", value: summary.missingKeys)
                 }
-                if !databases.isEmpty {
-                    List(databases) { database in
+                if !session.databases.isEmpty {
+                    List(session.databases) { database in
                         DatabaseResultRow(database: database)
                     }
                     .frame(minHeight: 150, maxHeight: 280)
                 }
                 Button(isWorking ? "Working…" : "Validate All", action: validateAll)
-                    .disabled(!databases.contains(where: \.hasAvailableKey) || isWorking)
+                    .disabled(!session.databases.contains(where: \.hasAvailableKey) || isWorking)
             }
 
             Section("Export") {
@@ -167,7 +185,7 @@ private struct DatabaseExportView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button(isWorking ? "Working…" : "Export Databases", action: exportDatabases)
-                    .disabled(exportRoot == nil || !databases.contains(where: {
+                    .disabled(exportRoot == nil || !session.databases.contains(where: {
                         $0.validationStatus == .valid && $0.hasAvailableKey
                     }) || isWorking)
             }
@@ -203,23 +221,23 @@ private struct DatabaseExportView: View {
     }
 
     private func setDatabaseRoot(_ url: URL) {
-        databaseRoot = url
-        databaseRootPath = url.path()
-        databases = []
-        status = "数据库目录已选择；选择 key map 后点击 Scan。"
+        let defaultKeyMapURL = DefaultWXCLIKeyMapLocator().locate()
+        session.selectDatabaseDirectory(url, defaultKeyMapURL: defaultKeyMapURL)
+        databaseRootPath = session.databaseRoot?.path() ?? ""
+        status = session.keyMapURL == nil
+            ? "Database directory selected. Please choose all_keys.json."
+            : "Database directory and wx-cli key map ready. Click Scan."
     }
 
     private func useDefaultKeyMap() {
-        let candidate = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".wx-cli/all_keys.json")
-        let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey])
-        guard values?.isRegularFile == true else {
+        guard let keyMapURL = DefaultWXCLIKeyMapLocator().locate() else {
             status = "未找到默认 all_keys.json；请选择你本人保存的 key map 文件。"
             return
         }
-        keyMapURL = candidate
-        databases = []
-        status = "已选择默认 key map；点击 Scan。"
+        session.selectKeyMap(keyMapURL)
+        status = session.databaseRoot == nil
+            ? "已选择默认 key map；请选择数据库目录。"
+            : "Database directory and wx-cli key map ready. Click Scan."
     }
 
     private func chooseKeyMap() {
@@ -230,9 +248,12 @@ private struct DatabaseExportView: View {
         panel.allowedContentTypes = [.json]
         panel.message = "选择 wx-cli 生成的 all_keys.json"
         if panel.runModal() == .OK {
-            keyMapURL = panel.url
-            databases = []
-            status = "key map 已选择；点击 Scan。"
+            if let keyMapURL = panel.url {
+                session.selectKeyMap(keyMapURL)
+                status = session.databaseRoot == nil
+                    ? "key map 已选择；请选择数据库目录。"
+                    : "Database directory and wx-cli key map ready. Click Scan."
+            }
         }
     }
 
@@ -245,7 +266,7 @@ private struct DatabaseExportView: View {
     }
 
     private func scan() {
-        guard let databaseRoot, let keyMapURL else { return }
+        guard let databaseRoot = session.databaseRoot, let keyMapURL = session.keyMapURL else { return }
         isWorking = true
         status = "Scanning…"
         Task { @MainActor in
@@ -260,8 +281,8 @@ private struct DatabaseExportView: View {
     }
 
     private func validateAll() {
-        guard !databases.isEmpty else { return }
-        let input = databases
+        guard !session.databases.isEmpty else { return }
+        let input = session.databases
         isWorking = true
         status = "Validating…"
         Task { @MainActor in
@@ -277,7 +298,7 @@ private struct DatabaseExportView: View {
 
     private func exportDatabases() {
         guard let exportRoot else { return }
-        let input = databases
+        let input = session.databases
         isWorking = true
         status = "Exporting…"
         Task { @MainActor in
@@ -294,7 +315,7 @@ private struct DatabaseExportView: View {
 
     private func apply(_ result: BatchOperationResult, success: String) {
         if let databases = result.databases {
-            self.databases = databases
+            session.setDatabases(databases)
             let summary = WeChatDatabaseExportSummary(databases: databases)
             status = "\(success). Detected: \(summary.detected), Matched: \(summary.matched), Validated: \(summary.validated), Exported: \(summary.exported)."
         } else {
@@ -311,6 +332,13 @@ private struct DatabaseExportView: View {
         panel.allowsMultipleSelection = false
         panel.message = message
         return panel
+    }
+
+    private func displayPath(_ url: URL) -> String {
+        let path = url.path()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path()
+        guard path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
     }
 }
 
