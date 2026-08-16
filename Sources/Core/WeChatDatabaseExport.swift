@@ -1,6 +1,21 @@
 import Foundation
 import SQLite3
 
+/// Validates a manually entered local directory before it crosses into the
+/// scanner. Relative paths are rejected so a pasted value cannot silently
+/// resolve against an unexpected working directory.
+public enum LocalDatabaseDirectoryPath {
+    public static func resolve(_ input: String) throws -> URL {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else { throw ArchiveError.invalidInput }
+        let url = URL(fileURLWithPath: expanded).standardizedFileURL
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+        guard values.isDirectory == true else { throw ArchiveError.invalidInput }
+        return url
+    }
+}
+
 /// Reads wx-cli's key map into memory for one local export session. It never
 /// copies the map or serializes keys into reports, logs, or export artifacts.
 public struct WXCLIKeyMapProvider: Sendable {

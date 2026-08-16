@@ -98,6 +98,7 @@ private struct StatisticCard: View {
 
 private struct DatabaseExportView: View {
     @State private var databaseRoot: URL?
+    @State private var databaseRootPath = ""
     @State private var keyMapURL: URL?
     @State private var exportRoot: URL?
     @State private var databases: [ScannedWeChatDatabase] = []
@@ -114,8 +115,17 @@ private struct DatabaseExportView: View {
                 LabeledContent("Database Directory") {
                     Text(databaseRoot?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
                 }
-                Button("Choose Folder", action: chooseDatabaseDirectory)
-                    .disabled(isWorking)
+                HStack {
+                    Button("Choose Folder", action: chooseDatabaseDirectory)
+                    TextField("Paste absolute db_storage path", text: $databaseRootPath)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(useEnteredDatabaseDirectory)
+                    Button("Use Path", action: useEnteredDatabaseDirectory)
+                }
+                .disabled(isWorking)
+                Text("若文件选择器无法进入容器目录，可粘贴完整的绝对路径，例如 `/Users/你/.../db_storage`，然后点击 Use Path。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 LabeledContent("Key Map") {
                     Text(keyMapURL?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
                 }
@@ -179,11 +189,24 @@ private struct DatabaseExportView: View {
 
     private func chooseDatabaseDirectory() {
         let panel = directoryPanel(message: "选择本人有权访问的微信 db_storage 目录")
-        if panel.runModal() == .OK {
-            databaseRoot = panel.url
-            databases = []
-            status = "数据库目录已选择；选择 key map 后点击 Scan。"
+        if panel.runModal() == .OK, let url = panel.url {
+            setDatabaseRoot(url)
         }
+    }
+
+    private func useEnteredDatabaseDirectory() {
+        do {
+            try setDatabaseRoot(LocalDatabaseDirectoryPath.resolve(databaseRootPath))
+        } catch {
+            status = "路径必须是一个存在的本地绝对目录。"
+        }
+    }
+
+    private func setDatabaseRoot(_ url: URL) {
+        databaseRoot = url
+        databaseRootPath = url.path()
+        databases = []
+        status = "数据库目录已选择；选择 key map 后点击 Scan。"
     }
 
     private func useDefaultKeyMap() {

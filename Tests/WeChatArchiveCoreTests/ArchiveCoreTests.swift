@@ -425,6 +425,23 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testLocalDatabaseDirectoryPathAcceptsExistingAbsoluteDirectoryAndRejectsRelativeOrFilePaths() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "not-a-directory.db")
+        try Data("fixture".utf8).write(to: file)
+
+        let resolved = try LocalDatabaseDirectoryPath.resolve(directory.path())
+
+        try expectEqual(resolved, directory.standardizedFileURL)
+        try expectThrows(ArchiveError.invalidInput) {
+            _ = try LocalDatabaseDirectoryPath.resolve("relative/db_storage")
+        }
+        try expectThrows(ArchiveError.invalidInput) {
+            _ = try LocalDatabaseDirectoryPath.resolve(file.path())
+        }
+    }
+
     func testDatabaseScannerAndBatchExporterMatchRelativePathsExportPlainSQLiteAndPreserveSource() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
