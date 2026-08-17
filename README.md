@@ -28,9 +28,17 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 分析会根据路径、表名、字段名、索引和表结构，将数据库标记为 Detected、Likely 或 Unknown，并输出消息、联系人、会话、群聊、媒体等候选。报告写入所选导出根目录下的 `SchemaReports/`：包含 `schema-summary.json`、`schema-summary.md` 和每个数据库的 Markdown 报告。报告目录权限为 `0700`，报告文件为 `0600`；其中不包含绝对路径、数据库值、密钥或聊天内容。
 
-## Not in this phase
+## Phase 3A: Limited Message & Media Link Discovery
 
-本阶段不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Schema 分类是下一阶段 Adapter 开发的结构性线索，不是内容解析结果。
+**Message Discovery** 读取用户主动选择的普通 SQLite 根目录中的 `SchemaReports/schema-summary.json`，将其中的消息候选表供用户选择；再以 `SQLITE_OPEN_READONLY` 最多抽取 500 行，保留 SQLite 原始存储类型，推断字段、时间单位和原始 type 的样本分布。它不会进行完整消息导出或写入 Archive v1。
+
+用户还必须显式选择本人原始微信数据根目录，才会开始本地媒体定位。扫描器以流式方式读取普通文件的有限头部、识别媒体 magic bytes（也可识别 JPEG/PNG/GIF 的单字节 XOR 文件头），并只在路径或媒体标识符已缩小候选范围时计算 MD5。文件名本身永远不会被视作匹配证据；没有足够证据时结果保持 unresolved。
+
+一次运行最多验证一条或少量受限的消息—媒体链路。页面可在本机展示短预览以供用户确认，`.local-analysis/` 下的 `message-discovery.json` 与 `message-discovery.md` 只写入结构、字段映射、聚合 type 分布和解析结果；它们不包含消息文本、BLOB、媒体 ID、哈希、文件名或绝对路径。目录为 `0700`，文件为 `0600`，并已被 Git 忽略。
+
+## Not in the current discovery scope
+
+当前仍不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Phase 3A 的受限验证只是下一阶段 Adapter 开发的证据，不是完整内容解析或归档结果。
 
 ## Backup
 

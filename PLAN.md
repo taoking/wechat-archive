@@ -14,7 +14,14 @@
 - Classify likely message, contact, conversation, group, media, index and configuration databases from structural signals; group identical schemas by a structure-only SHA-256 fingerprint.
 - Do not read database values, parse messages or export chat content.
 
-## Phase 3 — First real message adapter
+## Phase 3A — Message & media link discovery (implemented)
+
+- Load Phase 2's structural report and let the user select a real message-table candidate.
+- Read at most 500 rows from one selected plain SQLite table, preserve source SQLite storage classes and infer field mapping, timestamp unit and raw type distributions.
+- Extract only structural XML/JSON/BLOB evidence, scan a separately selected local media root in a bounded/cancellable way, and verify media links only when evidence is sufficient.
+- Write redacted local analysis reports; do not create or modify Archive v1 data.
+
+## Phase 3B — First real message adapter
 
 - Select a confirmed message schema group and implement a minimal, fixture-backed adapter for normalized messages.
 - Add JSON/NDJSON archive import UI with preview, progress, cancellation and resumable source copies.

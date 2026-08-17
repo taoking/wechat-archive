@@ -601,6 +601,309 @@ final class ArchiveCoreTests: XCTestCase {
         try expectEqual(table.columns.map(\.name), ["id", "value"])
     }
 
+    func testMessageDiscoveryFindsCandidateInfersFieldsAndPreservesBlobMetadata() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (
+                local_id INTEGER PRIMARY KEY,
+                server_id INTEGER,
+                local_type INTEGER,
+                create_time INTEGER,
+                real_sender_id INTEGER,
+                source TEXT,
+                message_content TEXT,
+                packed_info_data BLOB
+            );
+            INSERT INTO message VALUES (1, 101, 1, 1723800123, 9, 'fixture-chat', 'synthetic plain text', X'010203');
+            INSERT INTO message VALUES (2, 102, 3, 1723800124, 9, 'fixture-chat', '<msg><img md5="d41d8cd98f00b204e9800998ecf8427e" mediaid="fixture-media" /></msg>', X'040506');
+            """)
+        let schemaReport = try SQLiteSchemaScanner().scan(exportRoot: exportRoot)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: schemaReport).first)
+
+        let analysis = try WeChatMessageDiscovery().inspect(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            sampleLimit: 100,
+            now: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+
+        try expectEqual(candidate.tableName, "message")
+        try expectEqual(analysis.records.count, 2)
+        try expectEqual(analysis.fieldMapping.messageIDColumn, "local_id")
+        try expectEqual(analysis.fieldMapping.timestampColumn, "create_time")
+        try expectEqual(analysis.fieldMapping.rawTypeColumn, "local_type")
+        try expectEqual(analysis.fieldMapping.contentColumn, "message_content")
+        try expectEqual(analysis.fieldMapping.payloadColumn, "packed_info_data")
+        try expectEqual(analysis.timestampInference?.unit, .seconds)
+        try expectEqual(analysis.typeObservations.map(\.rawType), [1, 3])
+        try expectEqual(analysis.typeObservations.map(\.count), [1, 1])
+        try expectEqual(analysis.textCandidates.count, 1)
+        try expectEqual(analysis.mediaReferences.first?.md5, "d41d8cd98f00b204e9800998ecf8427e")
+        let record = try unwrap(analysis.records.first(where: { $0.identity.rowIdentifier == "1" }))
+        guard case let .blob(blob)? = record.values["packed_info_data"] else {
+            throw TestFailure(description: "Expected synthetic BLOB metadata")
+        }
+        try expectEqual(blob.length, 3)
+        try expectTrue(blob.sha256.count == 64)
+        try expectEqual(blob.data, Data([1, 2, 3]))
+    }
+
+    func testMessagePayloadInspectorExtractsOnlyStructuralXMLMediaMetadata() throws {
+        let inspection = MessagePayloadInspector().inspect(text: """
+            <msg><img md5="d41d8cd98f00b204e9800998ecf8427e" mediaid="fixture-media" aeskey="must-not-export" /></msg>
+            """)
+
+        try expectEqual(inspection.kind, .xml)
+        try expectTrue(inspection.elementNames.contains("img"))
+        try expectTrue(inspection.attributeNames.contains("md5"))
+        try expectEqual(inspection.mediaTypeHint, .image)
+        try expectEqual(inspection.md5, "d41d8cd98f00b204e9800998ecf8427e")
+        try expectEqual(inspection.mediaID, "fixture-media")
+        try expectFalse(inspection.metadataFieldNames.contains("aeskey"))
+    }
+
+    func testMessageDiscoveryInspectsBLOBPayloadWhenContentIsNull() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, local_type INTEGER, create_time INTEGER, message_content TEXT, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 3, 1723800123, NULL, X'010203');
+            """)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: try SQLiteSchemaScanner().scan(exportRoot: exportRoot)).first)
+
+        let analysis = try WeChatMessageDiscovery().inspect(exportRoot: exportRoot, candidate: candidate)
+
+        try expectEqual(analysis.payloadInspections.values.first?.kind, .blob)
+        try expectEqual(analysis.payloadInspections.values.first?.blobLength, 3)
+    }
+
+    func testMessageSampleReaderKeepsLargeBLOBMetadataWithoutRetainingBytes() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, create_time INTEGER, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 1723800123, zeroblob(262145));
+            """)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: try SQLiteSchemaScanner().scan(exportRoot: exportRoot)).first)
+
+        let record = try unwrap(try WeChatMessageSampleReader().read(exportRoot: exportRoot, candidate: candidate).first)
+        guard case let .blob(blob)? = record.values["packed_info_data"] else {
+            throw TestFailure(description: "Expected a synthetic large BLOB")
+        }
+
+        try expectEqual(blob.length, 262145)
+        try expectTrue(blob.sha256.count == 64)
+        try expectTrue(blob.data == nil)
+    }
+
+    func testMessagePayloadInspectorExtractsBoundedEmbeddedMD5FromBLOB() throws {
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e"
+        let data = Data(repeating: 0, count: 64 * 1_024) + Data([0x01, 0x02]) + Data(md5.utf8) + Data([0x00, 0x03])
+        let blob = SQLiteBlobSourceValue(
+            length: data.count,
+            sha256: String(repeating: "a", count: 64),
+            data: data
+        )
+
+        let inspection = MessagePayloadInspector().inspect(value: .blob(blob))
+
+        try expectEqual(inspection.kind, .blob)
+        try expectEqual(inspection.md5, md5)
+        try expectTrue(inspection.metadataFieldNames.contains("embedded_md5"))
+    }
+
+    func testMessageDiscoveryPrefersCompressedPayloadForEmbeddedMediaReference() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e"
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, local_type INTEGER, create_time INTEGER, message_content TEXT, compress_content BLOB, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 3, 1723800123, NULL, X'0102', CAST('prefix\(md5)suffix' AS BLOB));
+            """)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: try SQLiteSchemaScanner().scan(exportRoot: exportRoot)).first)
+
+        let analysis = try WeChatMessageDiscovery().inspect(exportRoot: exportRoot, candidate: candidate)
+
+        try expectEqual(analysis.fieldMapping.payloadColumn, "compress_content")
+        try expectEqual(analysis.mediaReferences.first?.md5, md5)
+    }
+
+    func testMediaScannerDetectsPNGMagicAndResolverConfirmsExactMD5Match() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let imageURL = mediaRoot.appending(path: "msg/image/fixture-no-extension.dat")
+        try FileManager.default.createDirectory(at: imageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let imageData = syntheticPNGData()
+        try imageData.write(to: imageURL)
+        let md5 = Insecure.MD5.hash(data: imageData).map { String(format: "%02x", $0) }.joined()
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: md5,
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["md5"]
+        )
+
+        let scan = try WeChatMediaScanner().scan(mediaRoot: mediaRoot)
+        let file = try unwrap(scan.files.first)
+        let link = try MessageMediaResolver().resolve(reference: reference, mediaFiles: scan.files)
+
+        try expectEqual(file.format, .png)
+        try expectEqual(file.imageDimensions?.width, 1)
+        try expectEqual(file.imageDimensions?.height, 1)
+        try expectTrue(file.sha256 == nil)
+        try expectEqual(link.confidence, .exact)
+        try expectEqual(link.resolvedFile?.relativePath, "msg/image/fixture-no-extension.dat")
+        try expectEqual(link.reason, "Exact MD5 match")
+    }
+
+    func testMediaScannerDetectsXORObfuscatedPNGHeaderWithoutChangingFile() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let imageURL = mediaRoot.appending(path: "msg/image/fixture.dat")
+        try FileManager.default.createDirectory(at: imageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let xorKey: UInt8 = 0x5A
+        let original = syntheticPNGData()
+        let encoded = Data(original.map { $0 ^ xorKey })
+        try encoded.write(to: imageURL)
+
+        let file = try unwrap(try WeChatMediaScanner().scan(mediaRoot: mediaRoot).files.first)
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: Insecure.MD5.hash(data: original).map { String(format: "%02x", $0) }.joined(),
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["embedded_md5"]
+        )
+        let link = try MessageMediaResolver().resolve(reference: reference, mediaFiles: [file])
+
+        try expectEqual(file.format, .png)
+        try expectEqual(file.headerXORKey, xorKey)
+        try expectEqual(file.imageDimensions?.width, 1)
+        try expectEqual(file.imageDimensions?.height, 1)
+        try expectEqual(link.confidence, .exact)
+        try expectEqual(try Data(contentsOf: imageURL), encoded)
+    }
+
+    func testMessageMediaResolverLeavesFilenameOnlyReferenceUnresolved() throws {
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "3"),
+            mediaTypeHint: .image,
+            md5: nil,
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["filename"]
+        )
+        let file = DiscoveredMediaFile(
+            sourceURL: URL(fileURLWithPath: "/tmp/fixture.png"),
+            relativePath: "msg/image/fixture.png",
+            fileSize: 1,
+            fileExtension: "png",
+            format: .png,
+            imageDimensions: .init(width: 1, height: 1),
+            sha256: nil
+        )
+
+        let link = try MessageMediaResolver().resolve(reference: reference, mediaFiles: [file])
+
+        try expectEqual(link.confidence, .unresolved)
+        try expectTrue(link.resolvedFile == nil)
+    }
+
+    func testMediaDatabaseMappingResolvesOnlyAUniqueFileBackedByExactMD5() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let imageURL = mediaRoot.appending(path: "msg/image/fixture.png")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: imageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try syntheticPNGData().write(to: imageURL)
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e"
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5 TEXT, md5_hash TEXT, file_name TEXT, dir1 TEXT, dir2 TEXT);
+            INSERT INTO image_hardlink_info_v4 VALUES ('\(md5)', NULL, 'fixture.png', 'msg', 'image');
+            """)
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: md5,
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["embedded_md5"]
+        )
+        let mediaFiles = try WeChatMediaScanner().scan(mediaRoot: mediaRoot).files
+
+        let link = try WeChatMediaDatabaseMapper().resolve(
+            reference: reference,
+            exportRoot: exportRoot,
+            mediaFiles: mediaFiles
+        )
+
+        try expectEqual(link?.confidence, .high)
+        try expectEqual(link?.resolvedFile?.relativePath, "msg/image/fixture.png")
+        try expectEqual(link?.reason, "Exact MD5 media database mapping")
+    }
+
+    func testMessageDiscoveryReportExcludesSampleTextAndAbsoluteMediaPaths() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        let imageURL = mediaRoot.appending(path: "msg/image/fixture.png")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: imageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let imageData = syntheticPNGData()
+        try imageData.write(to: imageURL)
+        let md5 = Insecure.MD5.hash(data: imageData).map { String(format: "%02x", $0) }.joined()
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, local_type INTEGER, create_time INTEGER, message_content TEXT, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 3, 1723800123, '<msg><img md5="\(md5)" /></msg>', X'01');
+            INSERT INTO message VALUES (2, 9, 1723800124, NULL, X'01');
+            """)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: try SQLiteSchemaScanner().scan(exportRoot: exportRoot)).first)
+        let result = try MessageMediaDiscoveryCoordinator().discover(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            mediaRoot: mediaRoot,
+            sampleLimit: 100
+        )
+        let reportDirectory = directory.appending(path: ".local-analysis")
+
+        let locations = try MessageDiscoveryReportWriter().write(result, to: reportDirectory)
+        let reportText = try String(contentsOf: locations.markdownURL, encoding: .utf8)
+        let reportJSON = try String(contentsOf: locations.jsonURL, encoding: .utf8)
+
+        try expectEqual(try permissionBits(at: reportDirectory), 0o700)
+        try expectEqual(try permissionBits(at: locations.markdownURL), 0o600)
+        try expectFalse(reportText.contains("<msg><img"))
+        try expectFalse(reportJSON.contains("<msg><img"))
+        try expectFalse(reportText.contains(directory.path()))
+        try expectFalse(reportJSON.contains(directory.path()))
+        let blobDigest = SHA256.hash(data: Data([1])).map { String(format: "%02x", $0) }.joined()
+        try expectFalse(reportText.contains(blobDigest))
+        try expectFalse(reportJSON.contains(blobDigest))
+    }
+
     func testSQLiteSchemaClassifierUsesSchemaSignalsInsteadOfPathAlone() throws {
         let messageTable = SQLiteTableInfo(
             name: "records",
@@ -831,6 +1134,10 @@ final class ArchiveCoreTests: XCTestCase {
         guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
             throw TestFailure(description: "Could not populate synthetic SQLite fixture")
         }
+    }
+
+    private func syntheticPNGData() -> Data {
+        Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAH/iZk9HQAAAABJRU5ErkJggg==")!
     }
 
     private func runSQLCipher(databaseURL: URL, script: String) throws {

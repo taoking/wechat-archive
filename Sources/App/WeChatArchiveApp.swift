@@ -20,6 +20,7 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case archive = "Archive"
     case databaseExport = "Database Export"
     case schemaDiscovery = "Schema Discovery"
+    case messageDiscovery = "Message Discovery"
     case settings = "Settings"
 
     var id: String { rawValue }
@@ -28,6 +29,7 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
         case .archive: "archivebox"
         case .databaseExport: "cylinder.split.1x2"
         case .schemaDiscovery: "magnifyingglass.circle"
+        case .messageDiscovery: "text.magnifyingglass"
         case .settings: "gearshape"
         }
     }
@@ -47,6 +49,7 @@ private struct ArchiveShellView: View {
             case .archive: DashboardView()
             case .databaseExport: DatabaseExportView()
             case .schemaDiscovery: SchemaDiscoveryView()
+            case .messageDiscovery: MessageDiscoveryView()
             case .settings: SettingsView()
             }
         }
@@ -59,18 +62,18 @@ private struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("WeChat Archive").font(.largeTitle.bold())
-                Text("本机导出普通 SQLite，并在不读取聊天内容的前提下发现数据库结构。")
+                Text("本机导出普通 SQLite，发现数据库结构，并以受限本地样本验证消息与媒体关联。")
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                    StatisticCard(value: "2", label: "Current phase", symbol: "magnifyingglass.circle")
+                    StatisticCard(value: "3A", label: "Current phase", symbol: "text.magnifyingglass")
                     StatisticCard(value: "Local", label: "Processing", symbol: "macbook")
                     StatisticCard(value: "0", label: "Network uploads", symbol: "network.slash")
-                    StatisticCard(value: "Schema only", label: "Message parsing", symbol: "text.badge.xmark")
+                    StatisticCard(value: "Limited", label: "Message sampling", symbol: "text.magnifyingglass")
                 }
                 GroupBox("Current Scope") {
                     HStack {
                         Image(systemName: "checkmark.shield").foregroundStyle(.green)
-                        Text("导出完成后，可在 Schema Discovery 中只读分析普通 SQLite 的表、字段、索引、外键和聚合行数；不读取聊天文本或联系人值。")
+                        Text("完成 Schema Discovery 后，可在 Message Discovery 中选一个消息表，最多读取 500 行本地样本，并仅验证一条消息与媒体文件的关联。")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)

@@ -1,6 +1,6 @@
 # 使用说明
 
-WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现；不解析或导出完整聊天消息、联系人或媒体内容。
+WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现。第三阶段 A 在用户确认后，用小样本验证一条消息与本地媒体的关联；不解析或导出完整聊天记录。
 
 ## 准备环境
 
@@ -65,6 +65,24 @@ WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按
 分类使用路径和结构启发式，因此 **Detected** 表示存在结构证据，**Likely** 表示主要是路径或较弱信号，**Unknown** 表示没有足够证据；它不是对数据库内容的确定性声明。重复结构的数据库按 schema fingerprint 分组，为下一阶段选择 Message/Contact/Conversation Adapter 提供起点。
 
 `SchemaReports/` 及其 `databases/` 子目录会设为 `0700`，报告文件为 `0600`。真实数据库和真实报告已被 `.gitignore` 排除；不要将它们提交到 Git。
+
+## Message Discovery（受限消息与媒体关联验证）
+
+1. 先完成 **Schema Discovery**，确认普通 SQLite 根目录下有 `SchemaReports/schema-summary.json`。
+2. 打开 **Message Discovery**。选择同一个普通 SQLite 根目录；应用只读取上述 Phase 2 报告来列出候选消息表。
+3. 选择一个候选消息表和 100、250 或 500 行上限。
+4. 选择你本人原始微信数据根目录。此输入是必需的：应用不会默认扫描整个磁盘或自动猜测微信目录。
+5. 点击 **Discover Message & Media**。它以 `SQLITE_OPEN_READONLY` 打开选中的普通数据库，最多读取所选行数；媒体扫描只读取文件头，并可通过 **Cancel** 停止。
+6. 在 **Limited Local Verification** 查看字段映射、时间单位、原始 type 分布、有限本机预览和媒体解析证据。预览只显示在当前窗口，不会写入报告或上传。
+7. 点击 **Open Local Analysis Report** 查看普通 SQLite 根目录下的 `.local-analysis/`：
+
+   ```text
+   .local-analysis/
+   ├── message-discovery.json
+   └── message-discovery.md
+   ```
+
+媒体仅在以下证据存在时才会标记为已解析：精确相对路径、唯一的 media ID 路径匹配、在已缩小候选集合内的精确 MD5，或由导出的 hardlink 映射表用精确 MD5 唯一定位到的本地文件。扫描器还能只读识别 JPEG/PNG/GIF 的单字节 XOR 文件头；必要时只在内存中恢复其字节以确认尺寸或精确 MD5，绝不修改原文件。仅文件名匹配会保持 **unresolved**。报告仅保留结构、字段名、样本数量、原始 type 统计、媒体格式/尺寸/大小和匹配置信度；不会保留消息正文、姓名、wxid、BLOB、媒体 ID、MD5、媒体文件名或绝对路径。目录权限是 `0700`，报告文件是 `0600`。
 
 ## 快照与临时明文数据
 
