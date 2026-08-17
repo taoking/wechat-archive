@@ -171,14 +171,22 @@ public struct WeChatImageAttachmentLocator: Sendable {
             let imageDirectory = monthURL.appending(path: "Img")
             guard isSafeDirectory(imageDirectory), isDescendant(imageDirectory, of: chatDirectory) else { return }
             monthDirectoryFound = true
-            usedMonthFallback = usedMonthFallback || fallback
-            if mainURL == nil { mainURL = safeFile(named: "\(fileBase).dat", below: imageDirectory) }
-            if hdURL == nil { hdURL = safeFile(named: "\(fileBase)_h.dat", below: imageDirectory) }
-            if thumbnailURL == nil { thumbnailURL = safeFile(named: "\(fileBase)_t.dat", below: imageDirectory) }
+            if mainURL == nil, let candidate = safeFile(named: "\(fileBase).dat", below: imageDirectory) {
+                mainURL = candidate
+                usedMonthFallback = usedMonthFallback || fallback
+            }
+            if hdURL == nil, let candidate = safeFile(named: "\(fileBase)_h.dat", below: imageDirectory) {
+                hdURL = candidate
+                usedMonthFallback = usedMonthFallback || fallback
+            }
+            if thumbnailURL == nil, let candidate = safeFile(named: "\(fileBase)_t.dat", below: imageDirectory) {
+                thumbnailURL = candidate
+                usedMonthFallback = usedMonthFallback || fallback
+            }
         }
 
         for (index, month) in primaryMonths.enumerated() {
-            inspect(monthURL: chatDirectory.appending(path: month), monthName: month, fallback: index != 1)
+            inspect(monthURL: chatDirectory.appending(path: month), monthName: month, fallback: index != 0)
         }
         if mainURL == nil && hdURL == nil && thumbnailURL == nil {
             for monthURL in try safeMonthDirectories(below: chatDirectory) {
@@ -199,8 +207,8 @@ public struct WeChatImageAttachmentLocator: Sendable {
     private func monthCandidates(for timestamp: Int64) -> [String] {
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
         let dates = [
-            calendar.date(byAdding: .month, value: -1, to: date),
             date,
+            calendar.date(byAdding: .month, value: -1, to: date),
             calendar.date(byAdding: .month, value: 1, to: date)
         ].compactMap { $0 }
         let formatter = DateFormatter()

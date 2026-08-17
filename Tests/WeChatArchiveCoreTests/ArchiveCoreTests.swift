@@ -7,6 +7,229 @@ import XCTest
 
 final class ArchiveCoreTests: XCTestCase {
 
+    func testArchiveV1DatabaseCreatesVersionedLosslessSchema() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archiveURL = directory.appending(path: "WeChatArchive/archive.sqlite")
+
+        let database = try WeChatArchiveV1Database(url: archiveURL)
+
+        try expectEqual(try database.schemaVersion(), 1)
+        try expectEqual(try database.requiredTables(), Set([
+            "import_runs", "conversations", "messages", "message_source_values", "media_assets", "message_media_links"
+        ]))
+        try expectEqual(try permissionBits(at: archiveURL.deletingLastPathComponent()), 0o700)
+        try expectEqual(try permissionBits(at: archiveURL), 0o600)
+    }
+
+    func testArchiveV1MediaStoreRejectsSymlinkedDestinationSubtree() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archiveRoot = directory.appending(path: "WeChatArchive")
+        let outsideRoot = directory.appending(path: "Outside")
+        try FileManager.default.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: archiveRoot.appending(path: "media"), withDestinationURL: outsideRoot)
+
+        var rejected = false
+        do {
+            _ = try WeChatArchiveV1MediaStore(root: archiveRoot)
+        } catch {
+            rejected = true
+        }
+
+        try expectTrue(rejected)
+        try expectFalse(FileManager.default.fileExists(atPath: outsideRoot.appending(path: "images").path()))
+    }
+
+    func testArchiveV1ImporterPreservesRowsArchivesImagesAndIsIdempotent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(
+            imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)])
+        )
+
+        let first = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .init(limit: 100)
+        )
+        var importedSourceRow: ArchiveV1SourceMessage?
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: fixture.exportRoot, limit: 1) { row in
+            importedSourceRow = row
+            return true
+        }
+        let sourceRow = try XCTUnwrap(importedSourceRow)
+        try expectEqual(sourceRow.sourceDatabase, "message/message_0.db")
+        try expectEqual(sourceRow.sourceTable, fixture.tableName)
+        try expectEqual(sourceRow.sourceRowIdentifier, "1")
+        let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
+        let sourceValues = try database.sourceValues(
+            sourceDatabase: sourceRow.sourceDatabase,
+            sourceTable: sourceRow.sourceTable,
+            rowIdentifier: sourceRow.sourceRowIdentifier
+        )
+        let reconstruction = try database.reconstruction()
+        let validation = try WeChatArchiveV1Validator().validate(at: destination)
+        let second = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .init(limit: 100)
+        )
+
+        try expectEqual(first.messagesImported, 3)
+        try expectEqual(first.textCount, 1)
+        try expectEqual(first.imageCount, 1)
+        try expectEqual(first.unknownCount, 1)
+        try expectEqual(first.rawDATArchived, 1)
+        try expectEqual(first.decodedImages, 1)
+        try expectEqual(first.missingLocalMedia, 2)
+        try expectEqual(sourceValues.count, 13)
+        try expectEqual(sourceValues["null_value"], .null)
+        try expectEqual(sourceValues["integer_value"], .integer(42))
+        try expectEqual(sourceValues["real_value"], .real(3.5))
+        try expectEqual(sourceValues["message_content"], .text("synthetic text"))
+        try expectEqual(sourceValues["compress_content"], .blob(fixture.textBlob))
+        try expectEqual(reconstruction.map(\.normalizedType), [.text, .image, .unknown])
+        try expectEqual(reconstruction.first?.textContent, "synthetic text")
+        try expectTrue(validation.passed)
+        try expectEqual(second.messagesImported, 0)
+        try expectEqual(second.messagesSkipped, 3)
+        try expectEqual(try database.messageCount(), 3)
+        try expectEqual(try database.mediaAssetCount(), 3)
+    }
+
+    func testArchiveV1SourceReaderPreservesAllSQLiteValueKinds() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        var sourceRow: ArchiveV1SourceMessage?
+
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: fixture.exportRoot, limit: 1) { row in
+            sourceRow = row
+            return true
+        }
+
+        let values = try XCTUnwrap(sourceRow?.values)
+        try expectEqual(values["null_value"], ArchivedSQLiteValue.null)
+        try expectEqual(values["integer_value"], .integer(42))
+        try expectEqual(values["real_value"], .real(3.5))
+        try expectEqual(values["message_content"], .text("synthetic text"))
+        try expectEqual(values["compress_content"], .blob(fixture.textBlob))
+    }
+
+    func testArchiveV1ImporterSupportsIncrementalImportWithoutDuplicates() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(
+            imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)])
+        )
+
+        let initial = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .init(limit: 1)
+        )
+        let incremental = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .all
+        )
+        let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
+
+        try expectEqual(initial.messagesImported, 1)
+        try expectEqual(incremental.messagesImported, 2)
+        try expectEqual(incremental.messagesSkipped, 1)
+        try expectEqual(try database.messageCount(), 3)
+    }
+
+    func testArchiveV1ImporterCancellationLeavesValidCommittedMessages() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let destination = directory.appending(path: "WeChatArchive")
+        let cancellation = TestCancellation(afterChecks: 1)
+        let importer = WeChatArchiveV1Importer(
+            imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)])
+        )
+
+        let summary = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .all,
+            shouldCancel: { cancellation.shouldCancel() }
+        )
+        let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
+        let validation = try WeChatArchiveV1Validator().validate(at: destination)
+
+        try expectEqual(summary.status, .cancelled)
+        try expectEqual(summary.messagesImported, 1)
+        try expectEqual(try database.messageCount(), 1)
+        try expectTrue(validation.passed)
+    }
+
+    func testArchiveV1ImageDecodeFailureStillPreservesImageMessageAndRawDAT() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        var invalidDAT = try Data(contentsOf: fixture.thumbnailDATURL)
+        invalidDAT[invalidDAT.index(before: invalidDAT.endIndex)] ^= 0x01
+        try invalidDAT.write(to: fixture.thumbnailDATURL)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(
+            imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)])
+        )
+
+        let summary = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot,
+            accountRoot: fixture.accountRoot,
+            destinationRoot: destination,
+            options: .all
+        )
+        let reconstruction = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite")).reconstruction()
+
+        try expectEqual(summary.messagesImported, 3)
+        try expectEqual(summary.rawDATArchived, 1)
+        try expectEqual(summary.decodedImages, 0)
+        try expectEqual(summary.decodeFailures, 1)
+        try expectTrue(reconstruction.contains { $0.normalizedType == .image && $0.mediaStatuses.contains(.invalidPadding) })
+    }
+
+    func testArchiveV1ReconstructionUsesStableTimestampAndSourceSequenceOrdering() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try WeChatArchiveV1Database(url: directory.appending(path: "WeChatArchive/archive.sqlite"))
+        let conversationID = try database.upsertConversation(sourceIdentity: "Msg_0123456789abcdef0123456789abcdef")
+        let textA = try database.insertMessage(
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "1", sourceLocalID: 1, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "A", replySourceID: nil, sourceSequence: 1, sourceValues: [:]
+        )
+        let imageB = try database.insertMessage(
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "2", sourceLocalID: 2, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 3, normalizedType: .image, textContent: nil, replySourceID: nil, sourceSequence: 2, sourceValues: [:]
+        )
+        _ = try database.insertMediaAsset(
+            messageID: imageB.id, variant: .thumbnail, status: .missing, sourceFormat: nil, decodedFormat: nil, rawArchivePath: nil, decodedArchivePath: nil, rawSize: nil, decodedSize: nil, width: nil, height: nil, rawSHA256: nil, decodedSHA256: nil, sourceFileBase: nil
+        )
+        _ = try database.insertMessage(
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "3", sourceLocalID: 3, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "C", replySourceID: nil, sourceSequence: 3, sourceValues: [:]
+        )
+        _ = textA
+
+        let reconstructed = try database.reconstruction()
+
+        try expectEqual(reconstructed.map(\.normalizedType), [.text, .image, .text])
+        try expectEqual(reconstructed.map(\.textContent), ["A", nil, "C"])
+        try expectEqual(reconstructed[1].mediaStatuses, [.missing])
+    }
+
     func testArchiveWriterPartitionsMessagesByConversationAndYearAndPreservesUnknownPayload() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -944,6 +1167,29 @@ final class ArchiveCoreTests: XCTestCase {
         try expectTrue(assets.usedMonthFallback)
     }
 
+    func testImageAttachmentLocatorPrefersCurrentMonthOverPreviousMonth() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let chat = String(repeating: "b", count: 32)
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let previous = directory.appending(path: "msg/attach/\(chat)/2025-01/Img")
+        let current = directory.appending(path: "msg/attach/\(chat)/2025-02/Img")
+        try FileManager.default.createDirectory(at: previous, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
+        try Data([1]).write(to: previous.appending(path: "\(fileBase)_t.dat"))
+        try Data([2]).write(to: current.appending(path: "\(fileBase)_t.dat"))
+
+        let assets = try WeChatImageAttachmentLocator(calendar: fixtureCalendar).locate(
+            accountRoot: directory,
+            chatDirectoryComponent: chat,
+            fileBase: fileBase,
+            createTime: 1_738_368_000
+        )
+
+        try expectEqual(try Data(contentsOf: try XCTUnwrap(assets.thumbnailURL)), Data([2]))
+        try expectFalse(assets.usedMonthFallback)
+    }
+
     func testImageAttachmentLocatorRejectsMediaTreeSymlinkOutsideAccountRoot() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1815,6 +2061,56 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    private func makeArchiveV1SourceFixture(in directory: URL) throws -> ArchiveV1Fixture {
+        let exportRoot = directory.appending(path: "Export")
+        let accountRoot = directory.appending(path: "Account")
+        let conversationName = "archive fixture conversation"
+        let conversationDigest = fixtureMD5Hex(conversationName)
+        let tableName = "Msg_\(conversationDigest)"
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let packedInfo = Data([0x12, 0x22, 0x0A, 0x20]) + Data(fileBase.utf8)
+        let packedHex = packedInfo.map { String(format: "%02x", $0) }.joined()
+        let textBlob = Data([0x00, 0x01, 0x02, 0xFF])
+        let textBlobHex = textBlob.map { String(format: "%02x", $0) }.joined()
+        let timestamp: Int64 = 1_738_368_000
+        let messageDatabase = exportRoot.appending(path: "message/message_0.db")
+        let resourceDatabase = exportRoot.appending(path: "message/message_resource.db")
+        try FileManager.default.createDirectory(at: messageDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: messageDatabase, sql: """
+            CREATE TABLE \(tableName) (
+                local_id INTEGER, server_id INTEGER, local_type INTEGER, real_sender_id TEXT,
+                receiver_id TEXT, create_time INTEGER, source TEXT, message_content TEXT,
+                compress_content BLOB, packed_info_data BLOB, integer_value INTEGER,
+                real_value REAL, null_value TEXT
+            );
+            INSERT INTO \(tableName) VALUES (1, 101, 1, 'sender-a', 'receiver-a', \(timestamp), 'conversation-a', 'synthetic text', X'\(textBlobHex)', X'00', 42, 3.5, NULL);
+            INSERT INTO \(tableName) VALUES (2, 102, 3, 'sender-b', 'receiver-b', \(timestamp + 1), 'conversation-a', NULL, X'ABCD', X'\(packedHex)', 43, 4.5, NULL);
+            INSERT INTO \(tableName) VALUES (3, 103, 34, 'sender-c', 'receiver-c', \(timestamp + 2), 'conversation-a', NULL, X'01020304', X'00', 44, 5.5, NULL);
+            """)
+        try createPlainSQLiteDatabase(at: resourceDatabase, sql: """
+            CREATE TABLE ChatName2Id (user_name TEXT, update_time INTEGER);
+            INSERT INTO ChatName2Id VALUES ('\(conversationName)', 0);
+            CREATE TABLE MessageResourceInfo (message_id INTEGER, chat_id INTEGER, sender_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, message_origin_source INTEGER, packed_info BLOB);
+            INSERT INTO MessageResourceInfo VALUES (99, 1, 0, 3, \(timestamp + 1), 2, 102, 0, X'\(packedHex)');
+            CREATE TABLE MessageResourceDetail (resource_id INTEGER, message_id INTEGER, type INTEGER, size INTEGER, create_time INTEGER, access_time INTEGER, status INTEGER, data_index TEXT, packed_info BLOB);
+            INSERT INTO MessageResourceDetail VALUES (1, 99, 1, 1, \(timestamp), \(timestamp), 0, 'fixture', X'00');
+            """)
+        let imageKey = Data("0123456789abcdef".utf8)
+        let dat = try makeSyntheticV2DAT(plaintext: syntheticPNGData(), key: imageKey, xorTail: Data())
+        let imageDirectory = accountRoot.appending(path: "msg/attach/\(conversationDigest)/2025-02/Img")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        let thumbnailDATURL = imageDirectory.appending(path: "\(fileBase)_t.dat")
+        try dat.write(to: thumbnailDATURL)
+        return ArchiveV1Fixture(
+            exportRoot: exportRoot,
+            accountRoot: accountRoot,
+            tableName: tableName,
+            imageKey: imageKey,
+            textBlob: textBlob,
+            thumbnailDATURL: thumbnailDATURL
+        )
+    }
+
     private func syntheticPNGData() -> Data {
         Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAH/iZk9HQAAAABJRU5ErkJggg==")!
     }
@@ -1880,6 +2176,29 @@ private struct FixtureImageKeyProvider: WeChatImageKeyProvider {
     func keyCandidates(accountRoot: URL) throws -> [WeChatImageKeyMaterial] {
         materials
     }
+}
+
+private final class TestCancellation: @unchecked Sendable {
+    private let afterChecks: Int
+    private var checks = 0
+
+    init(afterChecks: Int) {
+        self.afterChecks = afterChecks
+    }
+
+    func shouldCancel() -> Bool {
+        checks += 1
+        return checks > afterChecks
+    }
+}
+
+private struct ArchiveV1Fixture {
+    let exportRoot: URL
+    let accountRoot: URL
+    let tableName: String
+    let imageKey: Data
+    let textBlob: Data
+    let thumbnailDATURL: URL
 }
 
 private var fixtureCalendar: Calendar {
