@@ -706,7 +706,7 @@ final class ArchiveCoreTests: XCTestCase {
         try expectTrue(blob.data == nil)
     }
 
-    func testMessagePayloadInspectorExtractsBoundedEmbeddedMD5FromBLOB() throws {
+    func testMessagePayloadInspectorExtractsBoundedHex32CandidateFromBLOB() throws {
         let md5 = "d41d8cd98f00b204e9800998ecf8427e"
         let data = Data(repeating: 0, count: 64 * 1_024) + Data([0x01, 0x02]) + Data(md5.utf8) + Data([0x00, 0x03])
         let blob = SQLiteBlobSourceValue(
@@ -718,8 +718,250 @@ final class ArchiveCoreTests: XCTestCase {
         let inspection = MessagePayloadInspector().inspect(value: .blob(blob))
 
         try expectEqual(inspection.kind, .blob)
-        try expectEqual(inspection.md5, md5)
-        try expectTrue(inspection.metadataFieldNames.contains("embedded_md5"))
+        try expectTrue(inspection.confirmedMD5 == nil)
+        try expectEqual(inspection.candidateIdentifiers.first?.value, md5)
+        try expectEqual(inspection.candidateIdentifiers.first?.sourceColumn, "")
+        try expectTrue(inspection.metadataFieldNames.contains("hex32_candidate"))
+    }
+
+    func testMessagePayloadInspectorTreatsUnkeyedHex32AsCandidateInsteadOfConfirmedMD5() throws {
+        let hex32 = "d41d8cd98f00b204e9800998ecf8427e"
+        let blob = SQLiteBlobSourceValue(
+            length: 40,
+            sha256: "fixture-digest",
+            data: Data([0x01, 0x02]) + Data(hex32.utf8) + Data([0x03, 0x04])
+        )
+
+        let inspection = MessagePayloadInspector().inspect(value: .blob(blob))
+
+        try expectTrue(inspection.confirmedMD5 == nil)
+        try expectEqual(inspection.candidateIdentifiers.first?.representation, .hex32)
+        try expectEqual(inspection.candidateIdentifiers.first?.semanticHint, .hex32Candidate)
+    }
+
+    func testMessagePayloadInspectionCodableOutputExcludesIdentifierValues() throws {
+        let privateIdentifier = "d41d8cd98f00b204e9800998ecf8427e"
+        let inspection = MessagePayloadInspection(
+            kind: .blob,
+            confirmedMD5: privateIdentifier,
+            candidateIdentifiers: [.init(sourceColumn: "packed_info_data", offset: 0, representation: .hex32, length: 32, semanticHint: .hex32Candidate, valueKind: .hex32, value: privateIdentifier)],
+            blobSHA256: privateIdentifier
+        )
+
+        let encoded = try JSONEncoder().encode(inspection)
+        let text = String(decoding: encoded, as: UTF8.self)
+
+        try expectFalse(text.contains(privateIdentifier))
+    }
+
+    func testType3SampleReaderUsesBoundedIntegerPredicate() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, local_type INTEGER, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 1, X'00');
+            INSERT INTO message VALUES (2, 3, X'01');
+            INSERT INTO message VALUES (3, 3, X'02');
+            """)
+        let candidate = MessageTableCandidate(
+            databaseRelativePath: "message/message_0.db",
+            tableName: "message",
+            rowCount: 3,
+            score: 100,
+            columns: ["local_id", "local_type", "packed_info_data"]
+        )
+
+        let records = try WeChatMessageSampleReader().read(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            whereIntegerColumn: "local_type",
+            equals: 3,
+            sampleLimit: 100
+        )
+
+        try expectEqual(records.count, 2)
+        try expectTrue(records.allSatisfy { $0.values["local_type"]?.integerValue == 3 })
+    }
+
+    func testType3PayloadAnalyzerClassifiesProtobufBinaryDigestAndZlibHeader() throws {
+        let digestBytes = Data(repeating: 0xAB, count: 16)
+        let protobuf = Data([0x0A, 0x10]) + digestBytes
+        let records = [
+            SourceMessageRecord(
+                identity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "1"),
+                values: [
+                    "local_type": .integer(3),
+                    "compress_content": .blob(.init(length: 2, sha256: "zlib", data: Data([0x78, 0x9C]))),
+                    "packed_info_data": .blob(.init(length: protobuf.count, sha256: "proto", data: protobuf))
+                ]
+            )
+        ]
+
+        let analysis = Type3PayloadAnalyzer().analyze(records: records)
+
+        try expectEqual(analysis.sampledRecordCount, 1)
+        try expectTrue(analysis.payloadObservations.contains { $0.compression == .zlib })
+        try expectTrue(analysis.candidateIdentifiers.contains { $0.representation == .binary16 && $0.semanticHint == .unknownIdentifier })
+        try expectTrue(analysis.candidateIdentifiers.contains { $0.representation == .binary16 && $0.value?.count == 32 })
+        try expectTrue(analysis.payloadObservations.contains { $0.payloadKind == .protobufLike })
+    }
+
+    func testType3PayloadAnalyzerRetainsOnlyInMemoryIdentifiersFromNamedColumns() throws {
+        let hex32 = "d41d8cd98f00b204e9800998ecf8427e"
+        let record = SourceMessageRecord(
+            identity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "1"),
+            values: [
+                "media_id": .text("opaque-media-reference"),
+                "file_md5": .text(hex32)
+            ]
+        )
+
+        let analysis = Type3PayloadAnalyzer().analyze(records: [record])
+
+        try expectTrue(analysis.candidateIdentifiers.contains { $0.sourceColumn == "media_id" && $0.semanticHint == .mediaID && $0.value == "opaque-media-reference" })
+        try expectTrue(analysis.candidateIdentifiers.contains { $0.sourceColumn == "file_md5" && $0.semanticHint == .confirmedMD5 && $0.value == hex32 })
+    }
+
+    func testHardlinkCandidateCrossValidationQueriesOnlyMD5TextColumns() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let candidate = "d41d8cd98f00b204e9800998ecf8427e"
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5_hash INTEGER, md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER);
+            CREATE TABLE video_hardlink_info_v4 (md5_hash INTEGER, md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER);
+            CREATE TABLE file_hardlink_info_v4 (md5_hash INTEGER, md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER);
+            INSERT INTO image_hardlink_info_v4 VALUES (123, '\(candidate)', 'fixture', 1, 2);
+            INSERT INTO video_hardlink_info_v4 VALUES (456, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'fixture', 1, 2);
+            """)
+
+        let result = try WeChatMediaDatabaseMapper().crossValidate(hex32Candidates: [candidate], exportRoot: exportRoot)
+
+        try expectEqual(result.candidateCount, 1)
+        try expectEqual(result.uniqueCandidateCount, 1)
+        try expectEqual(result.imageHits, 1)
+        try expectEqual(result.videoHits, 0)
+        try expectEqual(result.fileHits, 0)
+        try expectEqual(result.noHitCount, 0)
+    }
+
+    func testHardlinkInspectorReportsFullSchemaIndexesAndHashRelationWithoutValues() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (
+                md5_hash INTEGER, md5 TEXT, type INTEGER, file_name TEXT,
+                file_size INTEGER, modify_time INTEGER, dir1 INTEGER, dir2 INTEGER,
+                extra_buffer BLOB
+            );
+            CREATE INDEX image_md5_hash_index ON image_hardlink_info_v4(md5_hash);
+            INSERT INTO image_hardlink_info_v4 VALUES (1, 'd41d8cd98f00b204e9800998ecf8427e', 1, 'fixture', 4, 5, 6, 7, X'01');
+            """)
+
+        let inspection = try WeChatMediaDatabaseMapper().inspectHardlinkDatabase(exportRoot: exportRoot)
+        let image = try unwrap(inspection.tables.first { $0.tableName == "image_hardlink_info_v4" })
+
+        try expectEqual(image.rowCount, 1)
+        try expectTrue(image.columns.contains { $0.name == "file_size" && $0.declaredType == "INTEGER" })
+        try expectTrue(image.indexes.contains { $0.columns == ["md5_hash"] })
+        try expectTrue(image.md5HashRelation?.isOneToOneWithMD5 == true)
+    }
+
+    func testAttachDirectoryInspectorCountsHeadersWithoutReturningFilenames() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountRoot = directory.appending(path: "Account")
+        let attach = accountRoot.appending(path: "msg/attach")
+        try FileManager.default.createDirectory(at: attach, withIntermediateDirectories: true)
+        try syntheticPNGData().write(to: attach.appending(path: "first.dat"))
+        let xorKey: UInt8 = 0x5A
+        try Data(syntheticPNGData().map { $0 ^ xorKey }).write(to: attach.appending(path: "second.dat"))
+        try Data("opaque".utf8).write(to: attach.appending(path: "third.dat"))
+
+        let inspection = try WeChatAttachDirectoryInspector().inspect(accountRoot: accountRoot, maximumHeaderSamples: 100)
+
+        try expectEqual(inspection.fileCount, 3)
+        try expectEqual(inspection.extensionDistribution["dat"], 3)
+        try expectEqual(inspection.plainImageCount, 1)
+        try expectEqual(inspection.xorImageCount, 1)
+        try expectEqual(inspection.unknownHeaderCount, 1)
+    }
+
+    func testType3ReportExcludesCandidateValuesAndWritesOnlyAggregates() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let privateCandidate = "d41d8cd98f00b204e9800998ecf8427e"
+        let payloadAnalysis = Type3PayloadAnalysis(
+            sampledRecordCount: 1,
+            payloadObservations: [.init(
+                sourceColumn: "packed_info_data",
+                storageClass: .blob,
+                byteLength: 32,
+                compression: .none,
+                payloadKind: .protobufLike,
+                protobufFields: [.init(fieldNumber: 1, wireType: 2, valueLength: 16)]
+            )],
+            candidateIdentifiers: [.init(sourceColumn: "packed_info_data", offset: 0, representation: .hex32, length: 32, semanticHint: .hex32Candidate, valueKind: .hex32, value: privateCandidate)],
+            identifierSummaries: [.init(sourceColumn: "packed_info_data", representation: .hex32, semanticHint: .hex32Candidate, count: 1)]
+        )
+        let result = Type3MediaLinkDiscoveryResult(
+            payloadAnalysis: payloadAnalysis,
+            hardlinkCrossValidation: .init(candidateCount: 1, uniqueCandidateCount: 1, imageHits: 0, videoHits: 0, fileHits: 0, noHitCount: 1),
+            hardlinkDatabase: .init(tables: []),
+            mediaMetadataSchema: nil,
+            diagnostics: [.candidateIdentifierFound, .candidateIdentifierNotConfirmed]
+        )
+
+        let locations = try Type3MediaAnalysisReportWriter().write(result, attachInspection: nil, to: directory.appending(path: ".local-analysis"))
+        let text = try String(contentsOf: locations.jsonURL, encoding: .utf8)
+
+        try expectFalse(text.contains(privateCandidate))
+        try expectTrue(text.contains("hex32Candidate"))
+        try expectTrue(text.contains("protobufFieldAggregates"))
+        try expectTrue(text.contains("fieldNumber"))
+        try expectEqual(try permissionBits(at: locations.directoryURL), 0o700)
+        try expectEqual(try permissionBits(at: locations.jsonURL), 0o600)
+    }
+
+    func testHardlinkTimeCorrelationReturnsOnlyUnitsAndOverlap() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER, modify_time INTEGER);
+            INSERT INTO image_hardlink_info_v4 VALUES ('d41d8cd98f00b204e9800998ecf8427e', 'fixture', 1, 2, 150);
+            """)
+
+        let correlation = try unwrap(try WeChatMediaDatabaseMapper().correlateMessageTimes([100, 200], exportRoot: exportRoot))
+
+        try expectEqual(correlation.messageTimeUnit, .seconds)
+        try expectEqual(correlation.hardlinkModifyTimeUnit, .seconds)
+        try expectTrue(correlation.rangesOverlap)
+    }
+
+    func testHardlinkTimeCorrelationReturnsNilWhenModifyTimeIsUnavailable() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER);
+            """)
+
+        let correlation = try WeChatMediaDatabaseMapper().correlateMessageTimes([100, 200], exportRoot: exportRoot)
+
+        try expectTrue(correlation == nil)
     }
 
     func testMessageDiscoveryPrefersCompressedPayloadForEmbeddedMediaReference() throws {
@@ -738,7 +980,8 @@ final class ArchiveCoreTests: XCTestCase {
         let analysis = try WeChatMessageDiscovery().inspect(exportRoot: exportRoot, candidate: candidate)
 
         try expectEqual(analysis.fieldMapping.payloadColumn, "compress_content")
-        try expectEqual(analysis.mediaReferences.first?.md5, md5)
+        try expectTrue(analysis.mediaReferences.first?.confirmedMD5 == nil)
+        try expectEqual(analysis.mediaReferences.first?.candidateIdentifiers.first?.value, md5)
     }
 
     func testMediaScannerDetectsPNGMagicAndResolverConfirmsExactMD5Match() throws {
@@ -987,7 +1230,10 @@ final class ArchiveCoreTests: XCTestCase {
 
         try expectTrue(result.mediaScan?.isTruncated == true)
         try expectTrue(result.diagnostics.contains(.mediaScanTruncated))
-        try expectEqual(result.links.first?.diagnostic, .hardlinkDatabaseMissing)
+        // An unkeyed hex32 payload is an identifier candidate, not a confirmed
+        // MD5. The fallback scan still reports truncation, but it must not
+        // claim that the absent hardlink database was queried for this value.
+        try expectEqual(result.links.first?.diagnostic, .noSafeFallbackMatch)
     }
 
     func testSingleFileInspectionRejectsSymbolicLinksBeforeResolvingThem() throws {

@@ -227,7 +227,11 @@ public struct MessagePayloadInspection: Codable, Equatable, Sendable {
     public let jsonKeys: [String]
     public let metadataFieldNames: [String]
     public let mediaTypeHint: MessageMediaTypeHint?
-    public let md5: String?
+    /// An MD5 only after explicit semantic evidence (for example an XML
+    /// attribute named `md5`). Arbitrary 32-hex substrings stay candidates.
+    public let confirmedMD5: String?
+    /// Local-only candidates. This property is intentionally not Codable.
+    public let candidateIdentifiers: [CandidateMediaIdentifier]
     public let mediaID: String?
     public let relativePathHint: String?
     public let blobLength: Int?
@@ -241,6 +245,8 @@ public struct MessagePayloadInspection: Codable, Equatable, Sendable {
         metadataFieldNames: [String] = [],
         mediaTypeHint: MessageMediaTypeHint? = nil,
         md5: String? = nil,
+        confirmedMD5: String? = nil,
+        candidateIdentifiers: [CandidateMediaIdentifier] = [],
         mediaID: String? = nil,
         relativePathHint: String? = nil,
         blobLength: Int? = nil,
@@ -252,20 +258,73 @@ public struct MessagePayloadInspection: Codable, Equatable, Sendable {
         self.jsonKeys = jsonKeys
         self.metadataFieldNames = metadataFieldNames
         self.mediaTypeHint = mediaTypeHint
-        self.md5 = md5
+        self.confirmedMD5 = confirmedMD5 ?? md5
+        self.candidateIdentifiers = candidateIdentifiers
         self.mediaID = mediaID
         self.relativePathHint = relativePathHint
         self.blobLength = blobLength
         self.blobSHA256 = blobSHA256
+    }
+
+    /// Backward-compatible shorthand. Its value is always semantically
+    /// confirmed; generic hex32 candidates never populate this property.
+    public var md5: String? { confirmedMD5 }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case elementNames
+        case attributeNames
+        case jsonKeys
+        case metadataFieldNames
+        case mediaTypeHint
+        case md5
+        case mediaID
+        case relativePathHint
+        case blobLength
+        case blobSHA256
+    }
+
+    /// The Codable representation is deliberately structural only. Older
+    /// representations containing identifiers can still be read, but neither
+    /// an identifier nor a BLOB fingerprint is written out.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            kind: try container.decode(MessagePayloadKind.self, forKey: .kind),
+            elementNames: try container.decodeIfPresent([String].self, forKey: .elementNames) ?? [],
+            attributeNames: try container.decodeIfPresent([String].self, forKey: .attributeNames) ?? [],
+            jsonKeys: try container.decodeIfPresent([String].self, forKey: .jsonKeys) ?? [],
+            metadataFieldNames: try container.decodeIfPresent([String].self, forKey: .metadataFieldNames) ?? [],
+            mediaTypeHint: try container.decodeIfPresent(MessageMediaTypeHint.self, forKey: .mediaTypeHint),
+            md5: try container.decodeIfPresent(String.self, forKey: .md5),
+            mediaID: try container.decodeIfPresent(String.self, forKey: .mediaID),
+            relativePathHint: try container.decodeIfPresent(String.self, forKey: .relativePathHint),
+            blobLength: try container.decodeIfPresent(Int.self, forKey: .blobLength),
+            blobSHA256: try container.decodeIfPresent(String.self, forKey: .blobSHA256)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(elementNames, forKey: .elementNames)
+        try container.encode(attributeNames, forKey: .attributeNames)
+        try container.encode(jsonKeys, forKey: .jsonKeys)
+        try container.encode(metadataFieldNames, forKey: .metadataFieldNames)
+        try container.encodeIfPresent(mediaTypeHint, forKey: .mediaTypeHint)
+        try container.encodeIfPresent(blobLength, forKey: .blobLength)
     }
 }
 
 public struct MediaReference: Equatable, Sendable {
     public let sourceMessageIdentity: SourceMessageIdentity
     public let mediaTypeHint: MessageMediaTypeHint?
-    public let md5: String?
+    public let confirmedMD5: String?
     public let mediaID: String?
     public let relativePathHint: String?
+    /// Local-only candidates from structural payload scanning. They are never
+    /// serialized by a report and are not automatically treated as MD5.
+    public let candidateIdentifiers: [CandidateMediaIdentifier]
     /// Structural keys only; never contains key material or raw payload text.
     public let metadataFieldNames: [String]
 
@@ -275,15 +334,19 @@ public struct MediaReference: Equatable, Sendable {
         md5: String?,
         mediaID: String?,
         relativePathHint: String?,
-        metadataFieldNames: [String]
+        metadataFieldNames: [String],
+        candidateIdentifiers: [CandidateMediaIdentifier] = []
     ) {
         self.sourceMessageIdentity = sourceMessageIdentity
         self.mediaTypeHint = mediaTypeHint
-        self.md5 = md5
+        self.confirmedMD5 = md5
         self.mediaID = mediaID
         self.relativePathHint = relativePathHint
         self.metadataFieldNames = metadataFieldNames
+        self.candidateIdentifiers = candidateIdentifiers
     }
+
+    public var md5: String? { confirmedMD5 }
 }
 
 public struct MessageSampleAnalysis: Equatable, Sendable {
@@ -351,6 +414,29 @@ public struct WeChatMessageSampleReader: Sendable {
         return try database.readRows(candidate: candidate, limit: limit)
     }
 
+    /// Reads a bounded subset using a schema-confirmed INTEGER column. The
+    /// predicate value is bound, never interpolated into SQL.
+    public func read(
+        exportRoot: URL,
+        candidate: MessageTableCandidate,
+        whereIntegerColumn: String,
+        equals: Int64,
+        sampleLimit: Int = 100
+    ) throws -> [SourceMessageRecord] {
+        let limit = min(max(sampleLimit, 1), 100)
+        guard candidate.columns.contains(where: { $0 == whereIntegerColumn }) else {
+            throw ArchiveError.invalidInput
+        }
+        let databaseURL = try sourceDatabaseURL(exportRoot: exportRoot, relativePath: candidate.databaseRelativePath)
+        let database = try SQLiteMessageSampleDatabase(url: databaseURL)
+        return try database.readRows(
+            candidate: candidate,
+            whereIntegerColumn: whereIntegerColumn,
+            equals: equals,
+            limit: limit
+        )
+    }
+
     private func sourceDatabaseURL(exportRoot: URL, relativePath: String) throws -> URL {
         let root = exportRoot.standardizedFileURL
         let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -392,7 +478,7 @@ public struct WeChatMessageAnalyzer: Sendable {
             var inspection: MessagePayloadInspection?
             for column in inspectionColumns(mapping: mapping, candidateColumns: candidate.columns) {
                 guard let value = record.values[column] else { continue }
-                let candidateInspection = inspector.inspect(value: value)
+                let candidateInspection = inspector.inspect(value: value, sourceColumn: column)
                 if inspection == nil || inspectionScore(candidateInspection) > inspectionScore(inspection!) {
                     inspection = candidateInspection
                 }
@@ -400,14 +486,15 @@ public struct WeChatMessageAnalyzer: Sendable {
             guard let inspection else { continue }
             inspections[record.identity] = inspection
             if inspection.kind == .text { textCandidates.append(record.identity) }
-            if inspection.mediaTypeHint != nil || inspection.md5 != nil || inspection.mediaID != nil || inspection.relativePathHint != nil {
+            if inspection.mediaTypeHint != nil || inspection.confirmedMD5 != nil || inspection.mediaID != nil || inspection.relativePathHint != nil || !inspection.candidateIdentifiers.isEmpty {
                 mediaReferences.append(MediaReference(
                     sourceMessageIdentity: record.identity,
                     mediaTypeHint: inspection.mediaTypeHint,
-                    md5: inspection.md5,
+                    md5: inspection.confirmedMD5,
                     mediaID: inspection.mediaID,
                     relativePathHint: inspection.relativePathHint,
-                    metadataFieldNames: inspection.metadataFieldNames
+                    metadataFieldNames: inspection.metadataFieldNames,
+                    candidateIdentifiers: inspection.candidateIdentifiers
                 ))
             }
         }
@@ -435,6 +522,7 @@ public struct WeChatMessageAnalyzer: Sendable {
 
     private func inspectionScore(_ inspection: MessagePayloadInspection) -> Int {
         if inspection.md5 != nil || inspection.mediaID != nil || inspection.relativePathHint != nil { return 100 }
+        if !inspection.candidateIdentifiers.isEmpty { return 95 }
         if inspection.mediaTypeHint != nil { return 90 }
         return switch inspection.kind {
         case .xml: 80
@@ -503,12 +591,12 @@ public struct TimestampDetector: Sendable {
 public struct MessagePayloadInspector: Sendable {
     public init() {}
 
-    public func inspect(value: SQLiteSourceValue) -> MessagePayloadInspection {
+    public func inspect(value: SQLiteSourceValue, sourceColumn: String = "") -> MessagePayloadInspection {
         switch value {
         case .null: MessagePayloadInspection(kind: .empty)
         case .integer, .real: MessagePayloadInspection(kind: .unknown)
         case let .text(text): inspect(text: text)
-        case let .blob(blob): inspect(blob: blob)
+        case let .blob(blob): inspect(blob: blob, sourceColumn: sourceColumn)
         }
     }
 
@@ -552,31 +640,31 @@ public struct MessagePayloadInspector: Sendable {
         return MessagePayloadInspection(kind: .json, jsonKeys: keys.sorted(), mediaTypeHint: mediaType)
     }
 
-    /// Some native payloads retain a 32-character content MD5 inside an
-    /// otherwise opaque BLOB. This is a bounded structural probe (the reader
-    /// retains at most 256 KiB per BLOB), not a decoder: it never converts or
-    /// emits the surrounding bytes.
-    private func inspect(blob: SQLiteBlobSourceValue) -> MessagePayloadInspection {
+    /// A native BLOB may retain a 32-hex token. This bounded probe neither
+    /// assigns MD5 semantics nor emits the surrounding bytes: only a field
+    /// explicitly named `md5`, a mapping hit, or content verification may do
+    /// that. The Type 3 analyzer adds the source-column context.
+    private func inspect(blob: SQLiteBlobSourceValue, sourceColumn: String) -> MessagePayloadInspection {
         var inspection = MessagePayloadInspection(
             kind: .blob,
             blobLength: blob.length,
             blobSHA256: blob.sha256
         )
         guard let data = blob.data,
-              let md5 = embeddedMD5(in: data) else {
+              let candidate = hex32Candidate(in: data, sourceColumn: sourceColumn) else {
             return inspection
         }
         inspection = MessagePayloadInspection(
             kind: .blob,
-            metadataFieldNames: ["embedded_md5"],
-            md5: md5,
+            metadataFieldNames: ["hex32_candidate"],
+            candidateIdentifiers: [candidate],
             blobLength: blob.length,
             blobSHA256: blob.sha256
         )
         return inspection
     }
 
-    private func embeddedMD5(in data: Data) -> String? {
+    private func hex32Candidate(in data: Data, sourceColumn: String) -> CandidateMediaIdentifier? {
         let bytes = Array(data)
         guard bytes.count >= 32 else { return nil }
         func isHex(_ byte: UInt8) -> Bool {
@@ -589,7 +677,15 @@ public struct MessagePayloadInspector: Sendable {
                   (end == bytes.count || !isHex(bytes[end])) else {
                 continue
             }
-            return String(decoding: bytes[start..<end], as: UTF8.self).lowercased()
+            return CandidateMediaIdentifier(
+                sourceColumn: sourceColumn,
+                offset: start,
+                representation: .hex32,
+                length: 32,
+                semanticHint: .hex32Candidate,
+                valueKind: .hex32,
+                value: String(decoding: bytes[start..<end], as: UTF8.self).lowercased()
+            )
         }
         return nil
     }
@@ -666,24 +762,58 @@ private final class SQLiteMessageSampleDatabase {
 
     func readRows(candidate: MessageTableCandidate, limit: Int) throws -> [SourceMessageRecord] {
         let withRowID = "SELECT rowid AS \"__wechatarchive_source_rowid\", * FROM \(quoteIdentifier(candidate.tableName)) ORDER BY rowid DESC LIMIT ?"
-        if let rows = try? execute(candidate: candidate, sql: withRowID, limit: limit, hasRowID: true) {
+        if let rows = try? execute(candidate: candidate, sql: withRowID, limit: limit, hasRowID: true, integerPredicate: nil) {
             return rows
         }
         return try execute(
             candidate: candidate,
             sql: "SELECT * FROM \(quoteIdentifier(candidate.tableName)) LIMIT ?",
             limit: limit,
-            hasRowID: false
+            hasRowID: false,
+            integerPredicate: nil
         )
     }
 
-    private func execute(candidate: MessageTableCandidate, sql: String, limit: Int, hasRowID: Bool) throws -> [SourceMessageRecord] {
+    func readRows(
+        candidate: MessageTableCandidate,
+        whereIntegerColumn: String,
+        equals: Int64,
+        limit: Int
+    ) throws -> [SourceMessageRecord] {
+        let predicate = " WHERE \(quoteIdentifier(whereIntegerColumn)) = ?"
+        let withRowID = "SELECT rowid AS \"__wechatarchive_source_rowid\", * FROM \(quoteIdentifier(candidate.tableName))\(predicate) ORDER BY rowid DESC LIMIT ?"
+        if let rows = try? execute(candidate: candidate, sql: withRowID, limit: limit, hasRowID: true, integerPredicate: equals) {
+            return rows
+        }
+        return try execute(
+            candidate: candidate,
+            sql: "SELECT * FROM \(quoteIdentifier(candidate.tableName))\(predicate) LIMIT ?",
+            limit: limit,
+            hasRowID: false,
+            integerPredicate: equals
+        )
+    }
+
+    private func execute(
+        candidate: MessageTableCandidate,
+        sql: String,
+        limit: Int,
+        hasRowID: Bool,
+        integerPredicate: Int64?
+    ) throws -> [SourceMessageRecord] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             throw ArchiveError.databaseFailure
         }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_bind_int(statement, 1, Int32(limit)) == SQLITE_OK else { throw ArchiveError.databaseFailure }
+        if let integerPredicate {
+            guard sqlite3_bind_int64(statement, 1, integerPredicate) == SQLITE_OK,
+                  sqlite3_bind_int(statement, 2, Int32(limit)) == SQLITE_OK else {
+                throw ArchiveError.databaseFailure
+            }
+        } else {
+            guard sqlite3_bind_int(statement, 1, Int32(limit)) == SQLITE_OK else { throw ArchiveError.databaseFailure }
+        }
         let columnCount = sqlite3_column_count(statement)
         var records = [SourceMessageRecord]()
         while true {

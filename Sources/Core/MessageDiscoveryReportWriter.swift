@@ -145,6 +145,7 @@ private struct SafeMessageDiscoveryReport: Codable {
         let hasMD5: Bool
         let hasMediaID: Bool
         let hasRelativePathHint: Bool
+        let candidateIdentifierCount: Int
     }
 
     struct SafeMediaLink: Codable {
@@ -222,7 +223,8 @@ private struct SafeMessageDiscoveryReport: Codable {
                 metadataFieldNames: reference.metadataFieldNames,
                 hasMD5: reference.md5 != nil,
                 hasMediaID: reference.mediaID != nil,
-                hasRelativePathHint: reference.relativePathHint != nil
+                hasRelativePathHint: reference.relativePathHint != nil,
+                candidateIdentifierCount: reference.candidateIdentifiers.count
             )
         }
         mediaLinks = result.links.map { link in

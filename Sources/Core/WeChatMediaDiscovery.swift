@@ -132,6 +132,121 @@ public enum MediaPathMappingRule: String, Codable, Equatable, Sendable {
     case cachePrefixed = "cache/<mapping>"
 }
 
+/// Aggregate result for in-memory hex32 candidates. It deliberately excludes
+/// the candidate values and any mapped filenames or paths.
+public struct HardlinkCandidateCrossValidation: Codable, Equatable, Sendable {
+    public let candidateCount: Int
+    public let uniqueCandidateCount: Int
+    public let imageHits: Int
+    public let videoHits: Int
+    public let fileHits: Int
+    public let noHitCount: Int
+
+    public init(
+        candidateCount: Int,
+        uniqueCandidateCount: Int,
+        imageHits: Int,
+        videoHits: Int,
+        fileHits: Int,
+        noHitCount: Int
+    ) {
+        self.candidateCount = candidateCount
+        self.uniqueCandidateCount = uniqueCandidateCount
+        self.imageHits = imageHits
+        self.videoHits = videoHits
+        self.fileHits = fileHits
+        self.noHitCount = noHitCount
+    }
+}
+
+public struct HardlinkColumnInspection: Codable, Equatable, Sendable {
+    public let name: String
+    public let declaredType: String
+    public let primaryKeyPosition: Int
+
+    public init(name: String, declaredType: String, primaryKeyPosition: Int) {
+        self.name = name
+        self.declaredType = declaredType
+        self.primaryKeyPosition = primaryKeyPosition
+    }
+}
+
+public struct HardlinkIndexInspection: Codable, Equatable, Sendable {
+    public let name: String
+    public let columns: [String]
+    public let isUnique: Bool
+
+    public init(name: String, columns: [String], isUnique: Bool) {
+        self.name = name
+        self.columns = columns
+        self.isUnique = isUnique
+    }
+}
+
+/// Aggregate evidence only; no md5 or md5_hash value is retained here.
+public struct HardlinkHashRelationInspection: Codable, Equatable, Sendable {
+    public let nonNullHashCount: Int64
+    public let distinctHashCount: Int64
+    public let distinctMD5Count: Int64
+    public let isOneToOneWithMD5: Bool
+
+    public init(
+        nonNullHashCount: Int64,
+        distinctHashCount: Int64,
+        distinctMD5Count: Int64,
+        isOneToOneWithMD5: Bool
+    ) {
+        self.nonNullHashCount = nonNullHashCount
+        self.distinctHashCount = distinctHashCount
+        self.distinctMD5Count = distinctMD5Count
+        self.isOneToOneWithMD5 = isOneToOneWithMD5
+    }
+}
+
+public struct HardlinkTableInspection: Codable, Equatable, Sendable {
+    public let tableName: String
+    public let rowCount: Int64
+    public let columns: [HardlinkColumnInspection]
+    public let indexes: [HardlinkIndexInspection]
+    public let md5HashRelation: HardlinkHashRelationInspection?
+
+    public init(
+        tableName: String,
+        rowCount: Int64,
+        columns: [HardlinkColumnInspection],
+        indexes: [HardlinkIndexInspection],
+        md5HashRelation: HardlinkHashRelationInspection?
+    ) {
+        self.tableName = tableName
+        self.rowCount = rowCount
+        self.columns = columns
+        self.indexes = indexes
+        self.md5HashRelation = md5HashRelation
+    }
+}
+
+public struct HardlinkDatabaseInspection: Codable, Equatable, Sendable {
+    public let tables: [HardlinkTableInspection]
+
+    public init(tables: [HardlinkTableInspection]) {
+        self.tables = tables
+    }
+}
+
+/// An aggregate-only time comparison. It intentionally contains no timestamp
+/// values and is auxiliary evidence, never a media-match decision.
+public struct HardlinkTimeCorrelation: Codable, Equatable, Sendable {
+    public let messageTimeUnit: TimestampUnit
+    public let hardlinkModifyTimeUnit: TimestampUnit
+    public let rangesOverlap: Bool
+
+    public init(messageTimeUnit: TimestampUnit, hardlinkModifyTimeUnit: TimestampUnit, rangesOverlap: Bool) {
+        self.messageTimeUnit = messageTimeUnit
+        self.hardlinkModifyTimeUnit = hardlinkModifyTimeUnit
+        self.rangesOverlap = rangesOverlap
+    }
+}
+
 public struct MessageMediaLink: Equatable, Sendable {
     public let reference: MediaReference
     public let resolvedFile: DiscoveredMediaFile?
@@ -520,6 +635,73 @@ public struct WeChatMediaDatabaseMapper: Sendable {
         return links
     }
 
+    /// Cross-validates unconfirmed hex32 candidates against the semantic
+    /// `md5 TEXT` columns only. `md5_hash INTEGER` is deliberately not cast to
+    /// text because it is a separate storage/index value.
+    public func crossValidate(
+        hex32Candidates: [String],
+        exportRoot: URL
+    ) throws -> HardlinkCandidateCrossValidation {
+        let validCandidates = hex32Candidates.filter(validMD5)
+        let uniqueCandidates = Array(Set(validCandidates)).sorted()
+        guard let databaseURL = hardlinkDatabaseURL(below: exportRoot) else {
+            throw ArchiveError.invalidInput
+        }
+        let database = try SQLiteMediaMappingDatabase(url: databaseURL)
+        let schemas = try database.supportedSchemas()
+        guard !schemas.isEmpty else { throw ArchiveError.databaseFailure }
+        var imageHits = 0
+        var videoHits = 0
+        var fileHits = 0
+        var noHitCount = 0
+        for candidate in uniqueCandidates {
+            let matchedTables = try database.matchingTables(for: candidate, schemas: schemas)
+            if matchedTables.isEmpty { noHitCount += 1 }
+            if matchedTables.contains("image_hardlink_info_v4") { imageHits += 1 }
+            if matchedTables.contains("video_hardlink_info_v4") { videoHits += 1 }
+            if matchedTables.contains("file_hardlink_info_v4") { fileHits += 1 }
+        }
+        return HardlinkCandidateCrossValidation(
+            candidateCount: validCandidates.count,
+            uniqueCandidateCount: uniqueCandidates.count,
+            imageHits: imageHits,
+            videoHits: videoHits,
+            fileHits: fileHits,
+            noHitCount: noHitCount
+        )
+    }
+
+    /// Reads hardlink schema and aggregate hash relation evidence without
+    /// selecting any private mapping value.
+    public func inspectHardlinkDatabase(exportRoot: URL) throws -> HardlinkDatabaseInspection {
+        guard let databaseURL = hardlinkDatabaseURL(below: exportRoot) else {
+            throw ArchiveError.invalidInput
+        }
+        return try SQLiteMediaMappingDatabase(url: databaseURL).inspection()
+    }
+
+    /// Compares only aggregate min/max ranges. Callers provide message times
+    /// already inferred as Unix seconds; no timestamp is returned or stored.
+    public func correlateMessageTimes(
+        _ messageTimesInSeconds: [Int64],
+        exportRoot: URL
+    ) throws -> HardlinkTimeCorrelation? {
+        guard let messageMinimum = messageTimesInSeconds.min(),
+              let messageMaximum = messageTimesInSeconds.max(),
+              let databaseURL = hardlinkDatabaseURL(below: exportRoot),
+              let range = try SQLiteMediaMappingDatabase(url: databaseURL).modifyTimeRange() else {
+            return nil
+        }
+        let hardlinkUnit: TimestampUnit = range.maximum > 100_000_000_000 ? .milliseconds : .seconds
+        let hardlinkMinimum = hardlinkUnit == .milliseconds ? range.minimum / 1_000 : range.minimum
+        let hardlinkMaximum = hardlinkUnit == .milliseconds ? range.maximum / 1_000 : range.maximum
+        return HardlinkTimeCorrelation(
+            messageTimeUnit: .seconds,
+            hardlinkModifyTimeUnit: hardlinkUnit,
+            rangesOverlap: messageMinimum <= hardlinkMaximum && hardlinkMinimum <= messageMaximum
+        )
+    }
+
     private func resolveUniqueMapping(
         reference: MediaReference,
         mapping: MediaDatabaseMapping,
@@ -661,7 +843,6 @@ private struct MappedLocalCandidate: Sendable {
 
 private struct HardlinkTableSchema: Sendable {
     let tableName: String
-    let hasMD5Hash: Bool
 }
 
 private final class SQLiteMediaMappingDatabase {
@@ -687,7 +868,7 @@ private final class SQLiteMediaMappingDatabase {
         return try tables.compactMap { table in
             let fields = try columnNames(in: table)
             guard Set(["md5", "file_name", "dir1", "dir2"]).isSubset(of: fields) else { return nil }
-            return HardlinkTableSchema(tableName: table, hasMD5Hash: fields.contains("md5_hash"))
+            return HardlinkTableSchema(tableName: table)
         }
     }
 
@@ -699,6 +880,36 @@ private final class SQLiteMediaMappingDatabase {
             }
         }
         return collectedMappings.sorted { ($0.pathComponents ?? []).joined(separator: "/") < ($1.pathComponents ?? []).joined(separator: "/") }
+    }
+
+    func matchingTables(for md5: String, schemas: [HardlinkTableSchema]) throws -> Set<String> {
+        var matches = Set<String>()
+        for schema in schemas where !(try mappings(in: schema, md5: md5)).isEmpty {
+            matches.insert(schema.tableName)
+        }
+        return matches
+    }
+
+    func inspection() throws -> HardlinkDatabaseInspection {
+        let expectedTables = ["image_hardlink_info_v4", "video_hardlink_info_v4", "file_hardlink_info_v4"]
+        let existing = Set(try tableNames())
+        let tables = try expectedTables
+            .filter { existing.contains($0) }
+            .map { try inspection(in: $0) }
+        return HardlinkDatabaseInspection(tables: tables)
+    }
+
+    func modifyTimeRange() throws -> (minimum: Int64, maximum: Int64)? {
+        let existing = Set(try tableNames())
+        let tables = supportedTableNames.filter { existing.contains($0) }
+        var ranges = [(Int64, Int64)]()
+        for table in tables where try columnNames(in: table).contains("modify_time") {
+            if let range = try optionalTwoIntegers("SELECT MIN(\"modify_time\"), MAX(\"modify_time\") FROM \(quoteIdentifier(table))") {
+                ranges.append(range)
+            }
+        }
+        guard let minimum = ranges.map(\.0).min(), let maximum = ranges.map(\.1).max() else { return nil }
+        return (minimum, maximum)
     }
 
     private func tableNames() throws -> [String] {
@@ -736,14 +947,163 @@ private final class SQLiteMediaMappingDatabase {
         }
     }
 
+    private func inspection(in table: String) throws -> HardlinkTableInspection {
+        guard supportedTableNames.contains(table) else { throw ArchiveError.databaseFailure }
+        let columns = try columnInspections(in: table)
+        let fieldNames = Set(columns.map { $0.name.lowercased() })
+        let relation = fieldNames.isSuperset(of: ["md5", "md5_hash"])
+            ? try md5HashRelation(in: table)
+            : nil
+        return HardlinkTableInspection(
+            tableName: table,
+            rowCount: try scalarInt("SELECT COUNT(*) FROM \(quoteIdentifier(table))"),
+            columns: columns,
+            indexes: try indexInspections(in: table),
+            md5HashRelation: relation
+        )
+    }
+
+    private func columnInspections(in table: String) throws -> [HardlinkColumnInspection] {
+        let sql = "PRAGMA table_info(\(quoteIdentifier(table)))"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        var columns = [HardlinkColumnInspection]()
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return columns }
+            guard status == SQLITE_ROW,
+                  let name = text(statement, index: 1),
+                  let type = text(statement, index: 2) else {
+                throw ArchiveError.databaseFailure
+            }
+            columns.append(HardlinkColumnInspection(
+                name: name,
+                declaredType: type,
+                primaryKeyPosition: Int(sqlite3_column_int(statement, 5))
+            ))
+        }
+    }
+
+    private func indexInspections(in table: String) throws -> [HardlinkIndexInspection] {
+        let sql = "PRAGMA index_list(\(quoteIdentifier(table)))"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        var indexes = [HardlinkIndexInspection]()
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return indexes.sorted { $0.name < $1.name } }
+            guard status == SQLITE_ROW, let name = text(statement, index: 1) else {
+                throw ArchiveError.databaseFailure
+            }
+            indexes.append(HardlinkIndexInspection(
+                name: name,
+                columns: try indexColumns(named: name),
+                isUnique: sqlite3_column_int(statement, 2) != 0
+            ))
+        }
+    }
+
+    private func indexColumns(named name: String) throws -> [String] {
+        let sql = "PRAGMA index_info(\(quoteIdentifier(name)))"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        var columns = [String]()
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return columns }
+            guard status == SQLITE_ROW, let column = text(statement, index: 2) else {
+                throw ArchiveError.databaseFailure
+            }
+            columns.append(column)
+        }
+    }
+
+    private func md5HashRelation(in table: String) throws -> HardlinkHashRelationInspection {
+        let counts = try threeIntegers("""
+        SELECT COUNT(\"md5_hash\"), COUNT(DISTINCT \"md5_hash\"), COUNT(DISTINCT \"md5\")
+        FROM \(quoteIdentifier(table))
+        """)
+        let hashToMD5ConflictCount = try scalarInt("""
+        SELECT COUNT(*) FROM (
+            SELECT \"md5_hash\" FROM \(quoteIdentifier(table))
+            WHERE \"md5_hash\" IS NOT NULL
+            GROUP BY \"md5_hash\"
+            HAVING COUNT(DISTINCT \"md5\") > 1
+        )
+        """)
+        let md5ToHashConflictCount = try scalarInt("""
+        SELECT COUNT(*) FROM (
+            SELECT \"md5\" FROM \(quoteIdentifier(table))
+            WHERE \"md5\" IS NOT NULL
+            GROUP BY \"md5\"
+            HAVING COUNT(DISTINCT \"md5_hash\") > 1
+        )
+        """)
+        return HardlinkHashRelationInspection(
+            nonNullHashCount: counts.0,
+            distinctHashCount: counts.1,
+            distinctMD5Count: counts.2,
+            isOneToOneWithMD5: hashToMD5ConflictCount == 0 && md5ToHashConflictCount == 0
+        )
+    }
+
+    private func scalarInt(_ sql: String) throws -> Int64 {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            sqlite3_finalize(statement)
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    private func threeIntegers(_ sql: String) throws -> (Int64, Int64, Int64) {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            sqlite3_finalize(statement)
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        return (sqlite3_column_int64(statement, 0), sqlite3_column_int64(statement, 1), sqlite3_column_int64(statement, 2))
+    }
+
+    private func optionalTwoIntegers(_ sql: String) throws -> (Int64, Int64)? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            sqlite3_finalize(statement)
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_column_type(statement, 0) != SQLITE_NULL,
+              sqlite3_column_type(statement, 1) != SQLITE_NULL else { return nil }
+        return (sqlite3_column_int64(statement, 0), sqlite3_column_int64(statement, 1))
+    }
+
+    private var supportedTableNames: Set<String> {
+        ["image_hardlink_info_v4", "video_hardlink_info_v4", "file_hardlink_info_v4"]
+    }
+
+    private func quoteIdentifier(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
     private func mappings(in schema: HardlinkTableSchema, md5: String) throws -> [MediaDatabaseMapping] {
-        let predicate = schema.hasMD5Hash
-            ? "lower(CAST(\"md5\" AS TEXT)) = lower(?) OR lower(CAST(\"md5_hash\" AS TEXT)) = lower(?)"
-            : "lower(CAST(\"md5\" AS TEXT)) = lower(?)"
         let sql = """
         SELECT \"file_name\", \"dir1\", \"dir2\"
         FROM \"\(schema.tableName)\"
-        WHERE \(predicate)
+        WHERE lower(CAST(\"md5\" AS TEXT)) = lower(?)
         LIMIT 5
         """
         var statement: OpaquePointer?
@@ -752,10 +1112,6 @@ private final class SQLiteMediaMappingDatabase {
         }
         defer { sqlite3_finalize(statement) }
         guard sqlite3_bind_text(statement, 1, md5, -1, sqliteTransient) == SQLITE_OK else {
-            throw ArchiveError.databaseFailure
-        }
-        if schema.hasMD5Hash,
-           sqlite3_bind_text(statement, 2, md5, -1, sqliteTransient) != SQLITE_OK {
             throw ArchiveError.databaseFailure
         }
         var results = [MediaDatabaseMapping]()
