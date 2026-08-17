@@ -36,6 +36,20 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 一次运行最多验证一条或少量受限的消息—媒体链路。页面可在本机展示短预览以供用户确认，`.local-analysis/` 下的 `message-discovery.json` 与 `message-discovery.md` 只写入结构、字段映射、聚合 type 分布和解析结果；它们不包含消息文本、BLOB、媒体 ID、哈希、文件名或绝对路径。目录为 `0700`，文件为 `0600`，并已被 Git 忽略。
 
+### Phase 3A.2: Bounded Image Attachment Recovery
+
+**Resolve Image** 只读取所选消息表中最多 100 条 raw type 3 记录。它通过
+`message_resource.db` 的 `ChatName2Id` 和 `MessageResourceInfo` 建立关系，
+从结构化 packed payload 中取得仅在内存中使用的 file base，然后仅检查该会话
+当前、前一和后一月份的 `msg/attach/.../Img` DAT 候选。它不会把任意 32 位十六
+进制字符串当作 MD5，不扫描全账户附件，也不计算全量 MD5。
+
+V2 DAT 仅根据本机已有 kvcomm 元数据派生少量候选密钥，并必须解出可识别的图片
+头才视为通过；密钥、file base、文件名、路径和图片字节都不会显示、记录或写入
+归档。`image-resolution.json` 与 `image-resolution.md` 只保存在已忽略的
+`.local-analysis/` 中，权限同样为目录 `0700`、文件 `0600`。详细设计与边界见
+[ADR-009](docs/decisions/ADR-009-bounded-image-attachment-resolution.md)。
+
 ## Not in the current discovery scope
 
 当前仍不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Phase 3A 的受限验证只是下一阶段 Adapter 开发的证据，不是完整内容解析或归档结果。

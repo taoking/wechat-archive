@@ -15,12 +15,18 @@ struct MessageDiscoveryView: View {
     @State private var sampleLimit = 100
     @State private var discoveryResult: MessageMediaDiscoveryResult?
     @State private var reportDirectory: URL?
+    @State private var imageResolutionRun: WeChatImageResolutionRun?
+    @State private var imageReportDirectory: URL?
     @State private var progress: MediaScanProgress?
     @State private var isWorking = false
     @State private var cancellation: MessageDiscoveryCancellation?
     @State private var status = "Choose the Phase 1 plain SQLite directory. Its Phase 2 schema report will be loaded automatically."
 
     private var canDiscover: Bool {
+        exportRoot != nil && mediaRoot != nil && selectedCandidate != nil && !isWorking
+    }
+
+    private var canResolveImage: Bool {
         exportRoot != nil && mediaRoot != nil && selectedCandidate != nil && !isWorking
     }
 
@@ -74,8 +80,8 @@ struct MessageDiscoveryView: View {
             Section("Candidate & Sample") {
                 Picker("Message Table", selection: $selectedCandidate) {
                     Text("Select a discovered message table").tag(MessageTableCandidate?.none)
-                    ForEach(candidates) { candidate in
-                        Text("\(redactedRelativePath(candidate.databaseRelativePath)) · \(candidate.tableName) · \(candidate.rowCount ?? 0) rows · score \(candidate.score)")
+                    ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                        Text("Message table \(index + 1) · \(redactedRelativePath(candidate.databaseRelativePath)) · \(candidate.rowCount ?? 0) rows · score \(candidate.score)")
                             .tag(Optional(candidate))
                     }
                 }
@@ -96,6 +102,8 @@ struct MessageDiscoveryView: View {
                 HStack {
                     Button(isWorking ? "Discovering…" : "Discover Message & Media", action: discover)
                         .disabled(!canDiscover)
+                    Button("Resolve Image", action: resolveImage)
+                        .disabled(!canResolveImage)
                     if isWorking {
                         Button("Cancel") { cancellation?.cancel() }
                     }
@@ -112,6 +120,10 @@ struct MessageDiscoveryView: View {
 
             if let discoveryResult {
                 discoveryResults(discoveryResult)
+            }
+
+            if let imageResolutionRun {
+                imageResolutionResults(imageResolutionRun)
             }
 
             Section("Status") {
@@ -181,7 +193,7 @@ struct MessageDiscoveryView: View {
                 .foregroundStyle(.secondary)
             ForEach(result.messageAnalysis.records.prefix(10), id: \.identity) { record in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("\(redactedRelativePath(record.identity.databaseRelativePath)) · \(record.identity.tableName) · row \(record.identity.rowIdentifier)")
+                    Text("Sampled local record")
                         .font(.caption.monospaced())
                     Text(sampleMetadata(record, analysis: result.messageAnalysis))
                         .font(.caption)
@@ -203,10 +215,10 @@ struct MessageDiscoveryView: View {
             } else {
                 ForEach(result.links, id: \.reference.sourceMessageIdentity) { link in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("row \(link.reference.sourceMessageIdentity.rowIdentifier) · \(link.reference.mediaTypeHint?.rawValue ?? "unknown") · \(link.confidence.rawValue)")
+                        Text("\(link.reference.mediaTypeHint?.rawValue ?? "unknown") · \(link.confidence.rawValue)")
                         Text("\(link.diagnostic.rawValue)\(link.mappingRule.map { " · \($0.rawValue)" } ?? "") · \(link.reason)").font(.caption).foregroundStyle(.secondary)
                         if let file = link.resolvedFile {
-                            Text("Local file: \(redactedRelativePath(file.relativePath)) · \(file.format.rawValue) · \(file.fileSize) bytes\(file.imageDimensions.map { " · \($0.width) × \($0.height)" } ?? "")")
+                            Text("Local media verified · \(file.format.rawValue) · \(file.fileSize) bytes\(file.imageDimensions.map { " · \($0.width) × \($0.height)" } ?? "")")
                                 .font(.caption)
                                 .foregroundStyle(.green)
                         }
@@ -214,6 +226,45 @@ struct MessageDiscoveryView: View {
                     .padding(.vertical, 3)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func imageResolutionResults(_ run: WeChatImageResolutionRun) -> some View {
+        Section("Image Resolution") {
+            LabeledContent("Type 3 rows sampled", value: "\(run.sampledRecordCount) (maximum 100)")
+            LabeledContent("Message resource") {
+                Text(run.resolution?.resourceMatch == .notFound ? "Not found" : "Found")
+                    .foregroundStyle(run.resolution?.resourceMatch == .notFound ? .orange : .green)
+            }
+            LabeledContent("MessageResourceDetail") {
+                Text(run.resolution?.resourceDetailsFound == true ? "Found" : "Not found")
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Local DAT") {
+                let assets = run.resolution?.assets
+                Text("main \(assets?.mainURL == nil ? "missing" : "found") · HD \(assets?.hdURL == nil ? "missing" : "found") · thumbnail \(assets?.thumbnailURL == nil ? "missing" : "found")")
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("DAT format", value: run.resolution?.datVersion.rawValue.uppercased() ?? "UNKNOWN")
+            LabeledContent("Image key") {
+                Text(run.keyVerificationPassed ? "Verified locally" : (run.keyDerivationAvailable ? "Candidate rejected" : "Unavailable"))
+                    .foregroundStyle(run.keyVerificationPassed ? .green : .orange)
+            }
+            LabeledContent("Image decode") {
+                Text(imageDecodeSummary(run))
+                    .foregroundStyle(run.imageConfirmed ? .green : .secondary)
+            }
+            if let imageReportDirectory {
+                Button("Open Local Image Resolution Report") { NSWorkspace.shared.open(imageReportDirectory) }
+            }
+            if !run.diagnostics.isEmpty {
+                Label(run.diagnostics.map(\.rawValue).joined(separator: " · "), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(run.imageConfirmed ? .green : .orange)
+            }
+            Text("仅显示结构性状态；界面和本地报告均不会展示账户标识、消息 ID、file base、文件名、密钥或解码后的图片。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -283,6 +334,8 @@ struct MessageDiscoveryView: View {
     private func resetDiscovery() {
         discoveryResult = nil
         reportDirectory = nil
+        imageResolutionRun = nil
+        imageReportDirectory = nil
         progress = nil
     }
 
@@ -328,6 +381,30 @@ struct MessageDiscoveryView: View {
         }
     }
 
+    private func resolveImage() {
+        guard let exportRoot, let mediaRoot, let candidate = selectedCandidate else { return }
+        imageResolutionRun = nil
+        imageReportDirectory = nil
+        isWorking = true
+        status = "Resolving at most 100 local type-3 rows through message_resource and one bounded attachment path…"
+        let outputDirectory = exportRoot.appending(path: ".local-analysis")
+        let worker = Task.detached(priority: .userInitiated) {
+            ImageResolutionOperationResult(
+                exportRoot: exportRoot,
+                candidate: candidate,
+                mediaRoot: mediaRoot,
+                outputDirectory: outputDirectory
+            )
+        }
+        Task { @MainActor in
+            let operation = await worker.value
+            imageResolutionRun = operation.run
+            imageReportDirectory = operation.reportDirectory
+            status = operation.status
+            isWorking = false
+        }
+    }
+
     private func selectedDirectoryLabel(_ url: URL?) -> some View {
         Group {
             if let url {
@@ -366,6 +443,15 @@ struct MessageDiscoveryView: View {
         return "time: \(timestamp) · raw type: \(rawType) · content kind: \(kind)"
     }
 
+    private func imageDecodeSummary(_ run: WeChatImageResolutionRun) -> String {
+        func status(_ variant: WeChatImageDecodedVariant) -> String {
+            guard variant.present else { return "missing" }
+            guard variant.decoded else { return "not decoded" }
+            return variant.format?.rawValue.uppercased() ?? "decoded"
+        }
+        return "thumbnail \(status(run.thumbnail)) · main \(status(run.main)) · HD \(status(run.hd))"
+    }
+
     private func limitedPreview(_ record: SourceMessageRecord, analysis: MessageSampleAnalysis) -> String? {
         guard let column = analysis.fieldMapping.contentColumn,
               case let .text(value)? = record.values[column] else { return nil }
@@ -387,7 +473,8 @@ struct MessageDiscoveryView: View {
     private func displayPath(_ url: URL) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path()
         let path = url.path()
-        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+        let display = path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+        return redactedRelativePath(String(display))
     }
 
     private func redactedRelativePath(_ path: String) -> String {
@@ -466,6 +553,37 @@ private struct MessageDiscoveryOperationResult: Sendable {
             result = nil
             reportDirectory = nil
             status = "Local discovery could not complete. Confirm the selected plain SQLite and original WeChat directories are accessible."
+        }
+    }
+}
+
+private struct ImageResolutionOperationResult: Sendable {
+    let run: WeChatImageResolutionRun?
+    let reportDirectory: URL?
+    let status: String
+
+    init(
+        exportRoot: URL,
+        candidate: MessageTableCandidate,
+        mediaRoot: URL,
+        outputDirectory: URL
+    ) {
+        do {
+            let run = try WeChatImageResolutionCoordinator().resolveFirstImage(
+                exportRoot: exportRoot,
+                candidate: candidate,
+                accountRoot: mediaRoot
+            )
+            let locations = try WeChatImageResolutionReportWriter().write(run, to: outputDirectory)
+            self.run = run
+            reportDirectory = locations.directoryURL
+            status = run.imageConfirmed
+                ? "Image chain verified locally. The local report contains status only."
+                : "Image resolution completed without a verified image. Review privacy-safe diagnostics."
+        } catch {
+            run = nil
+            reportDirectory = nil
+            status = "Image resolution could not complete. Confirm the selected plain SQLite and original WeChat data directories are accessible."
         }
     }
 }

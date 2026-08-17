@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import CommonCrypto
 import SQLite3
 import XCTest
 @testable import WeChatArchiveCore
@@ -825,6 +826,296 @@ final class ArchiveCoreTests: XCTestCase {
         try expectTrue(analysis.candidateIdentifiers.contains { $0.sourceColumn == "file_md5" && $0.semanticHint == .confirmedMD5 && $0.value == hex32 })
     }
 
+    func testConversationTableIdentityAcceptsOnlyMsgTableWithHexDigest() throws {
+        let digest = String(repeating: "a", count: 32)
+
+        let identity = WeChatConversationTableIdentity(tableName: "Msg_\(digest)")
+
+        try expectEqual(identity?.chatDirectoryComponent, digest)
+        try expectTrue(WeChatConversationTableIdentity(tableName: "message") == nil)
+        try expectTrue(WeChatConversationTableIdentity(tableName: "Msg_not-a-digest") == nil)
+    }
+
+    func testMessageResourceResolverUsesExactLow32TypeAndLocatesAllImageVariants() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let resourceDB = exportRoot.appending(path: "message/message_resource.db")
+        try FileManager.default.createDirectory(at: resourceDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let conversation = "synthetic-conversation"
+        let conversationDigest = fixtureMD5Hex(conversation)
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let timestamp: Int64 = 1_738_355_200 // 2025-02-01 00:00:00 UTC
+        let resourcePackedInfo = Data([0x12, 0x22, 0x0A, 0x20]) + Data(fileBase.utf8)
+        let highBitsType = Int64(3) + (Int64(7) << 32)
+        try createPlainSQLiteDatabase(at: resourceDB, sql: """
+            CREATE TABLE ChatName2Id (user_name TEXT, update_time INTEGER);
+            INSERT INTO ChatName2Id (rowid, user_name, update_time) VALUES (7, '\(conversation)', 0);
+            CREATE TABLE MessageResourceInfo (
+                message_id INTEGER, chat_id INTEGER, sender_id INTEGER,
+                message_local_type INTEGER, message_create_time INTEGER,
+                message_local_id INTEGER, message_svr_id INTEGER,
+                message_origin_source INTEGER, packed_info BLOB
+            );
+            INSERT INTO MessageResourceInfo VALUES (99, 7, 0, \(highBitsType), \(timestamp), 42, 77, 0, X'\(resourcePackedInfo.map { String(format: "%02x", $0) }.joined())');
+            CREATE TABLE MessageResourceDetail (
+                resource_id INTEGER, message_id INTEGER, type INTEGER, size INTEGER,
+                create_time INTEGER, access_time INTEGER, status INTEGER,
+                data_index TEXT, packed_info BLOB
+            );
+            INSERT INTO MessageResourceDetail VALUES (1, 99, 1, 1, \(timestamp), \(timestamp), 0, 'fixture', X'00');
+            """)
+        let accountRoot = directory.appending(path: "Account")
+        let imageDirectory = accountRoot.appending(path: "msg/attach/\(conversationDigest)/2025-02/Img")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        for suffix in ["", "_h", "_t"] {
+            try Data([0x07, 0x08, 0x56, 0x32, 0x08, 0x07]).write(to: imageDirectory.appending(path: "\(fileBase)\(suffix).dat"))
+        }
+        let messagePackedInfo = SQLiteBlobSourceValue(length: resourcePackedInfo.count, sha256: "fixture", data: resourcePackedInfo)
+        let record = SourceMessageRecord(
+            identity: .init(databaseRelativePath: "message/message_0.db", tableName: "Msg_\(conversationDigest)", rowIdentifier: "42"),
+            values: [
+                "local_id": .integer(42),
+                "server_id": .integer(77),
+                "local_type": .integer(3),
+                "create_time": .integer(timestamp),
+                "packed_info_data": .blob(messagePackedInfo)
+            ]
+        )
+        let candidate = MessageTableCandidate(
+            databaseRelativePath: "message/message_0.db",
+            tableName: "Msg_\(conversationDigest)",
+            rowCount: 1,
+            score: 100,
+            columns: ["local_id", "server_id", "local_type", "create_time", "packed_info_data"]
+        )
+
+        let result = try WeChatImageMessageResolver().resolve(
+            message: record,
+            candidate: candidate,
+            exportRoot: exportRoot,
+            accountRoot: accountRoot,
+            calendar: fixtureCalendar
+        )
+
+        try expectEqual(result.resourceMatch, .exact)
+        try expectEqual(result.fileBase?.source, .both)
+        try expectEqual(result.fileBase?.confidence, .structured)
+        try expectTrue(result.resourceDetailsFound)
+        try expectTrue(result.assets.mainURL != nil)
+        try expectTrue(result.assets.hdURL != nil)
+        try expectTrue(result.assets.thumbnailURL != nil)
+        try expectEqual(result.datVersion, .v2)
+    }
+
+    func testPackedInfoParserDistinguishesStructuredMarkerFromFallback() throws {
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let parser = MessageResourcePackedInfoParser()
+
+        let structured = parser.parse(Data([0x12, 0x22, 0x0A, 0x20]) + Data(fileBase.utf8))
+        let fallback = parser.parse(Data([0xFF]) + Data(fileBase.utf8) + Data([0x00]))
+
+        try expectEqual(structured?.confidence, .structured)
+        try expectEqual(fallback?.confidence, .heuristic)
+        try expectEqual(structured?.value, fileBase)
+        try expectEqual(fallback?.value, fileBase)
+    }
+
+    func testImageAttachmentLocatorUsesPreviousMonthFallbackAndFindsVariants() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let chat = String(repeating: "b", count: 32)
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let imageDirectory = directory.appending(path: "msg/attach/\(chat)/2025-01/Img")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        try Data([0]).write(to: imageDirectory.appending(path: "\(fileBase)_t.dat"))
+
+        let assets = try WeChatImageAttachmentLocator(calendar: fixtureCalendar).locate(
+            accountRoot: directory,
+            chatDirectoryComponent: chat,
+            fileBase: fileBase,
+            // 2025-02-01 00:00:00 UTC, so the fixture in 2025-01 is a true previous-month fallback.
+            createTime: 1_738_368_000
+        )
+
+        try expectTrue(assets.mainURL == nil)
+        try expectTrue(assets.hdURL == nil)
+        try expectTrue(assets.thumbnailURL != nil)
+        try expectTrue(assets.usedMonthFallback)
+    }
+
+    func testImageAttachmentLocatorRejectsMediaTreeSymlinkOutsideAccountRoot() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountRoot = directory.appending(path: "Account")
+        let outsideRoot = directory.appending(path: "Outside")
+        let chat = String(repeating: "b", count: 32)
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let outsideImageDirectory = outsideRoot.appending(path: "attach/\(chat)/2025-02/Img")
+        try FileManager.default.createDirectory(at: outsideImageDirectory, withIntermediateDirectories: true)
+        try Data([0]).write(to: outsideImageDirectory.appending(path: "\(fileBase)_t.dat"))
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: accountRoot.appending(path: "msg"),
+            withDestinationURL: outsideRoot
+        )
+
+        let assets = try WeChatImageAttachmentLocator(calendar: fixtureCalendar).locate(
+            accountRoot: accountRoot,
+            chatDirectoryComponent: chat,
+            fileBase: fileBase,
+            createTime: 1_738_368_000
+        )
+
+        try expectTrue(assets.thumbnailURL == nil)
+        try expectFalse(assets.chatDirectoryFound)
+    }
+
+    func testImageDATV2DecoderRestoresSyntheticPNGAndRejectsWrongKey() throws {
+        let image = syntheticPNGData()
+        let key = Data("0123456789abcdef".utf8)
+        let dat = try makeSyntheticV2DAT(plaintext: image, key: key, xorTail: Data([0xAA, 0xBB]))
+        let material = WeChatImageKeyMaterial(aesKey: key, xorKey: 0x88)
+
+        let decoded = try WeChatImageDatDecoder().decode(dat, keyMaterial: material)
+
+        try expectEqual(decoded.version, .v2)
+        try expectEqual(decoded.format, .png)
+        try expectEqual(decoded.data, image + Data([0xAA, 0xBB]))
+        try expectThrows(WeChatImageDATError.invalidPadding) {
+            _ = try WeChatImageDatDecoder().decode(dat, keyMaterial: .init(aesKey: Data("fedcba9876543210".utf8), xorKey: 0x88))
+        }
+    }
+
+    func testImageDATVersionDoesNotClassifyArbitraryBytesAsLegacyXOR() throws {
+        let decoder = WeChatImageDatDecoder()
+        let legacyPNG = Data([0x89, 0x50, 0x4E, 0x47, 0x0D]).map { $0 ^ 0x88 }
+
+        try expectEqual(decoder.version(for: Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06])), .unknown)
+        try expectEqual(decoder.version(for: Data(legacyPNG)), .legacy)
+    }
+
+    func testKVCommImageKeyProviderDerivesCandidatesFromKnownFilenameAndAccountIDs() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documents = directory.appending(path: "Documents")
+        let accountRoot = documents.appending(path: "xwechat_files/wxid_fixture_c14c")
+        let kvcomm = documents.appending(path: "app_data/net/kvcomm")
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: kvcomm, withIntermediateDirectories: true)
+        try Data().write(to: kvcomm.appending(path: "key_42_fixture.statistic"))
+
+        let materials = try WeChatKVCommImageKeyProvider().keyCandidates(accountRoot: accountRoot)
+        let expectedDigest = Insecure.MD5.hash(data: Data("42wxid_fixture_c14c".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        try expectTrue(materials.contains {
+            $0.aesKey == Data(expectedDigest.prefix(16).utf8) && $0.xorKey == 42
+        })
+    }
+
+    func testKVCommImageKeyProviderUsesBoundedMetadataFallbackAndSkipsMediaTrees() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documents = directory.appending(path: "Documents")
+        let accountRoot = documents.appending(path: "xwechat_files/wxid_fixture_c14c")
+        let metadataDirectory = documents.appending(path: "global/config")
+        let mediaDirectory = accountRoot.appending(path: "msg/attach")
+        try FileManager.default.createDirectory(at: metadataDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
+        try Data().write(to: metadataDirectory.appending(path: "key_42_fixture.statistic"))
+        try Data().write(to: mediaDirectory.appending(path: "key_99_fixture.statistic"))
+
+        let materials = try WeChatKVCommImageKeyProvider().keyCandidates(accountRoot: accountRoot)
+        let expected42 = WeChatKVCommImageKeyProvider().derive(code: 42, accountIdentifier: "wxid_fixture_c14c")
+        let excluded99 = WeChatKVCommImageKeyProvider().derive(code: 99, accountIdentifier: "wxid_fixture_c14c")
+
+        try expectTrue(materials.contains(expected42))
+        try expectFalse(materials.contains(excluded99))
+    }
+
+    func testImageResolutionCoordinatorStopsAtFirstVerifiedType3Image() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let accountRoot = directory.appending(path: "Account")
+        let conversationDigest = fixtureMD5Hex("fixture conversation")
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let timestamp: Int64 = 1_738_368_000
+        let packed = Data([0x12, 0x22, 0x0A, 0x20]) + Data(fileBase.utf8)
+        let hex = packed.map { String(format: "%02x", $0) }.joined()
+        let messageDatabase = exportRoot.appending(path: "message/message_0.db")
+        let resourceDatabase = exportRoot.appending(path: "message/message_resource.db")
+        try FileManager.default.createDirectory(at: messageDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: messageDatabase, sql: """
+            CREATE TABLE Msg_\(conversationDigest) (local_id INTEGER, server_id INTEGER, local_type INTEGER, create_time INTEGER, packed_info_data BLOB);
+            INSERT INTO Msg_\(conversationDigest) VALUES (42, 77, 3, \(timestamp), X'\(hex)');
+            """)
+        try createPlainSQLiteDatabase(at: resourceDatabase, sql: """
+            CREATE TABLE ChatName2Id (user_name TEXT, update_time INTEGER);
+            INSERT INTO ChatName2Id VALUES ('fixture conversation', 0);
+            CREATE TABLE MessageResourceInfo (message_id INTEGER, chat_id INTEGER, sender_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, message_origin_source INTEGER, packed_info BLOB);
+            INSERT INTO MessageResourceInfo VALUES (99, 1, 0, 3, \(timestamp), 42, 77, 0, X'\(hex)');
+            """)
+        let imageDirectory = accountRoot.appending(path: "msg/attach/\(conversationDigest)/2025-01/Img")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        let key = Data("0123456789abcdef".utf8)
+        let dat = try makeSyntheticV2DAT(plaintext: syntheticPNGData(), key: key, xorTail: Data())
+        try dat.write(to: imageDirectory.appending(path: "\(fileBase)_t.dat"))
+        let candidate = MessageTableCandidate(
+            databaseRelativePath: "message/message_0.db",
+            tableName: "Msg_\(conversationDigest)",
+            rowCount: 1,
+            score: 100,
+            columns: ["local_id", "server_id", "local_type", "create_time", "packed_info_data"]
+        )
+
+        let result = try WeChatImageResolutionCoordinator().resolveFirstImage(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            accountRoot: accountRoot,
+            keyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: key, xorKey: 0x88)]),
+            calendar: fixtureCalendar
+        )
+
+        try expectEqual(result.sampledRecordCount, 1)
+        try expectEqual(result.resolution?.resourceMatch, .exact)
+        try expectFalse(result.resolution?.resourceDetailsFound ?? true)
+        try expectTrue(result.keyDerivationAvailable)
+        try expectTrue(result.keyVerificationPassed)
+        try expectTrue(result.thumbnail.decoded)
+        try expectEqual(result.thumbnail.format, .png)
+
+        let locations = try WeChatImageResolutionReportWriter().write(result, to: directory.appending(path: ".local-analysis"))
+        let report = try String(contentsOf: locations.jsonURL, encoding: .utf8)
+        try expectEqual(try permissionBits(at: locations.directoryURL), 0o700)
+        try expectEqual(try permissionBits(at: locations.jsonURL), 0o600)
+        try expectFalse(report.contains(fileBase))
+        try expectFalse(report.contains(accountRoot.path()))
+
+        let unavailable = try WeChatImageResolutionCoordinator().resolveFirstImage(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            accountRoot: accountRoot,
+            keyProvider: FixtureImageKeyProvider(materials: []),
+            calendar: fixtureCalendar
+        )
+        try expectFalse(unavailable.keyDerivationAvailable)
+        try expectTrue(unavailable.diagnostics.contains(.imageKeyUnavailable))
+
+        let rejected = try WeChatImageResolutionCoordinator().resolveFirstImage(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            accountRoot: accountRoot,
+            keyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: Data("fedcba9876543210".utf8), xorKey: 0x88)]),
+            calendar: fixtureCalendar
+        )
+        try expectTrue(rejected.keyDerivationAvailable)
+        try expectFalse(rejected.keyVerificationPassed)
+        try expectTrue(rejected.diagnostics.contains(.imageKeyRejected))
+    }
+
     func testHardlinkCandidateCrossValidationQueriesOnlyMD5TextColumns() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1581,6 +1872,63 @@ private struct InvalidPlaintextDecryptor: WeChatDatabaseDecryptor {
         try Data("temporary sidecar".utf8).write(to: URL(fileURLWithPath: output.path() + "-wal"))
         return output
     }
+}
+
+private struct FixtureImageKeyProvider: WeChatImageKeyProvider {
+    let materials: [WeChatImageKeyMaterial]
+
+    func keyCandidates(accountRoot: URL) throws -> [WeChatImageKeyMaterial] {
+        materials
+    }
+}
+
+private var fixtureCalendar: Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    return calendar
+}
+
+private func fixtureMD5Hex(_ value: String) -> String {
+    Insecure.MD5.hash(data: Data(value.utf8))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
+private func makeSyntheticV2DAT(plaintext: Data, key: Data, xorTail: Data) throws -> Data {
+    guard key.count == 16 else { throw TestFailure(description: "Synthetic V2 key must be 16 bytes") }
+    let paddingLength = 16 - (plaintext.count % 16)
+    let padded = plaintext + Data(repeating: UInt8(paddingLength), count: paddingLength)
+    var cipher = [UInt8](repeating: 0, count: padded.count)
+    var moved = 0
+    let status = key.withUnsafeBytes { keyBytes in
+        padded.withUnsafeBytes { plaintextBytes in
+            CCCrypt(
+                CCOperation(kCCEncrypt),
+                CCAlgorithm(kCCAlgorithmAES),
+                CCOptions(kCCOptionECBMode),
+                keyBytes.baseAddress,
+                key.count,
+                nil,
+                plaintextBytes.baseAddress,
+                padded.count,
+                &cipher,
+                cipher.count,
+                &moved
+            )
+        }
+    }
+    guard status == kCCSuccess, moved == cipher.count else {
+        throw TestFailure(description: "Could not encrypt synthetic V2 fixture")
+    }
+    var dat = Data([0x07, 0x08, 0x56, 0x32, 0x08, 0x07])
+    var aesSize = UInt32(plaintext.count).littleEndian
+    var xorSize = UInt32(xorTail.count).littleEndian
+    withUnsafeBytes(of: &aesSize) { dat.append(contentsOf: $0) }
+    withUnsafeBytes(of: &xorSize) { dat.append(contentsOf: $0) }
+    dat.append(1)
+    dat.append(contentsOf: cipher)
+    dat.append(contentsOf: xorTail.map { $0 ^ 0x88 })
+    return dat
 }
 
 private struct TestFailure: Error, CustomStringConvertible {
