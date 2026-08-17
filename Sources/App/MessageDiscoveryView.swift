@@ -135,6 +135,13 @@ struct MessageDiscoveryView: View {
             if let reportDirectory {
                 Button("Open Local Analysis Report") { NSWorkspace.shared.open(reportDirectory) }
             }
+            if !result.diagnostics.isEmpty {
+                Label(
+                    result.diagnostics.map(\.rawValue).joined(separator: " · "),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.orange)
+            }
             Text("报告权限为目录 0700、文件 0600；它保留结构性发现和验证结果，不含本机预览内容。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -197,7 +204,7 @@ struct MessageDiscoveryView: View {
                 ForEach(result.links, id: \.reference.sourceMessageIdentity) { link in
                     VStack(alignment: .leading, spacing: 3) {
                         Text("row \(link.reference.sourceMessageIdentity.rowIdentifier) · \(link.reference.mediaTypeHint?.rawValue ?? "unknown") · \(link.confidence.rawValue)")
-                        Text(link.reason).font(.caption).foregroundStyle(.secondary)
+                        Text("\(link.diagnostic.rawValue)\(link.mappingRule.map { " · \($0.rawValue)" } ?? "") · \(link.reason)").font(.caption).foregroundStyle(.secondary)
                         if let file = link.resolvedFile {
                             Text("Local file: \(redactedRelativePath(file.relativePath)) · \(file.format.rawValue) · \(file.fileSize) bytes\(file.imageDimensions.map { " · \($0.width) × \($0.height)" } ?? "")")
                                 .font(.caption)

@@ -850,17 +850,159 @@ final class ArchiveCoreTests: XCTestCase {
             relativePathHint: nil,
             metadataFieldNames: ["embedded_md5"]
         )
-        let mediaFiles = try WeChatMediaScanner().scan(mediaRoot: mediaRoot).files
-
-        let link = try WeChatMediaDatabaseMapper().resolve(
+        let link = WeChatMediaDatabaseMapper().resolve(
             reference: reference,
             exportRoot: exportRoot,
-            mediaFiles: mediaFiles
+            mediaRoot: mediaRoot
         )
 
-        try expectEqual(link?.confidence, .high)
-        try expectEqual(link?.resolvedFile?.relativePath, "msg/image/fixture.png")
-        try expectEqual(link?.reason, "Exact MD5 media database mapping")
+        try expectEqual(link.confidence, .exact)
+        try expectEqual(link.diagnostic, .resolved)
+        try expectEqual(link.mappingRule, .accountRootRelative)
+        try expectEqual(link.resolvedFile?.relativePath, "msg/image/fixture.png")
+        try expectEqual(link.reason, "Exact MD5 hardlink mapping")
+    }
+
+    func testMediaDatabaseMapperPreservesHardlinkDiagnosticsInsteadOfUnresolved() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        try FileManager.default.createDirectory(at: exportRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: true)
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: "d41d8cd98f00b204e9800998ecf8427e",
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["embedded_md5"]
+        )
+
+        let missing = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(missing.diagnostic, .hardlinkDatabaseMissing)
+        try expectEqual(missing.confidence, .unresolved)
+
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: "CREATE TABLE unsupported (value TEXT);")
+        let unsupported = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(unsupported.diagnostic, .hardlinkSchemaUnsupported)
+
+        try FileManager.default.removeItem(at: mappingDatabase)
+        try Data("not a SQLite database".utf8).write(to: mappingDatabase)
+        let queryFailure = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(queryFailure.diagnostic, .hardlinkQueryFailed)
+    }
+
+    func testMediaDatabaseMapperDistinguishesNoMultipleAndMissingFileMappings() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: true)
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e"
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5 TEXT, md5_hash TEXT, file_name TEXT, dir1 TEXT, dir2 TEXT);
+            INSERT INTO image_hardlink_info_v4 VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', NULL, 'none.png', 'msg', 'image');
+            """)
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: md5,
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["embedded_md5"]
+        )
+
+        let noMapping = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(noMapping.diagnostic, .hardlinkNoMapping)
+
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            INSERT INTO image_hardlink_info_v4 VALUES ('\(md5)', NULL, 'first.png', 'msg', 'image');
+            INSERT INTO image_hardlink_info_v4 VALUES ('\(md5)', NULL, 'second.png', 'msg', 'image');
+            """)
+        let multiple = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(multiple.diagnostic, .hardlinkMultipleMappings)
+
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: "DELETE FROM image_hardlink_info_v4 WHERE md5 = '\(md5)'; INSERT INTO image_hardlink_info_v4 VALUES ('\(md5)', NULL, 'missing.png', 'msg', 'image');")
+        let missingFile = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+        try expectEqual(missingFile.diagnostic, .mappedFileMissing)
+    }
+
+    func testMediaDatabaseMapperReportsUnsupportedMappedMediaWithoutScanningTheRoot() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let mappingDatabase = exportRoot.appending(path: "hardlink/hardlink.db")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let fileURL = mediaRoot.appending(path: "msg/image/opaque.dat")
+        try FileManager.default.createDirectory(at: mappingDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not a supported media format".utf8).write(to: fileURL)
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e"
+        try createPlainSQLiteDatabase(at: mappingDatabase, sql: """
+            CREATE TABLE image_hardlink_info_v4 (md5 TEXT, md5_hash TEXT, file_name TEXT, dir1 TEXT, dir2 TEXT);
+            INSERT INTO image_hardlink_info_v4 VALUES ('\(md5)', NULL, 'opaque.dat', 'msg', 'image');
+            """)
+        let reference = MediaReference(
+            sourceMessageIdentity: .init(databaseRelativePath: "message/message_0.db", tableName: "message", rowIdentifier: "2"),
+            mediaTypeHint: .image,
+            md5: md5,
+            mediaID: nil,
+            relativePathHint: nil,
+            metadataFieldNames: ["embedded_md5"]
+        )
+
+        let result = WeChatMediaDatabaseMapper().resolve(reference: reference, exportRoot: exportRoot, mediaRoot: mediaRoot)
+
+        try expectEqual(result.diagnostic, .mediaDecodeUnsupported)
+        try expectTrue(result.resolvedFile == nil)
+    }
+
+    func testCoordinatorReportsWhenFallbackMediaScanReachesItsBound() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        let mediaRoot = directory.appending(path: "WeChatData")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mediaRoot.appending(path: "msg/opaque"), withIntermediateDirectories: true)
+        try Data("first".utf8).write(to: mediaRoot.appending(path: "msg/opaque/one.dat"))
+        try Data("second".utf8).write(to: mediaRoot.appending(path: "msg/opaque/two.dat"))
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE message (local_id INTEGER PRIMARY KEY, local_type INTEGER, create_time INTEGER, packed_info_data BLOB);
+            INSERT INTO message VALUES (1, 3, 1723800123, CAST('d41d8cd98f00b204e9800998ecf8427e' AS BLOB));
+            """)
+        let candidate = try unwrap(WeChatMessageTableDiscovery().candidates(from: try SQLiteSchemaScanner().scan(exportRoot: exportRoot)).first)
+
+        let result = try MessageMediaDiscoveryCoordinator().discover(
+            exportRoot: exportRoot,
+            candidate: candidate,
+            mediaRoot: mediaRoot,
+            mediaScanMaximumResults: 1
+        )
+
+        try expectTrue(result.mediaScan?.isTruncated == true)
+        try expectTrue(result.diagnostics.contains(.mediaScanTruncated))
+        try expectEqual(result.links.first?.diagnostic, .hardlinkDatabaseMissing)
+    }
+
+    func testSingleFileInspectionRejectsSymbolicLinksBeforeResolvingThem() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mediaRoot = directory.appending(path: "WeChatData")
+        let target = directory.appending(path: "outside.png")
+        let link = mediaRoot.appending(path: "msg/image/link.dat")
+        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try syntheticPNGData().write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        try expectThrows(ArchiveError.invalidInput) {
+            _ = try WeChatMediaScanner().inspect(mediaFileURL: link, below: mediaRoot)
+        }
     }
 
     func testMessageDiscoveryReportExcludesSampleTextAndAbsoluteMediaPaths() throws {

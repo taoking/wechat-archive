@@ -32,7 +32,7 @@ Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源
 
 **Message Discovery** 读取用户主动选择的普通 SQLite 根目录中的 `SchemaReports/schema-summary.json`，将其中的消息候选表供用户选择；再以 `SQLITE_OPEN_READONLY` 最多抽取 500 行，保留 SQLite 原始存储类型，推断字段、时间单位和原始 type 的样本分布。它不会进行完整消息导出或写入 Archive v1。
 
-用户还必须显式选择本人原始微信数据根目录，才会开始本地媒体定位。扫描器以流式方式读取普通文件的有限头部、识别媒体 magic bytes（也可识别 JPEG/PNG/GIF 的单字节 XOR 文件头），并只在路径或媒体标识符已缩小候选范围时计算 MD5。文件名本身永远不会被视作匹配证据；没有足够证据时结果保持 unresolved。
+用户还必须显式选择本人原始微信数据根目录，才会开始本地媒体定位。对于含有结构性 MD5 的消息，应用先以参数绑定查询导出的 `hardlink/hardlink.db`，再只检查该映射缩小后的本地路径；它不会把数据库查询错误伪装为 unresolved。递归扫描器仅作为兜底：它以流式方式读取普通文件的有限头部、识别媒体 magic bytes（也可识别 JPEG/PNG/GIF 的单字节 XOR 文件头），并保留 20,000 个候选的上限及截断诊断。文件名本身永远不会被视作匹配证据；没有足够证据时结果保持 unresolved。
 
 一次运行最多验证一条或少量受限的消息—媒体链路。页面可在本机展示短预览以供用户确认，`.local-analysis/` 下的 `message-discovery.json` 与 `message-discovery.md` 只写入结构、字段映射、聚合 type 分布和解析结果；它们不包含消息文本、BLOB、媒体 ID、哈希、文件名或绝对路径。目录为 `0700`，文件为 `0600`，并已被 Git 忽略。
 

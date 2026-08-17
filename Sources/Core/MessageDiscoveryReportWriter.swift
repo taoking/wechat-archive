@@ -97,6 +97,9 @@ public struct MessageDiscoveryReportWriter: Sendable {
         } else {
             lines.append("- No original media root was selected.")
         }
+        if !report.diagnostics.isEmpty {
+            lines.append("- Diagnostics: \(report.diagnostics.map(\.rawValue).joined(separator: ", "))")
+        }
         lines += ["", "## Observed Type Mappings", ""]
         if report.observedTypeMappings.isEmpty {
             lines.append("No type-to-media mapping was confirmed by a resolved local media file.")
@@ -147,6 +150,8 @@ private struct SafeMessageDiscoveryReport: Codable {
     struct SafeMediaLink: Codable {
         let source: SourceMessageIdentity
         let confidence: LinkConfidence
+        let diagnostic: MessageMediaDiagnostic
+        let mappingRule: MediaPathMappingRule?
         let reason: String
         let resolvedFormat: LocalMediaFormat?
         let resolvedFileSize: Int64?
@@ -171,6 +176,7 @@ private struct SafeMessageDiscoveryReport: Codable {
     let mediaLinks: [SafeMediaLink]
     let mediaScan: SafeMediaScan?
     let observedTypeMappings: [ObservedMessageTypeMapping]
+    let diagnostics: [MessageMediaDiagnostic]
 
     init(result: MessageMediaDiscoveryResult) {
         let analysis = result.messageAnalysis
@@ -223,6 +229,8 @@ private struct SafeMessageDiscoveryReport: Codable {
             SafeMediaLink(
                 source: redactedMessageIdentity(link.reference.sourceMessageIdentity),
                 confidence: link.confidence,
+                diagnostic: link.diagnostic,
+                mappingRule: link.mappingRule,
                 reason: link.reason,
                 resolvedFormat: link.resolvedFile?.format,
                 resolvedFileSize: link.resolvedFile?.fileSize,
@@ -235,6 +243,7 @@ private struct SafeMessageDiscoveryReport: Codable {
             mediaScan = nil
         }
         observedTypeMappings = result.observedTypeMappings
+        diagnostics = result.diagnostics
     }
 }
 

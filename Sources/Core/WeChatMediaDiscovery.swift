@@ -106,16 +106,53 @@ public enum LinkConfidence: String, Codable, Equatable, Sendable {
     case unresolved
 }
 
+/// A privacy-safe result of one local media-resolution attempt. It deliberately
+/// contains no media identifier, filename, or absolute path.
+public enum MessageMediaDiagnostic: String, Codable, Equatable, Sendable {
+    case hardlinkDatabaseMissing
+    case hardlinkSchemaUnsupported
+    case hardlinkQueryFailed
+    case hardlinkNoMapping
+    case hardlinkMultipleMappings
+    case mappedFileMissing
+    case mappedFileAmbiguous
+    case mediaScanTruncated
+    case mediaDecodeUnsupported
+    case noMediaRoot
+    case noSafeFallbackMatch
+    case resolved
+}
+
+/// A fixed, non-sensitive rule used to join one hardlink mapping to the
+/// user-selected account root. Mapping values themselves are never reported.
+public enum MediaPathMappingRule: String, Codable, Equatable, Sendable {
+    case accountRootRelative = "<mapping>"
+    case msgPrefixed = "msg/<mapping>"
+    case resourcePrefixed = "resource/<mapping>"
+    case cachePrefixed = "cache/<mapping>"
+}
+
 public struct MessageMediaLink: Equatable, Sendable {
     public let reference: MediaReference
     public let resolvedFile: DiscoveredMediaFile?
     public let confidence: LinkConfidence
+    public let diagnostic: MessageMediaDiagnostic
+    public let mappingRule: MediaPathMappingRule?
     public let reason: String
 
-    public init(reference: MediaReference, resolvedFile: DiscoveredMediaFile?, confidence: LinkConfidence, reason: String) {
+    public init(
+        reference: MediaReference,
+        resolvedFile: DiscoveredMediaFile?,
+        confidence: LinkConfidence,
+        diagnostic: MessageMediaDiagnostic,
+        mappingRule: MediaPathMappingRule? = nil,
+        reason: String
+    ) {
         self.reference = reference
         self.resolvedFile = resolvedFile
         self.confidence = confidence
+        self.diagnostic = diagnostic
+        self.mappingRule = mappingRule
         self.reason = reason
     }
 }
@@ -141,17 +178,20 @@ public struct MessageMediaDiscoveryResult: Equatable, Sendable {
     public let mediaScan: MediaScanResult?
     public let links: [MessageMediaLink]
     public let observedTypeMappings: [ObservedMessageTypeMapping]
+    public let diagnostics: [MessageMediaDiagnostic]
 
     public init(
         messageAnalysis: MessageSampleAnalysis,
         mediaScan: MediaScanResult?,
         links: [MessageMediaLink],
-        observedTypeMappings: [ObservedMessageTypeMapping]
+        observedTypeMappings: [ObservedMessageTypeMapping],
+        diagnostics: [MessageMediaDiagnostic] = []
     ) {
         self.messageAnalysis = messageAnalysis
         self.mediaScan = mediaScan
         self.links = links
         self.observedTypeMappings = observedTypeMappings
+        self.diagnostics = diagnostics
     }
 }
 
@@ -216,6 +256,40 @@ public struct WeChatMediaScanner: Sendable {
             progress?(MediaScanProgress(scannedFileCount: scanned, discoveredMediaCount: files.count, currentRelativePath: relativePath))
         }
         return MediaScanResult(files: files.sorted { $0.relativePath < $1.relativePath }, scannedFileCount: scanned, isTruncated: truncated)
+    }
+
+    /// Inspects exactly one already-narrowed local file. This is used by the
+    /// hardlink path resolver and does not enumerate or hash the media root.
+    public func inspect(mediaFileURL: URL, below mediaRoot: URL) throws -> DiscoveredMediaFile {
+        let root = try resolvedMediaRoot(mediaRoot)
+        let requested = mediaFileURL.standardizedFileURL
+        let requestedValues = try requested.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard requestedValues.isRegularFile == true,
+              requestedValues.isSymbolicLink != true else {
+            throw ArchiveError.invalidInput
+        }
+        let resolved = requested.resolvingSymlinksInPath().standardizedFileURL
+        let values = try resolved.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              isDescendant(resolved, of: root),
+              let relativePath = relativePath(of: resolved, below: root) else {
+            throw ArchiveError.invalidInput
+        }
+        let header = try readHeader(at: resolved)
+        let directFormat = MediaMagicDetector.detect(header)
+        let xorDetection = directFormat == .unknown ? MediaMagicDetector.detectXORObfuscatedImage(header) : nil
+        let format = xorDetection?.format ?? directFormat
+        return DiscoveredMediaFile(
+            sourceURL: resolved,
+            relativePath: relativePath,
+            fileSize: Int64(values.fileSize ?? 0),
+            fileExtension: resolved.pathExtension.lowercased(),
+            format: format,
+            imageDimensions: format.isImage ? imageDimensions(at: resolved, xorKey: xorDetection?.key) : nil,
+            headerXORKey: xorDetection?.key,
+            sha256: nil
+        )
     }
 
     private func resolvedMediaRoot(_ url: URL) throws -> URL {
@@ -331,12 +405,12 @@ public struct MessageMediaResolver: Sendable {
     public func resolve(reference: MediaReference, mediaFiles: [DiscoveredMediaFile]) throws -> MessageMediaLink {
         if let hint = reference.relativePathHint,
            let file = mediaFiles.first(where: { $0.relativePath == hint }) {
-            return MessageMediaLink(reference: reference, resolvedFile: file, confidence: .exact, reason: "Exact relative path match")
+            return MessageMediaLink(reference: reference, resolvedFile: file, confidence: .exact, diagnostic: .resolved, reason: "Exact relative path match")
         }
         if let mediaID = reference.mediaID, mediaID.count >= 8 {
             let matches = mediaFiles.filter { $0.relativePath.range(of: mediaID, options: .caseInsensitive) != nil }
             if matches.count == 1, let match = matches.first {
-                return MessageMediaLink(reference: reference, resolvedFile: match, confidence: .high, reason: "Exact media ID path match")
+                return MessageMediaLink(reference: reference, resolvedFile: match, confidence: .high, diagnostic: .resolved, reason: "Exact media ID path match")
             }
         }
         if let expectedMD5 = reference.md5 {
@@ -346,11 +420,11 @@ public struct MessageMediaResolver: Sendable {
             let candidates = namedCandidates.isEmpty && mediaFiles.count <= 24 ? mediaFiles : namedCandidates
             for candidate in candidates.prefix(24) {
                 if try md5(of: candidate.sourceURL, xorKey: candidate.headerXORKey) == expectedMD5.lowercased() {
-                    return MessageMediaLink(reference: reference, resolvedFile: candidate, confidence: .exact, reason: "Exact MD5 match")
+                    return MessageMediaLink(reference: reference, resolvedFile: candidate, confidence: .exact, diagnostic: .resolved, reason: "Exact MD5 match")
                 }
             }
         }
-        return MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, reason: "No safe media match")
+        return MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, diagnostic: .noSafeFallbackMatch, reason: "No safe fallback media match")
     }
 
     private func md5(of url: URL, xorKey: UInt8?) throws -> String {
@@ -365,85 +439,203 @@ public struct MessageMediaResolver: Sendable {
 }
 
 /// Looks up a message MD5 in the exported, plain local hardlink database and
-/// resolves it only when that exact mapping identifies one local media file.
-/// The mapping values remain in memory and never enter a discovery report.
+/// resolves it before attempting a broad media scan. The mapping values remain
+/// in memory and never enter a discovery report.
 public struct WeChatMediaDatabaseMapper: Sendable {
     public init() {}
 
     public func resolve(
         reference: MediaReference,
         exportRoot: URL,
-        mediaFiles: [DiscoveredMediaFile]
-    ) throws -> MessageMediaLink? {
-        try resolveAll(references: [reference], exportRoot: exportRoot, mediaFiles: mediaFiles)[reference.sourceMessageIdentity]
+        mediaRoot: URL
+    ) -> MessageMediaLink {
+        resolveAll(references: [reference], exportRoot: exportRoot, mediaRoot: mediaRoot)[reference.sourceMessageIdentity]
+            ?? unresolvedLink(for: reference, diagnostic: .hardlinkQueryFailed, reason: "Hardlink lookup did not return a diagnostic")
     }
 
-    /// Opens the exported mapping database once for a bounded batch of
-    /// unresolved references, avoiding a database open per sampled message.
+    /// Opens the exported mapping database once for a bounded batch. Each
+    /// input gets a diagnostic result so a schema or query failure is never
+    /// silently presented as an ordinary unresolved media reference.
     public func resolveAll(
         references: [MediaReference],
         exportRoot: URL,
-        mediaFiles: [DiscoveredMediaFile]
-    ) throws -> [SourceMessageIdentity: MessageMediaLink] {
-        let databaseURL = try hardlinkDatabaseURL(below: exportRoot)
-        let database = try SQLiteMediaMappingDatabase(url: databaseURL)
+        mediaRoot: URL
+    ) -> [SourceMessageIdentity: MessageMediaLink] {
         var links = [SourceMessageIdentity: MessageMediaLink]()
-        for reference in references {
-            guard let md5 = reference.md5,
-                  md5.range(of: "^[0-9a-fA-F]{32}$", options: .regularExpression) != nil else {
+        let md5References = references.filter { validMD5($0.md5) }
+        for reference in references where !validMD5(reference.md5) {
+            links[reference.sourceMessageIdentity] = unresolvedLink(
+                for: reference,
+                diagnostic: .noSafeFallbackMatch,
+                reason: "No structural MD5 available for hardlink lookup"
+            )
+        }
+        guard !md5References.isEmpty else { return links }
+
+        guard let databaseURL = hardlinkDatabaseURL(below: exportRoot) else {
+            for reference in md5References {
+                links[reference.sourceMessageIdentity] = unresolvedLink(
+                    for: reference,
+                    diagnostic: .hardlinkDatabaseMissing,
+                    reason: "Exported hardlink database is unavailable"
+                )
+            }
+            return links
+        }
+
+        let database: SQLiteMediaMappingDatabase
+        do {
+            database = try SQLiteMediaMappingDatabase(url: databaseURL)
+        } catch {
+            return linksFor(md5References, diagnostic: .hardlinkQueryFailed, reason: "Hardlink database could not be opened", existing: links)
+        }
+        let schemas: [HardlinkTableSchema]
+        do {
+            schemas = try database.supportedSchemas()
+        } catch {
+            return linksFor(md5References, diagnostic: .hardlinkQueryFailed, reason: "Hardlink schema query failed", existing: links)
+        }
+        guard !schemas.isEmpty else {
+            return linksFor(md5References, diagnostic: .hardlinkSchemaUnsupported, reason: "Hardlink schema does not expose required mapping fields", existing: links)
+        }
+
+        for reference in md5References {
+            guard let md5 = reference.md5 else { continue }
+            let mappings: [MediaDatabaseMapping]
+            do {
+                mappings = try database.mappings(for: md5, schemas: schemas)
+            } catch {
+                links[reference.sourceMessageIdentity] = unresolvedLink(for: reference, diagnostic: .hardlinkQueryFailed, reason: "Hardlink mapping query failed")
                 continue
             }
-            let mappings = try database.mappings(for: md5)
-            guard !mappings.isEmpty else { continue }
-            if let link = link(reference: reference, mappings: mappings, mediaFiles: mediaFiles) {
-                links[reference.sourceMessageIdentity] = link
+            switch mappings.count {
+            case 0:
+                links[reference.sourceMessageIdentity] = unresolvedLink(for: reference, diagnostic: .hardlinkNoMapping, reason: "No exact MD5 mapping in hardlink database")
+            case 1:
+                links[reference.sourceMessageIdentity] = resolveUniqueMapping(reference: reference, mapping: mappings[0], mediaRoot: mediaRoot)
+            default:
+                links[reference.sourceMessageIdentity] = unresolvedLink(for: reference, diagnostic: .hardlinkMultipleMappings, reason: "Multiple exact MD5 mappings in hardlink database")
             }
         }
         return links
     }
 
-    private func link(
+    private func resolveUniqueMapping(
         reference: MediaReference,
-        mappings: [MediaDatabaseMapping],
-        mediaFiles: [DiscoveredMediaFile]
-    ) -> MessageMediaLink? {
-        let mappedPaths = Set(mappings.compactMap(\.relativePath))
-        let exactPathMatches = mediaFiles.filter { mappedPaths.contains($0.relativePath) }
-        if exactPathMatches.count == 1, let file = exactPathMatches.first {
-            return MessageMediaLink(
-                reference: reference,
-                resolvedFile: file,
-                confidence: .high,
-                reason: "Exact MD5 media database mapping"
+        mapping: MediaDatabaseMapping,
+        mediaRoot: URL
+    ) -> MessageMediaLink {
+        let candidates: [MappedLocalCandidate]
+        do {
+            candidates = try localCandidates(for: mapping, below: mediaRoot)
+        } catch {
+            return unresolvedLink(for: reference, diagnostic: .mappedFileMissing, reason: "Mapped local file is unavailable")
+        }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            return unresolvedLink(
+                for: reference,
+                diagnostic: candidates.isEmpty ? .mappedFileMissing : .mappedFileAmbiguous,
+                reason: candidates.isEmpty ? "Mapped local file is unavailable" : "Mapped local path is ambiguous"
             )
         }
-
-        // A filename is safe only because it was first fetched through an
-        // exact MD5 lookup and then narrowed to exactly one actual file.
-        let mappedNames = Set(mappings.compactMap(\.fileName))
-        let filenameMatches = mediaFiles.filter { file in
-            mappedNames.contains(file.relativePath.split(separator: "/").last.map(String.init) ?? "")
+        do {
+            let file = try WeChatMediaScanner().inspect(mediaFileURL: candidate.url, below: mediaRoot)
+            guard file.format != .unknown else {
+                return unresolvedLink(for: reference, diagnostic: .mediaDecodeUnsupported, reason: "Mapped file format is not supported")
+            }
+            return MessageMediaLink(reference: reference, resolvedFile: file, confidence: .exact, diagnostic: .resolved, mappingRule: candidate.rule, reason: "Exact MD5 hardlink mapping")
+        } catch {
+            return unresolvedLink(for: reference, diagnostic: .mediaDecodeUnsupported, reason: "Mapped file could not be inspected")
         }
-        guard filenameMatches.count == 1, let file = filenameMatches.first else { return nil }
-        return MessageMediaLink(
-            reference: reference,
-            resolvedFile: file,
-            confidence: .high,
-            reason: "Exact MD5 media database mapping"
-        )
     }
 
-    private func hardlinkDatabaseURL(below exportRoot: URL) throws -> URL {
+    private func linksFor(
+        _ references: [MediaReference],
+        diagnostic: MessageMediaDiagnostic,
+        reason: String,
+        existing: [SourceMessageIdentity: MessageMediaLink]
+    ) -> [SourceMessageIdentity: MessageMediaLink] {
+        var links = existing
+        for reference in references {
+            links[reference.sourceMessageIdentity] = unresolvedLink(for: reference, diagnostic: diagnostic, reason: reason)
+        }
+        return links
+    }
+
+    private func unresolvedLink(
+        for reference: MediaReference,
+        diagnostic: MessageMediaDiagnostic,
+        reason: String
+    ) -> MessageMediaLink {
+        MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, diagnostic: diagnostic, reason: reason)
+    }
+
+    private func validMD5(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value.range(of: "^[0-9a-fA-F]{32}$", options: .regularExpression) != nil
+    }
+
+    private func hardlinkDatabaseURL(below exportRoot: URL) -> URL? {
         let root = exportRoot.standardizedFileURL
-        let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+        guard let rootValues = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              rootValues.isDirectory == true,
+              rootValues.isSymbolicLink != true else { return nil }
         let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
-        let database = root.appending(path: "hardlink/hardlink.db").resolvingSymlinksInPath().standardizedFileURL
+        let requestedDatabase = root.appending(path: "hardlink/hardlink.db").standardizedFileURL
+        guard let requestedValues = try? requestedDatabase.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              requestedValues.isRegularFile == true,
+              requestedValues.isSymbolicLink != true else { return nil }
+        let database = requestedDatabase.resolvingSymlinksInPath().standardizedFileURL
         let rootPath = resolvedRoot.path().hasSuffix("/") ? resolvedRoot.path() : resolvedRoot.path() + "/"
-        guard database.path().hasPrefix(rootPath), database.pathExtension.lowercased() == "db" else { throw ArchiveError.invalidInput }
-        let values = try database.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+        guard database.path().hasPrefix(rootPath), database.pathExtension.lowercased() == "db",
+              let values = try? database.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true,
+              values.isSymbolicLink != true else { return nil }
         return database
+    }
+
+    /// The hardlink values are not assumed to be account-root-relative. We
+    /// test only the minimal fixed container prefixes observed in account data.
+    private func localCandidates(for mapping: MediaDatabaseMapping, below mediaRoot: URL) throws -> [MappedLocalCandidate] {
+        let requestedRoot = mediaRoot.standardizedFileURL
+        let requestedRootValues = try requestedRoot.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard requestedRootValues.isDirectory == true, requestedRootValues.isSymbolicLink != true else {
+            throw ArchiveError.invalidInput
+        }
+        let root = requestedRoot.resolvingSymlinksInPath().standardizedFileURL
+        let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true,
+              let components = mapping.pathComponents else { return [] }
+        let prefixes: [(components: [String], rule: MediaPathMappingRule)] = [
+            ([], .accountRootRelative),
+            (["msg"], .msgPrefixed),
+            (["resource"], .resourcePrefixed),
+            (["cache"], .cachePrefixed)
+        ]
+        var candidates = [URL: MediaPathMappingRule]()
+        for prefix in prefixes {
+            let requestedCandidate = (prefix.components + components).reduce(root) { $0.appending(path: $1) }
+                .standardizedFileURL
+            guard let requestedValues = try? requestedCandidate.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  requestedValues.isRegularFile == true,
+                  requestedValues.isSymbolicLink != true else { continue }
+            let candidate = requestedCandidate
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            guard isDescendant(candidate, of: root),
+                  let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true,
+                  values.isSymbolicLink != true else { continue }
+            candidates[candidate] = candidates[candidate] ?? prefix.rule
+        }
+        return candidates
+            .map { MappedLocalCandidate(url: $0.key, rule: $0.value) }
+            .sorted { $0.url.path() < $1.url.path() }
+    }
+
+    private func isDescendant(_ url: URL, of root: URL) -> Bool {
+        let rootPath = root.path().hasSuffix("/") ? root.path() : root.path() + "/"
+        return url.path().hasPrefix(rootPath)
     }
 }
 
@@ -452,14 +644,24 @@ private struct MediaDatabaseMapping: Hashable, Sendable {
     let dir1: String?
     let dir2: String?
 
-    var relativePath: String? {
-        let components = [dir1, dir2, fileName].compactMap { value -> String? in
+    var pathComponents: [String]? {
+        let values = [dir1, dir2, fileName].compactMap { value -> String? in
             guard let value, !value.isEmpty else { return nil }
             return normalizedReferencePath(value)
         }
-        guard !components.isEmpty else { return nil }
-        return normalizedReferencePath(components.joined(separator: "/"))
+        let components = values.flatMap { $0.split(separator: "/").map(String.init) }
+        return components.isEmpty ? nil : components
     }
+}
+
+private struct MappedLocalCandidate: Sendable {
+    let url: URL
+    let rule: MediaPathMappingRule
+}
+
+private struct HardlinkTableSchema: Sendable {
+    let tableName: String
+    let hasMD5Hash: Bool
 }
 
 private final class SQLiteMediaMappingDatabase {
@@ -479,26 +681,81 @@ private final class SQLiteMediaMappingDatabase {
         if let handle { sqlite3_close(handle) }
     }
 
-    func mappings(for md5: String) throws -> [MediaDatabaseMapping] {
-        let tables = ["image_hardlink_info_v4", "video_hardlink_info_v4", "file_hardlink_info_v4"]
-        return Array(Set(tables.flatMap { (try? mappings(in: $0, md5: md5)) ?? [] }))
+    func supportedSchemas() throws -> [HardlinkTableSchema] {
+        let expectedTables = Set(["image_hardlink_info_v4", "video_hardlink_info_v4", "file_hardlink_info_v4"])
+        let tables = try tableNames().filter { expectedTables.contains($0) }
+        return try tables.compactMap { table in
+            let fields = try columnNames(in: table)
+            guard Set(["md5", "file_name", "dir1", "dir2"]).isSubset(of: fields) else { return nil }
+            return HardlinkTableSchema(tableName: table, hasMD5Hash: fields.contains("md5_hash"))
+        }
     }
 
-    private func mappings(in table: String, md5: String) throws -> [MediaDatabaseMapping] {
+    func mappings(for md5: String, schemas: [HardlinkTableSchema]) throws -> [MediaDatabaseMapping] {
+        var collectedMappings = Set<MediaDatabaseMapping>()
+        for schema in schemas {
+            for mapping in try mappings(in: schema, md5: md5) {
+                collectedMappings.insert(mapping)
+            }
+        }
+        return collectedMappings.sorted { ($0.pathComponents ?? []).joined(separator: "/") < ($1.pathComponents ?? []).joined(separator: "/") }
+    }
+
+    private func tableNames() throws -> [String] {
+        let sql = "SELECT name FROM sqlite_master WHERE type = 'table'"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        var names = [String]()
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return names }
+            guard status == SQLITE_ROW, let name = text(statement, index: 0) else { throw ArchiveError.databaseFailure }
+            names.append(name)
+        }
+    }
+
+    private func columnNames(in table: String) throws -> Set<String> {
+        guard ["image_hardlink_info_v4", "video_hardlink_info_v4", "file_hardlink_info_v4"].contains(table) else {
+            throw ArchiveError.databaseFailure
+        }
+        let sql = "PRAGMA table_info(\"\(table)\")"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ArchiveError.databaseFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        var names = Set<String>()
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return names }
+            guard status == SQLITE_ROW, let name = text(statement, index: 1) else { throw ArchiveError.databaseFailure }
+            names.insert(name.lowercased())
+        }
+    }
+
+    private func mappings(in schema: HardlinkTableSchema, md5: String) throws -> [MediaDatabaseMapping] {
+        let predicate = schema.hasMD5Hash
+            ? "lower(CAST(\"md5\" AS TEXT)) = lower(?) OR lower(CAST(\"md5_hash\" AS TEXT)) = lower(?)"
+            : "lower(CAST(\"md5\" AS TEXT)) = lower(?)"
         let sql = """
         SELECT \"file_name\", \"dir1\", \"dir2\"
-        FROM \"\(table)\"
-        WHERE lower(CAST(\"md5\" AS TEXT)) = lower(?)
-           OR lower(CAST(\"md5_hash\" AS TEXT)) = lower(?)
-        LIMIT 4
+        FROM \"\(schema.tableName)\"
+        WHERE \(predicate)
+        LIMIT 5
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             throw ArchiveError.databaseFailure
         }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_bind_text(statement, 1, md5, -1, sqliteTransient) == SQLITE_OK,
-              sqlite3_bind_text(statement, 2, md5, -1, sqliteTransient) == SQLITE_OK else {
+        guard sqlite3_bind_text(statement, 1, md5, -1, sqliteTransient) == SQLITE_OK else {
+            throw ArchiveError.databaseFailure
+        }
+        if schema.hasMD5Hash,
+           sqlite3_bind_text(statement, 2, md5, -1, sqliteTransient) != SQLITE_OK {
             throw ArchiveError.databaseFailure
         }
         var results = [MediaDatabaseMapping]()
@@ -535,6 +792,7 @@ public struct MessageMediaDiscoveryCoordinator: Sendable {
         candidate: MessageTableCandidate,
         mediaRoot: URL?,
         sampleLimit: Int = 100,
+        mediaScanMaximumResults: Int = 20_000,
         now: Date = Date(),
         mediaProgress: (@Sendable (MediaScanProgress) -> Void)? = nil,
         shouldCancel: (@Sendable () -> Bool)? = nil
@@ -547,31 +805,59 @@ public struct MessageMediaDiscoveryCoordinator: Sendable {
         )
         guard let mediaRoot else {
             let links = analysis.mediaReferences.map {
-                MessageMediaLink(reference: $0, resolvedFile: nil, confidence: .unresolved, reason: "Media root not selected")
+                MessageMediaLink(reference: $0, resolvedFile: nil, confidence: .unresolved, diagnostic: .noMediaRoot, reason: "Media root not selected")
             }
             return MessageMediaDiscoveryResult(messageAnalysis: analysis, mediaScan: nil, links: links, observedTypeMappings: [])
         }
-        let scan = try WeChatMediaScanner().scan(mediaRoot: mediaRoot, progress: mediaProgress, shouldCancel: shouldCancel)
-        let resolver = MessageMediaResolver()
         let databaseMapper = WeChatMediaDatabaseMapper()
-        let directLinks = analysis.mediaReferences.map { reference in
-            (try? resolver.resolve(reference: reference, mediaFiles: scan.files))
-                ?? MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, reason: "Media resolution failed")
+        let mappedLinks = databaseMapper.resolveAll(
+            references: analysis.mediaReferences,
+            exportRoot: exportRoot,
+            mediaRoot: mediaRoot
+        )
+        let initialLinks = analysis.mediaReferences.map { reference in
+            mappedLinks[reference.sourceMessageIdentity]
+                ?? MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, diagnostic: .hardlinkQueryFailed, reason: "Hardlink lookup did not return a diagnostic")
         }
-        let unresolvedReferences = directLinks
+        let unresolvedReferences = initialLinks
             .filter { $0.confidence == .unresolved }
             .map(\.reference)
-        let mappedLinks = (try? databaseMapper.resolveAll(
-            references: unresolvedReferences,
-            exportRoot: exportRoot,
-            mediaFiles: scan.files
-        )) ?? [:]
-        let links = directLinks.map { mappedLinks[$0.reference.sourceMessageIdentity] ?? $0 }
+        guard !unresolvedReferences.isEmpty else {
+            return MessageMediaDiscoveryResult(
+                messageAnalysis: analysis,
+                mediaScan: nil,
+                links: initialLinks,
+                observedTypeMappings: observedTypeMappings(analysis: analysis, links: initialLinks)
+            )
+        }
+        let scan = try WeChatMediaScanner().scan(
+            mediaRoot: mediaRoot,
+            maximumResults: mediaScanMaximumResults,
+            progress: mediaProgress,
+            shouldCancel: shouldCancel
+        )
+        let resolver = MessageMediaResolver()
+        let fallbackLinks = Dictionary(uniqueKeysWithValues: unresolvedReferences.map { reference in
+            let link: MessageMediaLink
+            do {
+                link = try resolver.resolve(reference: reference, mediaFiles: scan.files)
+            } catch {
+                link = MessageMediaLink(reference: reference, resolvedFile: nil, confidence: .unresolved, diagnostic: .noSafeFallbackMatch, reason: "Fallback media resolution failed")
+            }
+            return (reference.sourceMessageIdentity, link)
+        })
+        let links = initialLinks.map { hardlinkLink in
+            guard let fallback = fallbackLinks[hardlinkLink.reference.sourceMessageIdentity],
+                  fallback.confidence != .unresolved else { return hardlinkLink }
+            return fallback
+        }
+        let diagnostics = scan.isTruncated ? [MessageMediaDiagnostic.mediaScanTruncated] : []
         return MessageMediaDiscoveryResult(
             messageAnalysis: analysis,
             mediaScan: scan,
             links: links,
-            observedTypeMappings: observedTypeMappings(analysis: analysis, links: links)
+            observedTypeMappings: observedTypeMappings(analysis: analysis, links: links),
+            diagnostics: diagnostics
         )
     }
 
