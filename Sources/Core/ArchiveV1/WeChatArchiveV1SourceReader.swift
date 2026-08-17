@@ -4,7 +4,7 @@ import SQLite3
 struct ArchiveV1SourceMessage: Sendable {
     let sourceDatabase: String
     let sourceTable: String
-    let sourceRowIdentifier: String
+    let sourceSQLiteRowID: Int64
     let sourceSequence: Int64
     let values: [String: ArchivedSQLiteValue]
 }
@@ -42,14 +42,11 @@ public struct WeChatArchiveV1SourceReader: Sendable {
             let database = try ReadOnlyArchiveV1SourceDatabase(url: table.databaseURL)
             let shouldContinue = try database.stream(tableName: table.tableName) { rowid, values in
                 guard limit.map({ delivered < $0 }) ?? true else { return false }
-                let localID = values.integer(named: ["local_id", "message_id", "msg_id"])
-                let sourceIdentifier = localID.map(String.init) ?? String(rowid)
-                let sequence = localID ?? rowid
                 let record = ArchiveV1SourceMessage(
                     sourceDatabase: table.databaseRelativePath,
                     sourceTable: table.tableName,
-                    sourceRowIdentifier: sourceIdentifier,
-                    sourceSequence: sequence,
+                    sourceSQLiteRowID: rowid,
+                    sourceSequence: rowid,
                     values: values
                 )
                 delivered += 1

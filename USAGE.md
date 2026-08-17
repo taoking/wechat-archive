@@ -1,6 +1,6 @@
 # 使用说明
 
-WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现。第三阶段 A 在用户确认后，用小样本验证一条消息与本地媒体的关联；不解析或导出完整聊天记录。
+WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现。Phase 3C 可将用户主动选择的普通 SQLite 与原始账号媒体一次性导出为独立 Archive，并在 App 中离线查看。
 
 ## 准备环境
 
@@ -83,6 +83,17 @@ WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按
    ```
 
 媒体仅在以下证据存在时才会标记为已解析：精确相对路径、唯一的 media ID 路径匹配、在已缩小候选集合内的精确 MD5，或由导出的 hardlink 映射表用精确 MD5 唯一定位到的本地文件。扫描器还能只读识别 JPEG/PNG/GIF 的单字节 XOR 文件头；必要时只在内存中恢复其字节以确认尺寸或精确 MD5，绝不修改原文件。仅文件名匹配会保持 **unresolved**。报告仅保留结构、字段名、样本数量、原始 type 统计、媒体格式/尺寸/大小和匹配置信度；不会保留消息正文、姓名、wxid、BLOB、媒体 ID、MD5、媒体文件名或绝对路径。目录权限是 `0700`，报告文件是 `0600`。
+
+## Archive Export 与 Archive Viewer
+
+1. 完成 Phase 1 普通 SQLite 导出后，打开 **Archive Export**。
+2. 选择 Plain SQLite Export Root 和你本人原始 WeChat Account Root；两者只读打开。
+3. 选择一个**新建或空目录**作为 Archive Destination。Full Export 不会合并、覆盖或修复已有 Archive；若目录非空，导出会拒绝开始。
+4. 点击 **Analyze Export** 查看消息数据库、表和估算消息数。正式入口默认 **All**；开发验证可选择 100 或 1,000。
+5. 点击 **Full Export**。进度会显示消息分类和已复制媒体大小；Cancel 后已完成事务仍是可校验的归档，但再次完整导出请使用新的空目录。
+6. 打开 **Archive Viewer**，选择生成的 Archive 文件夹。Viewer 只读打开其中的 `archive.sqlite`，不读取微信目录、普通 SQLite 源目录或密钥。
+
+Archive 包含 `archive.sqlite`、`archive-manifest.json`、`metadata/import-report.json` 和媒体目录。文本、已恢复图片、标准 MP4 视频和未知消息可离线查看；图片原始 DAT、视频原文件和语音原始 Silk 会同时保存。没有本地文件的图片/视频/语音仍保留其消息和 `missing` 媒体记录。macOS 可直接播放归档 MP4；当前会保存并识别 Silk 语音，但尚未包含 Silk→WAV 解码器，因此这类语音会显示为已归档、待播放转换。
 
 ## 快照与临时明文数据
 

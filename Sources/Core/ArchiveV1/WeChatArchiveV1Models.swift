@@ -21,13 +21,28 @@ public enum ArchivedSQLiteValue: Equatable, Sendable {
 public enum ArchiveV1NormalizedType: String, Codable, Equatable, Sendable {
     case text
     case image
+    case video
+    case voice
     case unknown
+}
+
+public enum ArchiveV1MediaType: String, Codable, Equatable, Sendable {
+    case image
+    case video
+    case voice
 }
 
 public enum ArchiveV1MediaVariant: String, Codable, CaseIterable, Equatable, Sendable {
     case main
     case hd
     case thumbnail
+    case play
+    case raw
+    case playback
+
+    public static let imageVariants: [Self] = [.main, .hd, .thumbnail]
+    public static let videoVariants: [Self] = [.play, .raw, .thumbnail]
+    public static let voiceVariants: [Self] = [.raw, .playback]
 }
 
 public enum ArchiveV1MediaStatus: String, Codable, Equatable, Sendable {
@@ -84,10 +99,17 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
     public let messagesSkipped: Int
     public let textCount: Int
     public let imageCount: Int
+    public let videoCount: Int
+    public let voiceCount: Int
     public let unknownCount: Int
     public let conversationCount: Int
     public let rawDATArchived: Int
     public let decodedImages: Int
+    public let rawVideoArchived: Int
+    public let videoThumbnailsArchived: Int
+    public let rawVoiceArchived: Int
+    public let decodedVoiceArchived: Int
+    public let archivedMediaBytes: Int64
     public let missingLocalMedia: Int
     public let decodeFailures: Int
 
@@ -99,10 +121,17 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         messagesSkipped: Int,
         textCount: Int,
         imageCount: Int,
+        videoCount: Int,
+        voiceCount: Int,
         unknownCount: Int,
         conversationCount: Int,
         rawDATArchived: Int,
         decodedImages: Int,
+        rawVideoArchived: Int,
+        videoThumbnailsArchived: Int,
+        rawVoiceArchived: Int,
+        decodedVoiceArchived: Int,
+        archivedMediaBytes: Int64,
         missingLocalMedia: Int,
         decodeFailures: Int
     ) {
@@ -113,10 +142,17 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         self.messagesSkipped = messagesSkipped
         self.textCount = textCount
         self.imageCount = imageCount
+        self.videoCount = videoCount
+        self.voiceCount = voiceCount
         self.unknownCount = unknownCount
         self.conversationCount = conversationCount
         self.rawDATArchived = rawDATArchived
         self.decodedImages = decodedImages
+        self.rawVideoArchived = rawVideoArchived
+        self.videoThumbnailsArchived = videoThumbnailsArchived
+        self.rawVoiceArchived = rawVoiceArchived
+        self.decodedVoiceArchived = decodedVoiceArchived
+        self.archivedMediaBytes = archivedMediaBytes
         self.missingLocalMedia = missingLocalMedia
         self.decodeFailures = decodeFailures
     }

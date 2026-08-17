@@ -8,6 +8,14 @@ struct ArchiveV1Manifest: Codable {
     let messageCount: Int
     let conversationCount: Int
     let mediaAssetCount: Int
+    let textCount: Int
+    let imageCount: Int
+    let videoCount: Int
+    let voiceCount: Int
+    let unknownCount: Int
+    let imageMediaCount: Int
+    let videoMediaCount: Int
+    let voiceMediaCount: Int
 }
 
 private struct ArchiveV1ImportReport: Codable {
@@ -19,10 +27,16 @@ private struct ArchiveV1ImportReport: Codable {
     let messagesSkipped: Int
     let textCount: Int
     let imageCount: Int
+    let videoCount: Int
+    let voiceCount: Int
     let unknownCount: Int
     let imageRawFound: Int
     let imageDecoded: Int
     let imageMissing: Int
+    let videoRawFound: Int
+    let videoThumbnailsFound: Int
+    let voiceRawFound: Int
+    let voiceDecoded: Int
     let errorsByCategory: [String: Int]
 }
 
@@ -33,14 +47,26 @@ public struct ArchiveV1ImportProgress: Equatable, Sendable {
     public let imagesDecoded: Int
     public let imagesRawOnly: Int
     public let imagesMissing: Int
+    public let textCount: Int
+    public let imageCount: Int
+    public let videoCount: Int
+    public let voiceCount: Int
+    public let unknownCount: Int
+    public let mediaBytesCopied: Int64
 
-    init(messagesRead: Int, messagesImported: Int, imagesResolved: Int, imagesDecoded: Int, imagesRawOnly: Int, imagesMissing: Int) {
+    init(messagesRead: Int, messagesImported: Int, imagesResolved: Int, imagesDecoded: Int, imagesRawOnly: Int, imagesMissing: Int, textCount: Int, imageCount: Int, videoCount: Int, voiceCount: Int, unknownCount: Int, mediaBytesCopied: Int64) {
         self.messagesRead = messagesRead
         self.messagesImported = messagesImported
         self.imagesResolved = imagesResolved
         self.imagesDecoded = imagesDecoded
         self.imagesRawOnly = imagesRawOnly
         self.imagesMissing = imagesMissing
+        self.textCount = textCount
+        self.imageCount = imageCount
+        self.videoCount = videoCount
+        self.voiceCount = voiceCount
+        self.unknownCount = unknownCount
+        self.mediaBytesCopied = mediaBytesCopied
     }
 }
 
@@ -99,7 +125,13 @@ public struct WeChatArchiveV1Importer: Sendable {
                     imagesResolved: state.imageVariantsResolved,
                     imagesDecoded: state.decodedImages,
                     imagesRawOnly: state.rawOnlyImages,
-                    imagesMissing: state.missingLocalMedia
+                    imagesMissing: state.missingLocalMedia,
+                    textCount: state.textCount,
+                    imageCount: state.imageCount,
+                    videoCount: state.videoCount,
+                    voiceCount: state.voiceCount,
+                    unknownCount: state.unknownCount,
+                    mediaBytesCopied: state.archivedMediaBytes
                 ))
                 return true
             }
@@ -136,6 +168,14 @@ public struct WeChatArchiveV1Importer: Sendable {
         } else if rawTypeLow32(rawType) == 3 {
             normalizedType = .image
             textContent = nil
+        // 34 and 43 are enabled only after the bounded local validation in
+        // Phase 3C confirmed their exact resource/media chains.
+        } else if rawTypeLow32(rawType) == 43 {
+            normalizedType = .video
+            textContent = nil
+        } else if rawTypeLow32(rawType) == 34 {
+            normalizedType = .voice
+            textContent = nil
         } else {
             normalizedType = .unknown
             textContent = nil
@@ -147,7 +187,7 @@ public struct WeChatArchiveV1Importer: Sendable {
             conversationID: conversationID,
             sourceDatabase: message.sourceDatabase,
             sourceTable: message.sourceTable,
-            sourceRowIdentifier: message.sourceRowIdentifier,
+            sourceSQLiteRowID: message.sourceSQLiteRowID,
             sourceLocalID: message.values.integer(named: ["local_id", "message_id", "msg_id"]),
             sourceServerID: message.values.integer(named: ["server_id", "svr_id", "msg_svr_id"]),
             timestamp: timestamp,
@@ -169,39 +209,60 @@ public struct WeChatArchiveV1Importer: Sendable {
         switch normalizedType {
         case .text: state.textCount += 1
         case .image: state.imageCount += 1
+        case .video: state.videoCount += 1
+        case .voice: state.voiceCount += 1
         case .unknown: state.unknownCount += 1
         }
 
-        guard normalizedType == .image else { return }
-        let imageAdapter = WeChatImageMessageAdapter(keyProvider: imageKeyProvider)
-        let variants: [ArchiveV1ImageVariantInput]
-        do {
-            variants = try imageAdapter.variants(message: message, exportRoot: plainSQLiteRoot, accountRoot: accountRoot)
-        } catch {
-            // The message and source row are already committed. Preserve an
-            // explicit three-variant missing record instead of losing it.
-            variants = ArchiveV1MediaVariant.allCases.map {
-                .init(variant: $0, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)
+        let inputs: [ArchiveV1MediaInput]
+        switch normalizedType {
+        case .image:
+            do {
+                inputs = try WeChatImageMessageAdapter(keyProvider: imageKeyProvider).variants(message: message, exportRoot: plainSQLiteRoot, accountRoot: accountRoot)
+            } catch {
+                inputs = ArchiveV1MediaVariant.imageVariants.map { .init(variant: $0, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil) }
             }
+        case .video:
+            do {
+                inputs = try WeChatVideoMessageAdapter().variants(message: message, exportRoot: plainSQLiteRoot, accountRoot: accountRoot)
+            } catch {
+                inputs = ArchiveV1MediaVariant.videoVariants.map { .init(mediaType: .video, variant: $0, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil) }
+            }
+        case .voice:
+            do {
+                inputs = try WeChatVoiceMessageAdapter().variants(message: message, exportRoot: plainSQLiteRoot)
+            } catch {
+                inputs = [.init(mediaType: .voice, variant: .raw, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)]
+            }
+        case .text, .unknown:
+            inputs = []
         }
-        for input in variants {
-            try archiveVariant(input, messageID: inserted.id, mediaStore: mediaStore, database: database, state: &state)
+        for input in inputs {
+            try archiveMedia(input, messageID: inserted.id, mediaStore: mediaStore, database: database, state: &state)
         }
     }
 
-    private func archiveVariant(
-        _ input: ArchiveV1ImageVariantInput,
+    private func archiveMedia(
+        _ input: ArchiveV1MediaInput,
         messageID: String,
         mediaStore: WeChatArchiveV1MediaStore,
         database: WeChatArchiveV1Database,
         state: inout ImportState
     ) throws {
         let assetID = UUID().uuidString.lowercased()
-        let raw = try input.rawData.map { try mediaStore.storeRawDAT($0, assetID: assetID) }
-        let decoded = try input.decodedData.map { try mediaStore.storeDecoded($0, assetID: assetID, format: input.decodedFormat) }
+        let raw: ArchiveV1StoredMedia?
+        if let data = input.rawData {
+            raw = try mediaStore.storeRawData(data, mediaType: input.mediaType, variant: input.variant, sourceFormat: input.sourceFormat, assetID: assetID)
+        } else if let fileURL = input.rawFileURL {
+            raw = try mediaStore.storeRawFile(fileURL, mediaType: input.mediaType, variant: input.variant, sourceFormat: input.sourceFormat, assetID: assetID)
+        } else {
+            raw = nil
+        }
+        let decoded = try input.decodedData.map { try mediaStore.storeDecodedData($0, mediaType: input.mediaType, format: input.decodedFormat, assetID: assetID) }
         _ = try database.insertMediaAsset(
             messageID: messageID,
             assetID: assetID,
+            mediaType: input.mediaType,
             variant: input.variant,
             status: input.status,
             sourceFormat: input.sourceFormat,
@@ -212,15 +273,25 @@ public struct WeChatArchiveV1Importer: Sendable {
             decodedSize: decoded?.size,
             width: input.width,
             height: input.height,
+            duration: input.duration,
             rawSHA256: raw?.sha256,
             decodedSHA256: decoded?.sha256,
             sourceFileBase: input.sourceFileBase
         )
-        if raw != nil { state.rawDATArchived += 1 }
-        if input.status == .decoded { state.decodedImages += 1 }
+        state.archivedMediaBytes += (raw?.size ?? 0) + (decoded?.size ?? 0)
         if input.status == .missing { state.missingLocalMedia += 1 }
-        if raw != nil && input.status != .decoded && input.status != .missing { state.rawOnlyImages += 1; state.decodeFailures += 1 }
-        if raw != nil { state.imageVariantsResolved += 1 }
+        switch input.mediaType {
+        case .image:
+            if raw != nil { state.rawDATArchived += 1; state.imageVariantsResolved += 1 }
+            if input.status == .decoded { state.decodedImages += 1 }
+            if raw != nil && input.status != .decoded && input.status != .missing { state.rawOnlyImages += 1; state.decodeFailures += 1 }
+        case .video:
+            if raw != nil && input.variant == .thumbnail { state.videoThumbnailsArchived += 1 }
+            if raw != nil && input.variant != .thumbnail { state.rawVideoArchived += 1 }
+        case .voice:
+            if raw != nil { state.rawVoiceArchived += 1 }
+            if decoded != nil { state.decodedVoiceArchived += 1 }
+        }
     }
 
     private func makeSummary(state: ImportState, database: WeChatArchiveV1Database) throws -> ArchiveV1ImportSummary {
@@ -232,25 +303,39 @@ public struct WeChatArchiveV1Importer: Sendable {
             messagesSkipped: state.messagesSkipped,
             textCount: state.textCount,
             imageCount: state.imageCount,
+            videoCount: state.videoCount,
+            voiceCount: state.voiceCount,
             unknownCount: state.unknownCount,
             conversationCount: try database.conversationCount(),
             rawDATArchived: state.rawDATArchived,
             decodedImages: state.decodedImages,
+            rawVideoArchived: state.rawVideoArchived,
+            videoThumbnailsArchived: state.videoThumbnailsArchived,
+            rawVoiceArchived: state.rawVoiceArchived,
+            decodedVoiceArchived: state.decodedVoiceArchived,
+            archivedMediaBytes: state.archivedMediaBytes,
             missingLocalMedia: state.missingLocalMedia,
             decodeFailures: state.decodeFailures
         )
     }
 
     private func writeMetadata(destination: URL, summary: ArchiveV1ImportSummary, sourceDatabaseCount: Int, database: WeChatArchiveV1Database) throws {
-        let existing = try? readManifest(at: destination.appending(path: "archive-manifest.json"))
         let manifest = ArchiveV1Manifest(
             format: "WeChatArchive",
             version: WeChatArchiveV1Database.schemaVersion,
-            createdAt: existing?.createdAt ?? Date(),
+            createdAt: Date(),
             updatedAt: Date(),
             messageCount: try database.messageCount(),
             conversationCount: try database.conversationCount(),
-            mediaAssetCount: try database.mediaAssetCount()
+            mediaAssetCount: try database.mediaAssetCount(),
+            textCount: summary.textCount,
+            imageCount: summary.imageCount,
+            videoCount: summary.videoCount,
+            voiceCount: summary.voiceCount,
+            unknownCount: summary.unknownCount,
+            imageMediaCount: summary.rawDATArchived,
+            videoMediaCount: summary.rawVideoArchived + summary.videoThumbnailsArchived,
+            voiceMediaCount: summary.rawVoiceArchived + summary.decodedVoiceArchived
         )
         let errors = summary.decodeFailures == 0 ? [:] : ["mediaDecode": summary.decodeFailures]
         let report = ArchiveV1ImportReport(
@@ -262,10 +347,16 @@ public struct WeChatArchiveV1Importer: Sendable {
             messagesSkipped: summary.messagesSkipped,
             textCount: summary.textCount,
             imageCount: summary.imageCount,
+            videoCount: summary.videoCount,
+            voiceCount: summary.voiceCount,
             unknownCount: summary.unknownCount,
             imageRawFound: summary.rawDATArchived,
             imageDecoded: summary.decodedImages,
             imageMissing: summary.missingLocalMedia,
+            videoRawFound: summary.rawVideoArchived,
+            videoThumbnailsFound: summary.videoThumbnailsArchived,
+            voiceRawFound: summary.rawVoiceArchived,
+            voiceDecoded: summary.decodedVoiceArchived,
             errorsByCategory: errors
         )
         try writePrivateJSON(manifest, to: destination.appending(path: "archive-manifest.json"))
@@ -276,7 +367,15 @@ public struct WeChatArchiveV1Importer: Sendable {
 
     private func prepareArchiveRoot(_ url: URL) throws -> URL {
         let root = url.standardizedFileURL
-        try createProtectedDirectory(root)
+        let manager = FileManager.default
+        if manager.fileExists(atPath: root.path()) {
+            let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+            guard try manager.contentsOfDirectory(atPath: root.path()).isEmpty else { throw ArchiveError.invalidArchive }
+        } else {
+            try manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path())
         return root.resolvingSymlinksInPath().standardizedFileURL
     }
 }
@@ -289,9 +388,16 @@ private struct ImportState {
     var messagesSkipped = 0
     var textCount = 0
     var imageCount = 0
+    var videoCount = 0
+    var voiceCount = 0
     var unknownCount = 0
     var rawDATArchived = 0
     var decodedImages = 0
+    var rawVideoArchived = 0
+    var videoThumbnailsArchived = 0
+    var rawVoiceArchived = 0
+    var decodedVoiceArchived = 0
+    var archivedMediaBytes: Int64 = 0
     var missingLocalMedia = 0
     var decodeFailures = 0
     var imageVariantsResolved = 0

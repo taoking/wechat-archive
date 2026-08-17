@@ -497,23 +497,32 @@ public struct WeChatImageMessageResolution: Equatable, Sendable {
     public let diagnostics: [WeChatImageResolutionDiagnostic]
 }
 
-/// Resolves one already-selected Type 3 message through `message_resource.db`
-/// and bounded deterministic attachment paths. No broad attachment scan is
-/// performed here.
-public struct WeChatImageMessageResolver: Sendable {
-    public init() {}
+/// Reusable, local-only evidence from the message resource index. It holds
+/// identifiers only in memory and is intentionally not Codable.
+struct WeChatMessageResourceFileBaseResolution: Sendable {
+    let conversation: WeChatConversationTableIdentity?
+    let createTime: Int64?
+    let resourceDatabaseFound: Bool
+    let resourceMatch: WeChatImageResourceMatch
+    let resourceDetailsFound: Bool
+    let fileBase: MessageResourceFileBase?
+    let diagnostics: [WeChatImageResolutionDiagnostic]
+}
 
-    public func resolve(
+/// Resolves the generic Msg row → message_resource.db → file-base portion of
+/// the media chain. Image and video locators intentionally share this exact
+/// resource evidence rather than treating a 32-hex payload candidate as a
+/// standalone filename.
+struct WeChatMessageResourceFileBaseResolver: Sendable {
+    func resolve(
         message: SourceMessageRecord,
         candidate: MessageTableCandidate,
-        exportRoot: URL,
-        accountRoot: URL,
-        calendar: Calendar = .current
-    ) throws -> WeChatImageMessageResolution {
+        exportRoot: URL
+    ) throws -> WeChatMessageResourceFileBaseResolution {
         guard let conversation = WeChatConversationTableIdentity(tableName: candidate.tableName) else {
             return unresolved(.conversationTableUnsupported)
         }
-        guard let messageFields = ImageMessageFields(record: message, candidate: candidate) else {
+        guard let messageFields = MessageResourceMessageFields(record: message, candidate: candidate) else {
             return unresolved(.messageResourceNotFound)
         }
         guard let resourceURL = try resourceDatabaseURL(below: exportRoot) else {
@@ -540,36 +549,24 @@ public struct WeChatImageMessageResolver: Sendable {
             var diagnostics: [WeChatImageResolutionDiagnostic] = []
             if resource.packedInfo == nil && messageFields.packedInfo == nil { diagnostics.append(.packedInfoMissing) }
             diagnostics.append(.fileBaseNotFound)
-            return WeChatImageMessageResolution(
+            return .init(
+                conversation: conversation,
+                createTime: messageFields.createTime,
                 resourceDatabaseFound: true,
                 resourceMatch: resource.match,
                 resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
                 fileBase: nil,
-                assets: WeChatImageAssetSet(),
-                datVersion: .unknown,
                 diagnostics: diagnostics
             )
         }
-        let assets = try WeChatImageAttachmentLocator(calendar: calendar).locate(
-            accountRoot: accountRoot,
-            chatDirectoryComponent: conversation.chatDirectoryComponent,
-            fileBase: fileBase.value,
-            createTime: messageFields.createTime
-        )
-        var diagnostics = [WeChatImageResolutionDiagnostic]()
-        if !assets.chatDirectoryFound { diagnostics.append(.chatDirectoryMissing) }
-        if assets.chatDirectoryFound && !assets.monthDirectoryFound { diagnostics.append(.monthDirectoryMissing) }
-        if assets.mainURL == nil && assets.hdURL == nil && assets.thumbnailURL == nil { diagnostics.append(.datFileMissing) }
-        let version = try assets.preferredURL.map { try datVersion(at: $0) } ?? .unknown
-        if assets.preferredURL != nil && version == .unknown { diagnostics.append(.datFormatUnknown) }
-        return WeChatImageMessageResolution(
+        return .init(
+            conversation: conversation,
+            createTime: messageFields.createTime,
             resourceDatabaseFound: true,
             resourceMatch: resource.match,
             resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
             fileBase: fileBase,
-            assets: assets,
-            datVersion: version,
-            diagnostics: diagnostics
+            diagnostics: []
         )
     }
 
@@ -593,20 +590,14 @@ public struct WeChatImageMessageResolver: Sendable {
         }
     }
 
-    private func datVersion(at url: URL) throws -> WeChatImageDATVersion {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        return WeChatImageDatDecoder().version(for: try handle.read(upToCount: 64) ?? Data())
-    }
-
-    private func unresolved(_ diagnostic: WeChatImageResolutionDiagnostic) -> WeChatImageMessageResolution {
-        WeChatImageMessageResolution(
+    private func unresolved(_ diagnostic: WeChatImageResolutionDiagnostic) -> WeChatMessageResourceFileBaseResolution {
+        .init(
+            conversation: nil,
+            createTime: nil,
             resourceDatabaseFound: diagnostic != .resourceDatabaseMissing,
             resourceMatch: .notFound,
             resourceDetailsFound: false,
             fileBase: nil,
-            assets: WeChatImageAssetSet(),
-            datVersion: .unknown,
             diagnostics: [diagnostic]
         )
     }
@@ -649,11 +640,67 @@ public struct WeChatImageMessageResolver: Sendable {
     }
 }
 
+/// Resolves one already-selected Type 3 message through the shared message
+/// resource chain and bounded deterministic image attachment paths. No broad
+/// attachment scan is performed here.
+public struct WeChatImageMessageResolver: Sendable {
+    public init() {}
+
+    public func resolve(
+        message: SourceMessageRecord,
+        candidate: MessageTableCandidate,
+        exportRoot: URL,
+        accountRoot: URL,
+        calendar: Calendar = .current
+    ) throws -> WeChatImageMessageResolution {
+        let resource = try WeChatMessageResourceFileBaseResolver().resolve(message: message, candidate: candidate, exportRoot: exportRoot)
+        guard let conversation = resource.conversation, let createTime = resource.createTime, let fileBase = resource.fileBase else {
+            return .init(
+                resourceDatabaseFound: resource.resourceDatabaseFound,
+                resourceMatch: resource.resourceMatch,
+                resourceDetailsFound: resource.resourceDetailsFound,
+                fileBase: resource.fileBase,
+                assets: WeChatImageAssetSet(),
+                datVersion: .unknown,
+                diagnostics: resource.diagnostics
+            )
+        }
+        let assets = try WeChatImageAttachmentLocator(calendar: calendar).locate(
+            accountRoot: accountRoot,
+            chatDirectoryComponent: conversation.chatDirectoryComponent,
+            fileBase: fileBase.value,
+            createTime: createTime
+        )
+        var diagnostics = resource.diagnostics
+        if !assets.chatDirectoryFound { diagnostics.append(.chatDirectoryMissing) }
+        if assets.chatDirectoryFound && !assets.monthDirectoryFound { diagnostics.append(.monthDirectoryMissing) }
+        if assets.mainURL == nil && assets.hdURL == nil && assets.thumbnailURL == nil { diagnostics.append(.datFileMissing) }
+        let version = try assets.preferredURL.map { try datVersion(at: $0) } ?? .unknown
+        if assets.preferredURL != nil && version == .unknown { diagnostics.append(.datFormatUnknown) }
+        return WeChatImageMessageResolution(
+            resourceDatabaseFound: resource.resourceDatabaseFound,
+            resourceMatch: resource.resourceMatch,
+            resourceDetailsFound: resource.resourceDetailsFound,
+            fileBase: fileBase,
+            assets: assets,
+            datVersion: version,
+            diagnostics: diagnostics
+        )
+    }
+
+    private func datVersion(at url: URL) throws -> WeChatImageDATVersion {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        return WeChatImageDatDecoder().version(for: try handle.read(upToCount: 64) ?? Data())
+    }
+
+}
+
 extension WeChatImageAssetSet {
     var preferredURL: URL? { thumbnailURL ?? mainURL ?? hdURL }
 }
 
-private struct ImageMessageFields: Sendable {
+private struct MessageResourceMessageFields: Sendable {
     let localID: Int64
     let serverID: Int64?
     let localType: Int64

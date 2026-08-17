@@ -21,7 +21,8 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case databaseExport = "Database Export"
     case schemaDiscovery = "Schema Discovery"
     case messageDiscovery = "Message Discovery"
-    case archiveImport = "Archive Import"
+    case archiveImport = "Archive Export"
+    case archiveViewer = "Archive Viewer"
     case settings = "Settings"
 
     var id: String { rawValue }
@@ -32,6 +33,7 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
         case .schemaDiscovery: "magnifyingglass.circle"
         case .messageDiscovery: "text.magnifyingglass"
         case .archiveImport: "square.and.arrow.down.on.square"
+        case .archiveViewer: "rectangle.split.3x1"
         case .settings: "gearshape"
         }
     }
@@ -53,6 +55,7 @@ private struct ArchiveShellView: View {
             case .schemaDiscovery: SchemaDiscoveryView()
             case .messageDiscovery: MessageDiscoveryView()
             case .archiveImport: ArchiveImportView()
+            case .archiveViewer: ArchiveViewerView()
             case .settings: SettingsView()
             }
         }
@@ -65,18 +68,18 @@ private struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("WeChat Archive").font(.largeTitle.bold())
-                Text("本机导出普通 SQLite，发现数据库结构，并可导入可重复验证的私有 Archive v1。")
+                Text("本机导出普通 SQLite，发现数据库结构，并可一次性完整导出可离线查看的私有 Archive。")
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                    StatisticCard(value: "3B", label: "Current phase", symbol: "square.and.arrow.down.on.square")
+                    StatisticCard(value: "3C", label: "Current phase", symbol: "square.and.arrow.down.on.square")
                     StatisticCard(value: "Local", label: "Processing", symbol: "macbook")
                     StatisticCard(value: "0", label: "Network uploads", symbol: "network.slash")
-                    StatisticCard(value: "Lossless", label: "Archive imports", symbol: "archivebox")
+                    StatisticCard(value: "Lossless", label: "Archive exports", symbol: "archivebox")
                 }
                 GroupBox("Current Scope") {
                     HStack {
                         Image(systemName: "checkmark.shield").foregroundStyle(.green)
-                        Text("Archive Import 会逐行保存全部 SQLite source values，支持文本、图片与未知消息；原始 DAT 和可恢复图片会作为独立媒体资产保存。")
+                        Text("Archive Export 会逐行保存全部 SQLite source values，支持文本、图片、视频、语音与未知消息；Archive Viewer 可在不依赖微信源数据的情况下离线查看。")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)

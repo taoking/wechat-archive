@@ -14,7 +14,7 @@ final class ArchiveCoreTests: XCTestCase {
 
         let database = try WeChatArchiveV1Database(url: archiveURL)
 
-        try expectEqual(try database.schemaVersion(), 1)
+        try expectEqual(try database.schemaVersion(), 2)
         try expectEqual(try database.requiredTables(), Set([
             "import_runs", "conversations", "messages", "message_source_values", "media_assets", "message_media_links"
         ]))
@@ -42,7 +42,185 @@ final class ArchiveCoreTests: XCTestCase {
         try expectFalse(FileManager.default.fileExists(atPath: outsideRoot.appending(path: "images").path()))
     }
 
-    func testArchiveV1ImporterPreservesRowsArchivesImagesAndIsIdempotent() throws {
+    func testArchiveV1ImporterUsesSQLiteRowIDWhenLocalIDsRepeat() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let accountRoot = directory.appending(path: "Account")
+        let tableName = "Msg_0123456789abcdef0123456789abcdef"
+        let messageDatabase = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: messageDatabase.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: messageDatabase, sql: """
+            CREATE TABLE \(tableName) (local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT);
+            INSERT INTO \(tableName) VALUES (10, 1, 100, 'synthetic first');
+            INSERT INTO \(tableName) VALUES (10, 1, 101, 'synthetic second');
+            """)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: []))
+
+        let summary = try importer.importArchive(
+            plainSQLiteRoot: exportRoot,
+            accountRoot: accountRoot,
+            destinationRoot: destination,
+            options: .all
+        )
+        let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
+
+        try expectEqual(summary.messagesImported, 2)
+        try expectEqual(try database.messageCount(), 2)
+    }
+
+    func testVideoAndVoiceAdaptersUseValidatedBoundedMappings() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        var video: ArchiveV1SourceMessage?
+        var voice: ArchiveV1SourceMessage?
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: fixture.exportRoot, limit: nil) { row in
+            switch row.values["local_type"] {
+            case .integer(43): video = row
+            case .integer(34): voice = row
+            default: break
+            }
+            return true
+        }
+
+        let videoInputs = try WeChatVideoMessageAdapter().variants(
+            message: try XCTUnwrap(video), exportRoot: fixture.exportRoot, accountRoot: fixture.accountRoot
+        )
+        let voiceInputs = try WeChatVoiceMessageAdapter().variants(message: try XCTUnwrap(voice), exportRoot: fixture.exportRoot)
+
+        if case let .integer(videoType)? = video?.values["local_type"] { try expectEqual(rawTypeLow32(videoType), 43) } else { throw TestFailure(description: "Synthetic video type missing") }
+        if case let .integer(voiceType)? = voice?.values["local_type"] { try expectEqual(rawTypeLow32(voiceType), 34) } else { throw TestFailure(description: "Synthetic voice type missing") }
+        try expectTrue(videoInputs.contains { $0.variant == .play && $0.rawFileURL != nil && $0.status == .rawArchived })
+        try expectTrue(videoInputs.contains { $0.variant == .raw && $0.status == .missing })
+        try expectEqual(voiceInputs.first?.sourceFormat, "silk")
+        try expectEqual(voiceInputs.first?.rawData, Data([0x02, 0x23, 0x21, 0x53, 0x49, 0x4C, 0x4B, 0x5F, 0x56, 0x33, 0x30, 0x00, 0x00]))
+        try expectEqual(VoiceFormatDetector().detect(voiceInputs.first?.rawData ?? Data()), .silk)
+    }
+
+    func testArchiveViewerRejectsSymlinkedMediaEvenWhenPathStaysWithinArchive() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archiveRoot = directory.appending(path: "WeChatArchive")
+        let database = try WeChatArchiveV1Database(url: archiveRoot.appending(path: "archive.sqlite"))
+        let conversation = try database.upsertConversation(sourceIdentity: "Msg_0123456789abcdef0123456789abcdef")
+        let message = try database.insertMessage(
+            conversationID: conversation, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceSQLiteRowID: 1, sourceLocalID: 1, sourceServerID: nil, timestamp: 1, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 43, normalizedType: .video, textContent: nil, replySourceID: nil, sourceSequence: 1, sourceValues: [:]
+        )
+        _ = try database.insertMediaAsset(
+            messageID: message.id, mediaType: .video, variant: .play, status: .rawArchived, sourceFormat: "mp4", decodedFormat: nil, rawArchivePath: "media/video/play/item.mp4", decodedArchivePath: nil, rawSize: 1, decodedSize: nil, width: nil, height: nil, rawSHA256: nil, decodedSHA256: nil, sourceFileBase: nil
+        )
+        database.close()
+        let outside = directory.appending(path: "outside.mp4")
+        try Data([0x00]).write(to: outside)
+        let mediaDirectory = archiveRoot.appending(path: "media/video/play")
+        try FileManager.default.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: mediaDirectory.appending(path: "item.mp4"), withDestinationURL: outside)
+
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: archiveRoot)
+        let timeline = try viewer.messages(conversationID: conversation)
+        let media = try XCTUnwrap(timeline.first?.media.first)
+
+        try expectEqual(viewer.mediaURL(for: media, preferDecoded: false), nil)
+    }
+
+    func testVideoLocatorChecksCurrentMonthBeforeAdjacentFallback() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountRoot = directory.appending(path: "Account")
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let timestamp: Int64 = 1_738_368_000
+        let calendar = Calendar.current
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM"
+        let current = formatter.string(from: date)
+        let previous = formatter.string(from: try XCTUnwrap(calendar.date(byAdding: .month, value: -1, to: date)))
+        let currentDirectory = accountRoot.appending(path: "msg/video/\(current)")
+        let previousDirectory = accountRoot.appending(path: "msg/video/\(previous)")
+        try FileManager.default.createDirectory(at: currentDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: previousDirectory, withIntermediateDirectories: true)
+        let currentFile = currentDirectory.appending(path: "\(fileBase).mp4")
+        try Data([0x00]).write(to: currentFile)
+        try Data([0x01]).write(to: previousDirectory.appending(path: "\(fileBase).mp4"))
+
+        let assets = try WeChatVideoAttachmentLocator().locate(accountRoot: accountRoot, fileBase: fileBase, createTime: timestamp)
+
+        try expectEqual(assets.playURL, currentFile)
+    }
+
+    func testVideoLocatorUsesPreviousMonthAsBoundedFallback() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountRoot = directory.appending(path: "Account")
+        let fileBase = "0123456789abcdef0123456789abcdef"
+        let timestamp: Int64 = 1_738_368_000
+        let calendar = Calendar.current
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM"
+        let previous = formatter.string(from: try XCTUnwrap(calendar.date(byAdding: .month, value: -1, to: date)))
+        let previousDirectory = accountRoot.appending(path: "msg/video/\(previous)")
+        try FileManager.default.createDirectory(at: previousDirectory, withIntermediateDirectories: true)
+        let previousFile = previousDirectory.appending(path: "\(fileBase).mp4")
+        try Data([0x01]).write(to: previousFile)
+
+        let assets = try WeChatVideoAttachmentLocator().locate(accountRoot: accountRoot, fileBase: fileBase, createTime: timestamp)
+
+        try expectEqual(assets.playURL, previousFile)
+    }
+
+    func testVideoAndVoiceMissingMediaPreserveMessageImports() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let videoDirectory = fixture.accountRoot.appending(path: "msg/video/2025-02")
+        try FileManager.default.removeItem(at: videoDirectory)
+        try FileManager.default.removeItem(at: fixture.exportRoot.appending(path: "message/media_0.db"))
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)]))
+
+        let summary = try importer.importArchive(plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot, destinationRoot: destination, options: .all)
+        let reconstructed = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite")).reconstruction()
+
+        try expectEqual(summary.messagesImported, 5)
+        try expectTrue(reconstructed.contains { $0.normalizedType == .video && $0.mediaStatuses.allSatisfy { $0 == .missing } })
+        try expectTrue(reconstructed.contains { $0.normalizedType == .voice && $0.mediaStatuses == [.missing] })
+    }
+
+    func testArchiveViewerReadsPagedTimelineWithoutWeChatSources() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)]))
+        _ = try importer.importArchive(plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot, destinationRoot: destination, options: .all)
+        try FileManager.default.removeItem(at: fixture.exportRoot)
+        try FileManager.default.removeItem(at: fixture.accountRoot)
+
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: destination)
+        let conversations = try viewer.listConversations()
+        let timeline = try viewer.messages(conversationID: try XCTUnwrap(conversations.first?.id), limit: 100)
+        let image = try XCTUnwrap(timeline.first { $0.normalizedType == .image }?.media.first { $0.decodedRelativePath != nil })
+        let video = try XCTUnwrap(timeline.first { $0.normalizedType == .video }?.media.first { $0.variant == .play })
+        let voice = try XCTUnwrap(timeline.first { $0.normalizedType == .voice }?.media.first)
+
+        try expectEqual(conversations.count, 1)
+        try expectEqual(timeline.map(\.normalizedType), [.text, .image, .voice, .video, .unknown])
+        try expectTrue(viewer.mediaURL(for: image, preferDecoded: true) != nil)
+        try expectTrue(viewer.mediaURL(for: video, preferDecoded: false) != nil)
+        try expectTrue(viewer.mediaURL(for: voice, preferDecoded: false) != nil)
+    }
+
+    func testArchiveV1ImporterPreservesRowsAndArchivesSupportedMediaInNewDestination() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let fixture = try makeArchiveV1SourceFixture(in: directory)
@@ -65,42 +243,38 @@ final class ArchiveCoreTests: XCTestCase {
         let sourceRow = try XCTUnwrap(importedSourceRow)
         try expectEqual(sourceRow.sourceDatabase, "message/message_0.db")
         try expectEqual(sourceRow.sourceTable, fixture.tableName)
-        try expectEqual(sourceRow.sourceRowIdentifier, "1")
+        try expectEqual(sourceRow.sourceSQLiteRowID, 1)
         let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
         let sourceValues = try database.sourceValues(
             sourceDatabase: sourceRow.sourceDatabase,
             sourceTable: sourceRow.sourceTable,
-            rowIdentifier: sourceRow.sourceRowIdentifier
+            sourceSQLiteRowID: sourceRow.sourceSQLiteRowID
         )
         let reconstruction = try database.reconstruction()
         let validation = try WeChatArchiveV1Validator().validate(at: destination)
-        let second = try importer.importArchive(
-            plainSQLiteRoot: fixture.exportRoot,
-            accountRoot: fixture.accountRoot,
-            destinationRoot: destination,
-            options: .init(limit: 100)
-        )
 
-        try expectEqual(first.messagesImported, 3)
+        try expectEqual(first.messagesImported, 5)
         try expectEqual(first.textCount, 1)
         try expectEqual(first.imageCount, 1)
+        try expectEqual(first.videoCount, 1)
+        try expectEqual(first.voiceCount, 1)
         try expectEqual(first.unknownCount, 1)
         try expectEqual(first.rawDATArchived, 1)
         try expectEqual(first.decodedImages, 1)
-        try expectEqual(first.missingLocalMedia, 2)
+        try expectEqual(first.rawVideoArchived, 1)
+        try expectEqual(first.videoThumbnailsArchived, 1)
+        try expectEqual(first.rawVoiceArchived, 1)
         try expectEqual(sourceValues.count, 13)
         try expectEqual(sourceValues["null_value"], .null)
         try expectEqual(sourceValues["integer_value"], .integer(42))
         try expectEqual(sourceValues["real_value"], .real(3.5))
         try expectEqual(sourceValues["message_content"], .text("synthetic text"))
         try expectEqual(sourceValues["compress_content"], .blob(fixture.textBlob))
-        try expectEqual(reconstruction.map(\.normalizedType), [.text, .image, .unknown])
+        try expectEqual(reconstruction.map(\.normalizedType), [.text, .image, .voice, .video, .unknown])
         try expectEqual(reconstruction.first?.textContent, "synthetic text")
         try expectTrue(validation.passed)
-        try expectEqual(second.messagesImported, 0)
-        try expectEqual(second.messagesSkipped, 3)
-        try expectEqual(try database.messageCount(), 3)
-        try expectEqual(try database.mediaAssetCount(), 3)
+        try expectEqual(try database.messageCount(), 5)
+        try expectEqual(try database.mediaAssetCount(), 7)
     }
 
     func testArchiveV1SourceReaderPreservesAllSQLiteValueKinds() throws {
@@ -122,7 +296,7 @@ final class ArchiveCoreTests: XCTestCase {
         try expectEqual(values["compress_content"], .blob(fixture.textBlob))
     }
 
-    func testArchiveV1ImporterSupportsIncrementalImportWithoutDuplicates() throws {
+    func testArchiveV1ImporterRejectsNonEmptyDestinationForOneTimeExport() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let fixture = try makeArchiveV1SourceFixture(in: directory)
@@ -137,18 +311,16 @@ final class ArchiveCoreTests: XCTestCase {
             destinationRoot: destination,
             options: .init(limit: 1)
         )
-        let incremental = try importer.importArchive(
-            plainSQLiteRoot: fixture.exportRoot,
-            accountRoot: fixture.accountRoot,
-            destinationRoot: destination,
-            options: .all
-        )
-        let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
+        try expectThrows(ArchiveError.invalidArchive) {
+            _ = try importer.importArchive(
+                plainSQLiteRoot: fixture.exportRoot,
+                accountRoot: fixture.accountRoot,
+                destinationRoot: destination,
+                options: .all
+            )
+        }
 
         try expectEqual(initial.messagesImported, 1)
-        try expectEqual(incremental.messagesImported, 2)
-        try expectEqual(incremental.messagesSkipped, 1)
-        try expectEqual(try database.messageCount(), 3)
     }
 
     func testArchiveV1ImporterCancellationLeavesValidCommittedMessages() throws {
@@ -197,7 +369,7 @@ final class ArchiveCoreTests: XCTestCase {
         )
         let reconstruction = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite")).reconstruction()
 
-        try expectEqual(summary.messagesImported, 3)
+        try expectEqual(summary.messagesImported, 5)
         try expectEqual(summary.rawDATArchived, 1)
         try expectEqual(summary.decodedImages, 0)
         try expectEqual(summary.decodeFailures, 1)
@@ -210,16 +382,16 @@ final class ArchiveCoreTests: XCTestCase {
         let database = try WeChatArchiveV1Database(url: directory.appending(path: "WeChatArchive/archive.sqlite"))
         let conversationID = try database.upsertConversation(sourceIdentity: "Msg_0123456789abcdef0123456789abcdef")
         let textA = try database.insertMessage(
-            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "1", sourceLocalID: 1, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "A", replySourceID: nil, sourceSequence: 1, sourceValues: [:]
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceSQLiteRowID: 1, sourceLocalID: 1, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "A", replySourceID: nil, sourceSequence: 1, sourceValues: [:]
         )
         let imageB = try database.insertMessage(
-            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "2", sourceLocalID: 2, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 3, normalizedType: .image, textContent: nil, replySourceID: nil, sourceSequence: 2, sourceValues: [:]
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceSQLiteRowID: 2, sourceLocalID: 2, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 3, normalizedType: .image, textContent: nil, replySourceID: nil, sourceSequence: 2, sourceValues: [:]
         )
         _ = try database.insertMediaAsset(
             messageID: imageB.id, variant: .thumbnail, status: .missing, sourceFormat: nil, decodedFormat: nil, rawArchivePath: nil, decodedArchivePath: nil, rawSize: nil, decodedSize: nil, width: nil, height: nil, rawSHA256: nil, decodedSHA256: nil, sourceFileBase: nil
         )
         _ = try database.insertMessage(
-            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceRowIdentifier: "3", sourceLocalID: 3, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "C", replySourceID: nil, sourceSequence: 3, sourceValues: [:]
+            conversationID: conversationID, sourceDatabase: "message/message_0.db", sourceTable: "Msg_0123456789abcdef0123456789abcdef", sourceSQLiteRowID: 3, sourceLocalID: 3, sourceServerID: nil, timestamp: 100, senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "C", replySourceID: nil, sourceSequence: 3, sourceValues: [:]
         )
         _ = textA
 
@@ -2086,12 +2258,15 @@ final class ArchiveCoreTests: XCTestCase {
             INSERT INTO \(tableName) VALUES (1, 101, 1, 'sender-a', 'receiver-a', \(timestamp), 'conversation-a', 'synthetic text', X'\(textBlobHex)', X'00', 42, 3.5, NULL);
             INSERT INTO \(tableName) VALUES (2, 102, 3, 'sender-b', 'receiver-b', \(timestamp + 1), 'conversation-a', NULL, X'ABCD', X'\(packedHex)', 43, 4.5, NULL);
             INSERT INTO \(tableName) VALUES (3, 103, 34, 'sender-c', 'receiver-c', \(timestamp + 2), 'conversation-a', NULL, X'01020304', X'00', 44, 5.5, NULL);
+            INSERT INTO \(tableName) VALUES (4, 104, 43, 'sender-d', 'receiver-d', \(timestamp + 3), 'conversation-a', NULL, X'01020304', X'\(packedHex)', 45, 6.5, NULL);
+            INSERT INTO \(tableName) VALUES (5, 105, 49, 'sender-e', 'receiver-e', \(timestamp + 4), 'conversation-a', NULL, X'01020304', X'00', 46, 7.5, NULL);
             """)
         try createPlainSQLiteDatabase(at: resourceDatabase, sql: """
             CREATE TABLE ChatName2Id (user_name TEXT, update_time INTEGER);
             INSERT INTO ChatName2Id VALUES ('\(conversationName)', 0);
             CREATE TABLE MessageResourceInfo (message_id INTEGER, chat_id INTEGER, sender_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, message_origin_source INTEGER, packed_info BLOB);
             INSERT INTO MessageResourceInfo VALUES (99, 1, 0, 3, \(timestamp + 1), 2, 102, 0, X'\(packedHex)');
+            INSERT INTO MessageResourceInfo VALUES (100, 1, 0, 43, \(timestamp + 3), 4, 104, 0, X'\(packedHex)');
             CREATE TABLE MessageResourceDetail (resource_id INTEGER, message_id INTEGER, type INTEGER, size INTEGER, create_time INTEGER, access_time INTEGER, status INTEGER, data_index TEXT, packed_info BLOB);
             INSERT INTO MessageResourceDetail VALUES (1, 99, 1, 1, \(timestamp), \(timestamp), 0, 'fixture', X'00');
             """)
@@ -2101,6 +2276,15 @@ final class ArchiveCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
         let thumbnailDATURL = imageDirectory.appending(path: "\(fileBase)_t.dat")
         try dat.write(to: thumbnailDATURL)
+        let videoDirectory = accountRoot.appending(path: "msg/video/2025-02")
+        try FileManager.default.createDirectory(at: videoDirectory, withIntermediateDirectories: true)
+        try Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D]).write(to: videoDirectory.appending(path: "\(fileBase).mp4"))
+        try syntheticPNGData().write(to: videoDirectory.appending(path: "\(fileBase)_thumb.jpg"))
+        let voiceDatabase = exportRoot.appending(path: "message/media_0.db")
+        try createPlainSQLiteDatabase(at: voiceDatabase, sql: """
+            CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT);
+            INSERT INTO VoiceInfo VALUES (1, \(timestamp + 2), 3, 103, X'02232153494C4B5F5633300000', '0');
+            """)
         return ArchiveV1Fixture(
             exportRoot: exportRoot,
             accountRoot: accountRoot,

@@ -50,7 +50,24 @@ V2 DAT 仅根据本机已有 kvcomm 元数据派生少量候选密钥，并必�
 `.local-analysis/` 中，权限同样为目录 `0700`、文件 `0600`。详细设计与边界见
 [ADR-009](docs/decisions/ADR-009-bounded-image-attachment-resolution.md)。
 
-## Not in the current discovery scope
+## Phase 3C: One-time Archive Export and Viewer
+
+**Archive Export** streams every `Msg_*` row into a private relational archive.
+It preserves all SQLite value types and uses the source database, table and
+SQLite `rowid` as physical identity, so duplicate `local_id` values cannot
+discard a row. It supports text, recovered image variants, boundedly located
+MP4 video variants, raw Silk voice bytes and unknown messages. The destination
+must be new or empty; this version intentionally does not merge or incrementally
+repair existing archives.
+
+**Archive Viewer** opens only the resulting Archive folder in read-only mode.
+It pages conversations and message timelines, displays decoded images, plays
+archived MP4, and never falls back to a WeChat account root or plaintext source
+database. Raw Silk is retained and detected but awaits a license-reviewed
+Silk-to-WAV decoder before playback. See [USAGE.md](USAGE.md) and
+[ADR-011](docs/decisions/ADR-011-one-time-archive-export-and-read-only-viewer.md).
+
+## Not in the current scope
 
 当前仍不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Phase 3A 的受限验证只是下一阶段 Adapter 开发的证据，不是完整内容解析或归档结果。
 

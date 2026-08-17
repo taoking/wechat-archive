@@ -14,21 +14,27 @@ struct ArchiveImportView: View {
     @State private var summary: ArchiveV1ImportSummary?
     @State private var progress: ArchiveV1ImportProgress?
     @State private var isWorking = false
-    @State private var limit: ArchiveImportLimit = .oneHundred
+    @State private var limit: ArchiveImportLimit = .all
     @State private var cancellation: ArchiveImportCancellation?
-    @State private var status = "Select the Phase 1 plain SQLite export, the original WeChat account root, and an empty or existing private archive folder."
+    @State private var status = "Select the plain SQLite export, original WeChat account root, and a new or empty archive destination."
 
     private var canAnalyze: Bool {
         plainSQLiteRoot != nil && accountRoot != nil && archiveRoot != nil && !isWorking
     }
 
     private var canImport: Bool {
-        canAnalyze && analysis != nil
+        canAnalyze && analysis != nil && archiveDestinationIsEmpty
+    }
+
+    private var archiveDestinationIsEmpty: Bool {
+        guard let archiveRoot else { return false }
+        guard FileManager.default.fileExists(atPath: archiveRoot.path()) else { return true }
+        return (try? FileManager.default.contentsOfDirectory(atPath: archiveRoot.path()).isEmpty) == true
     }
 
     var body: some View {
         Form {
-            Section("Archive Import") {
+            Section("Archive Export") {
                 directoryInput(
                     title: "Plain SQLite Export Root",
                     value: plainSQLiteRoot,
@@ -50,12 +56,12 @@ struct ArchiveImportView: View {
                     choose: chooseArchiveRoot,
                     usePath: useArchiveRoot
                 )
-                Text("The importer opens plaintext SQLite and original media read-only. It does not copy keys or modify WeChat data. The archive destination is created with directory permission 0700 and private files permission 0600.")
+                Text("Full Export opens plaintext SQLite and original media read-only. It does not copy keys or modify WeChat data. The destination must be new or empty; an existing archive is never merged. Archive folders use 0700 and private files use 0600.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 HStack {
-                    Button(isWorking ? "Working…" : "Analyze Import", action: analyzeImport)
+                    Button(isWorking ? "Working…" : "Analyze Export", action: analyzeImport)
                         .disabled(!canAnalyze)
                     Picker("Import Limit", selection: $limit) {
                         ForEach(ArchiveImportLimit.allCases) { option in
@@ -64,7 +70,7 @@ struct ArchiveImportView: View {
                     }
                     .frame(maxWidth: 290)
                     .disabled(isWorking)
-                    Button("Import Archive", action: importArchive)
+                    Button("Full Export", action: importArchive)
                         .disabled(!canImport)
                     if isWorking {
                         Button("Cancel") { cancellation?.cancel() }
@@ -73,7 +79,7 @@ struct ArchiveImportView: View {
             }
 
             if let analysis {
-                Section("Import Analysis") {
+                Section("Export Analysis") {
                     HStack(spacing: 18) {
                         SummaryValue(label: "Message DBs", value: analysis.messageDatabaseCount)
                         SummaryValue(label: "Message Tables", value: analysis.messageTableCount)
@@ -86,8 +92,8 @@ struct ArchiveImportView: View {
             }
 
             if let progress, isWorking {
-                Section("Import Progress") {
-                    Text("Importing messages")
+                Section("Full Export Progress") {
+                    Text("Exporting messages")
                     HStack(spacing: 18) {
                         SummaryValue(label: "Messages", value: progress.messagesRead)
                         SummaryValue(label: "Imported", value: progress.messagesImported)
@@ -96,6 +102,16 @@ struct ArchiveImportView: View {
                         SummaryValue(label: "Raw-only", value: progress.imagesRawOnly)
                         SummaryValue(label: "Missing", value: progress.imagesMissing)
                     }
+                    HStack(spacing: 18) {
+                        SummaryValue(label: "Text", value: progress.textCount)
+                        SummaryValue(label: "Image", value: progress.imageCount)
+                        SummaryValue(label: "Video", value: progress.videoCount)
+                        SummaryValue(label: "Voice", value: progress.voiceCount)
+                        SummaryValue(label: "Unknown", value: progress.unknownCount)
+                    }
+                    Text("Media copied: \(ByteCountFormatter.string(fromByteCount: progress.mediaBytesCopied, countStyle: .file))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     Text("Database: message database · Table: message table")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -103,17 +119,21 @@ struct ArchiveImportView: View {
             }
 
             if let summary {
-                Section("Archive Import Result") {
+                Section("Full Export Result") {
                     HStack(spacing: 18) {
                         SummaryValue(label: "Messages", value: summary.messagesImported)
                         SummaryValue(label: "Text", value: summary.textCount)
                         SummaryValue(label: "Images", value: summary.imageCount)
+                        SummaryValue(label: "Video", value: summary.videoCount)
+                        SummaryValue(label: "Voice", value: summary.voiceCount)
                         SummaryValue(label: "Unknown", value: summary.unknownCount)
                         SummaryValue(label: "Conversations", value: summary.conversationCount)
                     }
                     HStack(spacing: 18) {
                         SummaryValue(label: "Raw DAT", value: summary.rawDATArchived)
                         SummaryValue(label: "Decoded", value: summary.decodedImages)
+                        SummaryValue(label: "Video Files", value: summary.rawVideoArchived)
+                        SummaryValue(label: "Raw Voice", value: summary.rawVoiceArchived)
                         SummaryValue(label: "Missing", value: summary.missingLocalMedia)
                         SummaryValue(label: "Decode Failures", value: summary.decodeFailures)
                     }
@@ -129,7 +149,7 @@ struct ArchiveImportView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Archive Import")
+        .navigationTitle("Archive Export")
     }
 
     @ViewBuilder
@@ -162,11 +182,18 @@ struct ArchiveImportView: View {
 
     private func choosePlainSQLiteRoot() { chooseDirectory("Choose the Phase 1 plaintext SQLite export") { setPlainSQLiteRoot($0) } }
     private func chooseAccountRoot() { chooseDirectory("Choose the original WeChat account root") { setAccountRoot($0) } }
-    private func chooseArchiveRoot() { chooseDirectory("Choose the private WeChatArchive destination folder") { setArchiveRoot($0) } }
+    private func chooseArchiveRoot() { chooseDirectory("Choose a new or empty WeChatArchive destination folder") { setArchiveRoot($0) } }
 
     private func usePlainSQLiteRoot() { useDirectoryPath(plainSQLitePath, setter: setPlainSQLiteRoot) }
     private func useAccountRoot() { useDirectoryPath(accountRootPath, setter: setAccountRoot) }
-    private func useArchiveRoot() { useDirectoryPath(archiveRootPath, setter: setArchiveRoot) }
+    private func useArchiveRoot() {
+        do {
+            let url = try ArchiveDestinationPath.resolve(archiveRootPath)
+            setArchiveRoot(url)
+        } catch {
+            status = "The archive destination must be an absolute path whose existing parent is a local directory."
+        }
+    }
 
     private func chooseDirectory(_ message: String, completion: (URL) -> Void) {
         let panel = NSOpenPanel()
@@ -203,13 +230,16 @@ struct ArchiveImportView: View {
         archiveRoot = url.standardizedFileURL
         archiveRootPath = archiveRoot?.path() ?? ""
         resetAnalysis()
+        if !archiveDestinationIsEmpty {
+            status = "Archive already exists or destination is not empty. Choose a new empty folder for Full Export."
+        }
     }
 
     private func resetAnalysis() {
         analysis = nil
         summary = nil
         progress = nil
-        status = "Paths selected. Click Analyze Import before importing."
+        status = "Paths selected. Click Analyze Export before full export."
     }
 
     private func analyzeImport() {
@@ -224,10 +254,10 @@ struct ArchiveImportView: View {
             switch result {
             case let .success(value):
                 analysis = value
-                status = "Import analysis complete. Choose an import limit, then import."
+                status = "Export analysis complete. Choose a limit, then start Full Export."
             case .failure:
                 analysis = nil
-                status = "Import analysis could not complete. Verify the plaintext export root."
+                status = "Export analysis could not complete. Verify the plaintext export root."
             }
             isWorking = false
         }
@@ -240,7 +270,7 @@ struct ArchiveImportView: View {
         isWorking = true
         progress = nil
         summary = nil
-        status = "Importing private archive…"
+        status = "Exporting private archive…"
         let importOptions = limit.options
         var continuation: AsyncStream<ArchiveV1ImportProgress>.Continuation?
         let stream = AsyncStream<ArchiveV1ImportProgress>(bufferingPolicy: .bufferingNewest(1)) {
@@ -276,10 +306,10 @@ struct ArchiveImportView: View {
         case let .success(value):
             summary = value
             status = value.status == .cancelled
-                ? "Import cancelled. Completed message transactions remain valid."
-                : "Archive import complete. Run again to add new messages without duplicates."
+                ? "Export cancelled. Completed message transactions remain valid; use a new destination for another full export."
+                : "Full Export complete. Open the archive with Archive Viewer."
         case .failure:
-            status = "Archive import could not complete. Existing committed messages remain valid."
+            status = "Archive export could not complete. The destination is kept only for validation; use a new empty destination to retry."
         }
         progress = nil
         cancellation = nil
@@ -312,6 +342,25 @@ private enum ArchiveImportLimit: String, CaseIterable, Identifiable {
         case .oneThousand: .init(limit: 1_000)
         case .all: .all
         }
+    }
+}
+
+private enum ArchiveDestinationPath {
+    static func resolve(_ text: String) throws -> URL {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix("/") else { throw ArchiveError.invalidInput }
+        let destination = URL(fileURLWithPath: value).standardizedFileURL
+        let manager = FileManager.default
+        if manager.fileExists(atPath: destination.path()) {
+            let metadata = try destination.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard metadata.isDirectory == true, metadata.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+        } else {
+            let parent = destination.deletingLastPathComponent()
+            let metadata = try parent.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard metadata.isDirectory == true, metadata.isSymbolicLink != true,
+                  destination.lastPathComponent != ".", destination.lastPathComponent != ".." else { throw ArchiveError.invalidInput }
+        }
+        return destination
     }
 }
 
