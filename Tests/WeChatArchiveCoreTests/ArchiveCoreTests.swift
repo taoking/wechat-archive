@@ -14,9 +14,9 @@ final class ArchiveCoreTests: XCTestCase {
 
         let database = try WeChatArchiveV1Database(url: archiveURL)
 
-        try expectEqual(try database.schemaVersion(), 2)
+        try expectEqual(try database.schemaVersion(), 3)
         try expectEqual(try database.requiredTables(), Set([
-            "import_runs", "conversations", "messages", "message_source_values", "media_assets", "message_media_links"
+            "import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links"
         ]))
         try expectEqual(try permissionBits(at: archiveURL.deletingLastPathComponent()), 0o700)
         try expectEqual(try permissionBits(at: archiveURL), 0o600)
@@ -71,6 +71,198 @@ final class ArchiveCoreTests: XCTestCase {
         try expectEqual(try database.messageCount(), 2)
     }
 
+    func testContactAdapterUsesRemarkThenGroupNicknameAndValidatesAccountIdentity() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let contactDB = exportRoot.appending(path: "contact/contact.db")
+        let ftsDB = exportRoot.appending(path: "contact/contact_fts.db")
+        let accountRoot = directory.appending(path: "wxid_fixtureowner_c14c")
+        try FileManager.default.createDirectory(at: contactDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: contactDB, sql: """
+            CREATE TABLE contact (id INTEGER, username TEXT, local_type INTEGER, alias TEXT, remark TEXT, nick_name TEXT);
+            INSERT INTO contact VALUES (1, 'wxid_fixtureowner', 1, NULL, NULL, 'Owner');
+            INSERT INTO contact VALUES (2, 'fixture-contact', 1, 'Alias', 'Remark', 'Nickname');
+            INSERT INTO contact VALUES (3, 'fixture-group@chatroom', 1, NULL, NULL, 'Group title');
+            CREATE TABLE chatroom_member (room_id INTEGER, member_id INTEGER);
+            INSERT INTO chatroom_member VALUES (3, 2);
+            """)
+        try createPlainSQLiteDatabase(at: ftsDB, sql: """
+            CREATE VIRTUAL TABLE chatroom_member_fts_v3 USING fts4(a_group_remark, room_id, member_id);
+            INSERT INTO chatroom_member_fts_v3 VALUES ('Group nickname', 3, 2);
+            """)
+
+        let result = try WeChatContactAdapter().read(plainSQLiteRoot: exportRoot, accountRoot: accountRoot)
+        let contact = try XCTUnwrap(result.contacts.first { $0.sourceIdentity == "fixture-contact" })
+        let member = try XCTUnwrap(result.groupMembers.first)
+
+        try expectEqual(result.ownerSourceIdentity, "wxid_fixtureowner")
+        try expectEqual(contact.displayName, "Remark")
+        try expectEqual(member.displayName, "Group nickname")
+        try expectEqual(member.groupNickname, "Group nickname")
+    }
+
+    func testSourceReaderResolvesConversationAndIntegerSenderIdentities() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let conversation = "fixture-contact"
+        let tableName = "Msg_\(fixtureMD5Hex(conversation))"
+        let database = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: database.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: database, sql: """
+            CREATE TABLE Name2Id (user_name TEXT);
+            INSERT INTO Name2Id (rowid, user_name) VALUES (7, '\(conversation)');
+            INSERT INTO Name2Id (rowid, user_name) VALUES (8, 'wxid_fixtureowner');
+            CREATE TABLE \(tableName) (local_id INTEGER, local_type INTEGER, create_time INTEGER, real_sender_id INTEGER, message_content TEXT);
+            INSERT INTO \(tableName) VALUES (1, 1, 100, 8, 'synthetic');
+            """)
+        var record: ArchiveV1SourceMessage?
+
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: exportRoot, limit: nil) { row in record = row; return true }
+
+        try expectEqual(record?.conversationSourceIdentity, conversation)
+        try expectEqual(record?.senderSourceIdentity, "wxid_fixtureowner")
+    }
+
+    func testArchiveViewerPaginatesMoreThanOneHundredConversationsByRecentMessage() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appending(path: "WeChatArchive")
+        let database = try WeChatArchiveV1Database(url: root.appending(path: "archive.sqlite"))
+        for index in 0..<150 {
+            let conversation = try database.upsertConversation(sourceIdentity: "fixture-conversation-\(index)", type: .private, displayName: "Conversation \(index)")
+            _ = try database.insertMessage(
+                conversationID: conversation, sourceDatabase: "message/message_0.db", sourceTable: "fixture", sourceSQLiteRowID: Int64(index + 1), sourceLocalID: nil, sourceServerID: nil, timestamp: Int64(index), senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "synthetic", replySourceID: nil, sourceSequence: Int64(index), sourceValues: [:]
+            )
+        }
+        database.close()
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: root)
+
+        let first = try viewer.conversationPage(limit: 100)
+        let second = try viewer.conversationPage(offset: first.items.count, limit: 100)
+
+        try expectEqual(first.items.count, 100)
+        try expectTrue(first.hasMore)
+        try expectEqual(second.items.count, 50)
+        try expectFalse(second.hasMore)
+        try expectEqual(first.items.first?.title, "Conversation 149")
+    }
+
+    func testArchiveViewerStopsShowingLoadMoreAtExactlyOneHundredMessages() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appending(path: "WeChatArchive")
+        let database = try WeChatArchiveV1Database(url: root.appending(path: "archive.sqlite"))
+        let conversation = try database.upsertConversation(sourceIdentity: "fixture-conversation")
+        for index in 0..<100 {
+            _ = try database.insertMessage(
+                conversationID: conversation, sourceDatabase: "message/message_0.db", sourceTable: "fixture", sourceSQLiteRowID: Int64(index + 1), sourceLocalID: nil, sourceServerID: nil, timestamp: Int64(index), senderSourceID: nil, receiverSourceID: nil, rawLocalType: 1, normalizedType: .text, textContent: "synthetic", replySourceID: nil, sourceSequence: Int64(index), sourceValues: [:]
+            )
+        }
+        database.close()
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: root)
+
+        let page = try viewer.messagePage(conversationID: conversation, limit: 100)
+
+        try expectEqual(page.items.count, 100)
+        try expectFalse(page.hasMore)
+    }
+
+    func testArchiveImportPersistsGroupSenderAndMessageDirection() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let accountRoot = directory.appending(path: "wxid_fixtureowner_c14c")
+        let messageDB = exportRoot.appending(path: "message/message_0.db")
+        let contactDB = exportRoot.appending(path: "contact/contact.db")
+        let ftsDB = exportRoot.appending(path: "contact/contact_fts.db")
+        try FileManager.default.createDirectory(at: messageDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: contactDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        let group = "fixture-group@chatroom"
+        let groupTable = "Msg_\(fixtureMD5Hex(group))"
+        try createPlainSQLiteDatabase(at: messageDB, sql: """
+            CREATE TABLE Name2Id (user_name TEXT);
+            INSERT INTO Name2Id (rowid, user_name) VALUES (1, '\(group)');
+            INSERT INTO Name2Id (rowid, user_name) VALUES (2, 'wxid_fixtureowner');
+            INSERT INTO Name2Id (rowid, user_name) VALUES (3, 'fixture-member');
+            CREATE TABLE \(groupTable) (local_id INTEGER, local_type INTEGER, create_time INTEGER, real_sender_id INTEGER, message_content TEXT);
+            INSERT INTO \(groupTable) VALUES (1, 1, 100, 2, 'outgoing synthetic');
+            INSERT INTO \(groupTable) VALUES (2, 1, 101, 3, 'incoming synthetic');
+            """)
+        try createPlainSQLiteDatabase(at: contactDB, sql: """
+            CREATE TABLE contact (id INTEGER, username TEXT, local_type INTEGER, alias TEXT, remark TEXT, nick_name TEXT);
+            INSERT INTO contact VALUES (1, 'wxid_fixtureowner', 1, NULL, NULL, 'Owner');
+            INSERT INTO contact VALUES (2, 'fixture-member', 1, NULL, NULL, 'Member');
+            INSERT INTO contact VALUES (3, '\(group)', 1, NULL, NULL, 'Group title');
+            CREATE TABLE chatroom_member (room_id INTEGER, member_id INTEGER);
+            INSERT INTO chatroom_member VALUES (3, 2);
+            """)
+        try createPlainSQLiteDatabase(at: ftsDB, sql: """
+            CREATE VIRTUAL TABLE chatroom_member_fts_v3 USING fts4(a_group_remark, room_id, member_id);
+            INSERT INTO chatroom_member_fts_v3 VALUES ('Group nickname', 3, 2);
+            """)
+        let destination = directory.appending(path: "WeChatArchive")
+        _ = try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(plainSQLiteRoot: exportRoot, accountRoot: accountRoot, destinationRoot: destination, options: .all)
+        try FileManager.default.removeItem(at: exportRoot)
+        try FileManager.default.removeItem(at: accountRoot)
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: destination)
+        let conversation = try XCTUnwrap(try viewer.listConversations().first)
+        let messages = try viewer.messages(conversationID: conversation.id)
+
+        try expectEqual(conversation.type, .group)
+        try expectEqual(conversation.title, "Group title")
+        try expectEqual(messages.map(\.direction), [.outgoing, .incoming])
+        try expectEqual(messages.last?.senderDisplayName, "Group nickname")
+    }
+
+    func testArchiveImportUsesObservedSystemTypeWithoutTreatingUnknownAsSystem() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let accountRoot = directory.appending(path: "Account")
+        let databaseURL = exportRoot.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: accountRoot, withIntermediateDirectories: true)
+        let tableName = "Msg_0123456789abcdef0123456789abcdef"
+        try createPlainSQLiteDatabase(at: databaseURL, sql: """
+            CREATE TABLE \(tableName) (local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT);
+            INSERT INTO \(tableName) VALUES (1, 10000, 100, 'synthetic system');
+            INSERT INTO \(tableName) VALUES (2, 49, 101, 'synthetic unknown');
+            """)
+        let destination = directory.appending(path: "WeChatArchive")
+        _ = try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(
+            plainSQLiteRoot: exportRoot, accountRoot: accountRoot, destinationRoot: destination, options: .all
+        )
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: destination)
+        let conversation = try XCTUnwrap(try viewer.listConversations().first)
+        let messages = try viewer.messages(conversationID: conversation.id)
+
+        try expectEqual(messages.map(\.direction), [.system, .unknown])
+        try expectEqual(messages.map(\.normalizedType), [.unknown, .unknown])
+    }
+
+    func testArchiveMediaCopyFailurePreservesMessagesAndContinuesImport() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let destination = directory.appending(path: "WeChatArchive")
+        let importer = WeChatArchiveV1Importer(
+            imageKeyProvider: FixtureImageKeyProvider(materials: [.init(aesKey: fixture.imageKey, xorKey: 0x88)]),
+            mediaStoreFactory: { _ in FailingArchiveV1MediaStore() }
+        )
+
+        let summary = try importer.importArchive(
+            plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot, destinationRoot: destination, options: .all
+        )
+        let reconstruction = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite")).reconstruction()
+
+        try expectEqual(summary.messagesImported, 5)
+        try expectTrue(reconstruction.contains { $0.mediaStatuses.contains(.archiveCopyFailed) })
+    }
+
     func testVideoAndVoiceAdaptersUseValidatedBoundedMappings() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -98,6 +290,45 @@ final class ArchiveCoreTests: XCTestCase {
         try expectEqual(voiceInputs.first?.sourceFormat, "silk")
         try expectEqual(voiceInputs.first?.rawData, Data([0x02, 0x23, 0x21, 0x53, 0x49, 0x4C, 0x4B, 0x5F, 0x56, 0x33, 0x30, 0x00, 0x00]))
         try expectEqual(VoiceFormatDetector().detect(voiceInputs.first?.rawData ?? Data()), .silk)
+    }
+
+    func testSilkDecoderOutputIsStoredAsWAVWithDuration() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        var voice: ArchiveV1SourceMessage?
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: fixture.exportRoot, limit: nil) { row in
+            if case .integer(34)? = row.values["local_type"] { voice = row }
+            return true
+        }
+        let pcm = Data(repeating: 0, count: 960)
+        let inputs = try WeChatVoiceMessageAdapter(decoder: FixtureVoiceDecoder(pcm: pcm, sampleRate: 24_000)).variants(
+            message: try XCTUnwrap(voice), exportRoot: fixture.exportRoot
+        )
+        let voiceInput = try XCTUnwrap(inputs.first)
+
+        try expectEqual(voiceInput.status, .decoded)
+        try expectEqual(voiceInput.decodedFormat, "wav")
+        try expectEqual(voiceInput.duration, 0.02)
+        try expectEqual(voiceInput.decodedData?.prefix(4), Data("RIFF".utf8))
+        try expectEqual(voiceInput.decodedData?[8..<12], Data("WAVE".utf8))
+    }
+
+    func testUnavailableSilkDecoderPreservesRawVoice() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        var voice: ArchiveV1SourceMessage?
+        _ = try WeChatArchiveV1SourceReader().stream(exportRoot: fixture.exportRoot, limit: nil) { row in
+            if case .integer(34)? = row.values["local_type"] { voice = row }
+            return true
+        }
+
+        let inputs = try WeChatVoiceMessageAdapter(decoder: UnavailableVoiceDecoder()).variants(message: try XCTUnwrap(voice), exportRoot: fixture.exportRoot)
+
+        try expectEqual(inputs.first?.status, .decodeUnsupported)
+        try expectTrue(inputs.first?.rawData != nil)
+        try expectEqual(inputs.first?.decodedData, nil)
     }
 
     func testArchiveViewerRejectsSymlinkedMediaEvenWhenPathStaysWithinArchive() throws {
@@ -1303,6 +1534,74 @@ final class ArchiveCoreTests: XCTestCase {
         try expectEqual(result.datVersion, .v2)
     }
 
+    func testFileBaseConflictNeverBindsMedia() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let resourceDB = exportRoot.appending(path: "message/message_resource.db")
+        try FileManager.default.createDirectory(at: resourceDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let conversation = "fixture conversation conflict"
+        let digest = fixtureMD5Hex(conversation)
+        let messageBase = "0123456789abcdef0123456789abcdef"
+        let resourceBase = "fedcba9876543210fedcba9876543210"
+        let timestamp: Int64 = 1_738_368_000
+        let messagePacked = Data([0x12, 0x22, 0x0A, 0x20]) + Data(messageBase.utf8)
+        let resourcePacked = Data([0x12, 0x22, 0x0A, 0x20]) + Data(resourceBase.utf8)
+        try createPlainSQLiteDatabase(at: resourceDB, sql: """
+            CREATE TABLE ChatName2Id (user_name TEXT);
+            INSERT INTO ChatName2Id (rowid, user_name) VALUES (1, '\(conversation)');
+            CREATE TABLE MessageResourceInfo (message_id INTEGER, chat_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, packed_info BLOB);
+            INSERT INTO MessageResourceInfo VALUES (1, 1, 3, \(timestamp), 9, 99, X'\(resourcePacked.map { String(format: "%02x", $0) }.joined())');
+            """)
+        let record = SourceMessageRecord(
+            identity: .init(databaseRelativePath: "message/message_0.db", tableName: "Msg_\(digest)", rowIdentifier: "1"),
+            values: [
+                "local_id": .integer(9), "server_id": .integer(99), "local_type": .integer(3), "create_time": .integer(timestamp),
+                "packed_info_data": .blob(.init(length: messagePacked.count, sha256: "fixture", data: messagePacked))
+            ]
+        )
+        let candidate = MessageTableCandidate(databaseRelativePath: "message/message_0.db", tableName: "Msg_\(digest)", rowCount: 1, score: 1, columns: ["local_id", "server_id", "local_type", "create_time", "packed_info_data"])
+
+        let resolution = try WeChatMessageResourceFileBaseResolver().resolve(message: record, candidate: candidate, exportRoot: exportRoot)
+
+        try expectEqual(resolution.fileBaseEvidence, .conflict)
+        try expectEqual(resolution.fileBase, nil)
+        try expectTrue(resolution.diagnostics.contains(.fileBaseConflict))
+    }
+
+    func testExactResourceMatchWinsOverSameLocalIDFallbackCandidate() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let exportRoot = directory.appending(path: "Export")
+        let resourceDB = exportRoot.appending(path: "message/message_resource.db")
+        try FileManager.default.createDirectory(at: resourceDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let conversation = "fixture exact resource"
+        let digest = fixtureMD5Hex(conversation)
+        let expected = "0123456789abcdef0123456789abcdef"
+        let fallback = "fedcba9876543210fedcba9876543210"
+        let timestamp: Int64 = 1_738_368_000
+        let expectedPacked = Data([0x12, 0x22, 0x0A, 0x20]) + Data(expected.utf8)
+        let fallbackPacked = Data([0x12, 0x22, 0x0A, 0x20]) + Data(fallback.utf8)
+        try createPlainSQLiteDatabase(at: resourceDB, sql: """
+            CREATE TABLE ChatName2Id (user_name TEXT);
+            INSERT INTO ChatName2Id (rowid, user_name) VALUES (1, '\(conversation)');
+            CREATE TABLE MessageResourceInfo (message_id INTEGER, chat_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, packed_info BLOB);
+            INSERT INTO MessageResourceInfo VALUES (1, 1, 3, \(timestamp - 1), 9, 1, X'\(fallbackPacked.map { String(format: "%02x", $0) }.joined())');
+            INSERT INTO MessageResourceInfo VALUES (2, 1, 3, \(timestamp), 9, 2, X'\(expectedPacked.map { String(format: "%02x", $0) }.joined())');
+            """)
+        let record = SourceMessageRecord(
+            identity: .init(databaseRelativePath: "message/message_0.db", tableName: "Msg_\(digest)", rowIdentifier: "1"),
+            values: ["local_id": .integer(9), "server_id": .integer(2), "local_type": .integer(3), "create_time": .integer(timestamp)]
+        )
+        let candidate = MessageTableCandidate(databaseRelativePath: "message/message_0.db", tableName: "Msg_\(digest)", rowCount: 1, score: 1, columns: ["local_id", "server_id", "local_type", "create_time"])
+
+        let resolution = try WeChatMessageResourceFileBaseResolver().resolve(message: record, candidate: candidate, exportRoot: exportRoot)
+
+        try expectEqual(resolution.resourceMatch, .exact)
+        try expectEqual(resolution.fileBaseEvidence, .resourceExact)
+        try expectEqual(resolution.fileBase?.value, expected)
+    }
+
     func testPackedInfoParserDistinguishesStructuredMarkerFromFallback() throws {
         let fileBase = "0123456789abcdef0123456789abcdef"
         let parser = MessageResourcePackedInfoParser()
@@ -2359,6 +2658,34 @@ private struct FixtureImageKeyProvider: WeChatImageKeyProvider {
 
     func keyCandidates(accountRoot: URL) throws -> [WeChatImageKeyMaterial] {
         materials
+    }
+}
+
+private struct FixtureVoiceDecoder: VoiceDecoder {
+    let pcm: Data
+    let sampleRate: Int
+
+    func decode(_ data: Data) throws -> DecodedVoice {
+        guard VoiceFormatDetector().detect(data) == .silk else { throw VoiceDecoderError.unsupportedFormat }
+        return .init(pcmData: pcm, sampleRate: sampleRate, channels: 1)
+    }
+}
+
+private struct UnavailableVoiceDecoder: VoiceDecoder {
+    func decode(_ data: Data) throws -> DecodedVoice { throw VoiceDecoderError.decoderUnavailable }
+}
+
+private struct FailingArchiveV1MediaStore: ArchiveV1MediaStoring {
+    func storeRawData(_ data: Data, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia {
+        throw ArchiveError.ioFailure
+    }
+
+    func storeRawFile(_ source: URL, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia {
+        throw ArchiveError.ioFailure
+    }
+
+    func storeDecodedData(_ data: Data, mediaType: ArchiveV1MediaType, format: String?, assetID: String) throws -> ArchiveV1StoredMedia {
+        throw ArchiveError.ioFailure
     }
 }
 

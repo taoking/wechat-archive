@@ -26,6 +26,20 @@ public enum ArchiveV1NormalizedType: String, Codable, Equatable, Sendable {
     case unknown
 }
 
+public enum ArchiveV1ConversationType: String, Codable, Equatable, Sendable {
+    case `private`
+    case group
+    case official
+    case unknown
+}
+
+public enum ArchiveV1MessageDirection: String, Codable, Equatable, Sendable {
+    case incoming
+    case outgoing
+    case system
+    case unknown
+}
+
 public enum ArchiveV1MediaType: String, Codable, Equatable, Sendable {
     case image
     case video
@@ -57,6 +71,8 @@ public enum ArchiveV1MediaStatus: String, Codable, Equatable, Sendable {
     case decodeFailed
     case decodedUnknownFormat
     case unsupportedVersion
+    case resolutionConflict
+    case archiveCopyFailed
 }
 
 public enum ArchiveV1ImportStatus: String, Codable, Equatable, Sendable {
@@ -103,6 +119,9 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
     public let voiceCount: Int
     public let unknownCount: Int
     public let conversationCount: Int
+    public let contactCount: Int
+    public let groupCount: Int
+    public let groupMemberCount: Int
     public let rawDATArchived: Int
     public let decodedImages: Int
     public let rawVideoArchived: Int
@@ -125,6 +144,9 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         voiceCount: Int,
         unknownCount: Int,
         conversationCount: Int,
+        contactCount: Int = 0,
+        groupCount: Int = 0,
+        groupMemberCount: Int = 0,
         rawDATArchived: Int,
         decodedImages: Int,
         rawVideoArchived: Int,
@@ -146,6 +168,9 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         self.voiceCount = voiceCount
         self.unknownCount = unknownCount
         self.conversationCount = conversationCount
+        self.contactCount = contactCount
+        self.groupCount = groupCount
+        self.groupMemberCount = groupMemberCount
         self.rawDATArchived = rawDATArchived
         self.decodedImages = decodedImages
         self.rawVideoArchived = rawVideoArchived

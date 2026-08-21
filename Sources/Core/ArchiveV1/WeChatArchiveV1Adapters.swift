@@ -101,6 +101,11 @@ struct WeChatImageMessageAdapter {
         let locations: [(ArchiveV1MediaVariant, URL?)] = [
             (.main, resolved.assets.mainURL), (.hd, resolved.assets.hdURL), (.thumbnail, resolved.assets.thumbnailURL)
         ]
+        if resolved.fileBaseEvidence == .conflict {
+            return locations.map {
+                .init(variant: $0.0, status: .resolutionConflict, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)
+            }
+        }
         guard resolved.resourceMatch != .notFound else {
             return locations.map { ArchiveV1ImageVariantInput(variant: $0.0, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil) }
         }
@@ -203,7 +208,12 @@ struct WeChatVideoMessageAdapter {
             candidate: candidate,
             exportRoot: exportRoot
         )
-        guard let fileBase = resolution.fileBase?.value else {
+        if resolution.fileBaseEvidence == .conflict {
+            return ArchiveV1MediaVariant.videoVariants.map {
+                .init(mediaType: .video, variant: $0, status: .resolutionConflict, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)
+            }
+        }
+        guard resolution.fileBaseEvidence.allowsMediaBinding, let fileBase = resolution.fileBase?.value else {
             return ArchiveV1MediaVariant.videoVariants.map { missingInput(variant: $0) }
         }
         let timestamp = message.values.integer(named: ["create_time", "createTime", "timestamp", "time"]) ?? 0
@@ -322,6 +332,11 @@ private struct ArchiveV1VideoMetadata {
 /// BLOBs and never turns unknown bytes into a playable format.
 struct WeChatVoiceMessageAdapter {
     private let maximumVoiceBytes = 64 * 1_024 * 1_024
+    private let decoder: any VoiceDecoder
+
+    init(decoder: any VoiceDecoder = SilkProcessVoiceDecoder()) {
+        self.decoder = decoder
+    }
 
     func variants(message: ArchiveV1SourceMessage, exportRoot: URL) throws -> [ArchiveV1MediaInput] {
         guard let localID = message.values.integer(named: ["local_id", "message_id", "msg_id"]),
@@ -333,19 +348,41 @@ struct WeChatVoiceMessageAdapter {
             let database = try VoiceMediaDatabase(url: databaseURL)
             if let data = try database.voiceData(localID: localID, serverID: serverID, createTime: createTime, maximumBytes: maximumVoiceBytes) {
                 let format = VoiceFormatDetector().detect(data)
-                return [.init(
-                    mediaType: .voice,
-                    variant: .raw,
-                    status: .rawArchived,
-                    sourceFormat: format.rawValue,
-                    decodedFormat: nil,
-                    rawData: data,
-                    decodedData: nil,
-                    width: nil,
-                    height: nil,
-                    duration: nil,
-                    sourceFileBase: nil
-                )]
+                guard format == .silk else {
+                    return [.init(
+                        mediaType: .voice,
+                        variant: .raw,
+                        status: .decodeUnsupported,
+                        sourceFormat: format.rawValue,
+                        decodedFormat: nil,
+                        rawData: data,
+                        decodedData: nil,
+                        width: nil,
+                        height: nil,
+                        sourceFileBase: nil
+                    )]
+                }
+                do {
+                    let decoded = try decoder.decode(data)
+                    let wav = try WAVWriter().write(decoded)
+                    return [.init(
+                        mediaType: .voice,
+                        variant: .raw,
+                        status: .decoded,
+                        sourceFormat: format.rawValue,
+                        decodedFormat: "wav",
+                        rawData: data,
+                        decodedData: wav,
+                        width: nil,
+                        height: nil,
+                        duration: decoded.duration,
+                        sourceFileBase: nil
+                    )]
+                } catch VoiceDecoderError.decoderUnavailable {
+                    return [rawOnlyInput(data: data, format: format, status: .decodeUnsupported)]
+                } catch {
+                    return [rawOnlyInput(data: data, format: format, status: .decodeFailed)]
+                }
             }
         }
         return [missingInput]
@@ -353,6 +390,21 @@ struct WeChatVoiceMessageAdapter {
 
     private var missingInput: ArchiveV1MediaInput {
         .init(mediaType: .voice, variant: .raw, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)
+    }
+
+    private func rawOnlyInput(data: Data, format: VoiceFormat, status: ArchiveV1MediaStatus) -> ArchiveV1MediaInput {
+        .init(
+            mediaType: .voice,
+            variant: .raw,
+            status: status,
+            sourceFormat: format.rawValue,
+            decodedFormat: nil,
+            rawData: data,
+            decodedData: nil,
+            width: nil,
+            height: nil,
+            sourceFileBase: nil
+        )
     }
 
     private func mediaDatabaseURLs(below exportRoot: URL) throws -> [URL] {

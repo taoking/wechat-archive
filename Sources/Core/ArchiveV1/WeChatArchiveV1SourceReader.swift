@@ -1,11 +1,18 @@
+import CryptoKit
 import Foundation
 import SQLite3
+
+private let archiveV1SourceSQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 struct ArchiveV1SourceMessage: Sendable {
     let sourceDatabase: String
     let sourceTable: String
     let sourceSQLiteRowID: Int64
     let sourceSequence: Int64
+    /// Resolved only from the same plaintext message database. These strings
+    /// remain in memory until written to the user's private archive.
+    let conversationSourceIdentity: String?
+    let senderSourceIdentity: String?
     let values: [String: ArchivedSQLiteValue]
 }
 
@@ -40,6 +47,8 @@ public struct WeChatArchiveV1SourceReader: Sendable {
         var delivered = 0
         for table in tables {
             let database = try ReadOnlyArchiveV1SourceDatabase(url: table.databaseURL)
+            let identities = try database.identityMap()
+            let conversationSourceIdentity = identities.conversationSourceIdentity(for: table.tableName)
             let shouldContinue = try database.stream(tableName: table.tableName) { rowid, values in
                 guard limit.map({ delivered < $0 }) ?? true else { return false }
                 let record = ArchiveV1SourceMessage(
@@ -47,6 +56,8 @@ public struct WeChatArchiveV1SourceReader: Sendable {
                     sourceTable: table.tableName,
                     sourceSQLiteRowID: rowid,
                     sourceSequence: rowid,
+                    conversationSourceIdentity: conversationSourceIdentity,
+                    senderSourceIdentity: values.integer(named: ["real_sender_id", "sender_id", "from_user_id"]).flatMap(identities.sourceIdentity(for:)),
                     values: values
                 )
                 delivered += 1
@@ -62,11 +73,15 @@ public struct WeChatArchiveV1SourceReader: Sendable {
         let messageRoot = root.appending(path: "message")
         guard isSafeDirectory(messageRoot), isDescendant(messageRoot, of: root) else { throw ArchiveError.invalidInput }
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
+        var enumerationError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: messageRoot,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles, .skipsPackageDescendants],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
         ) else { throw ArchiveError.ioFailure }
         var tables = [ArchiveV1SourceTable]()
         for case let url as URL in enumerator {
@@ -88,6 +103,7 @@ public struct WeChatArchiveV1SourceReader: Sendable {
                 ))
             }
         }
+        if enumerationError != nil { throw ArchiveError.ioFailure }
         return tables.sorted { ($0.databaseRelativePath, $0.tableName) < ($1.databaseRelativePath, $1.tableName) }
     }
 
@@ -164,6 +180,27 @@ private final class ReadOnlyArchiveV1SourceDatabase {
         return true
     }
 
+    func identityMap() throws -> ArchiveV1MessageIdentityMap {
+        guard try tableExists("Name2Id") else { return .init(sourceIdentitiesByRowID: [:]) }
+        let statement = try prepare("SELECT rowid, user_name FROM \"Name2Id\"")
+        defer { sqlite3_finalize(statement) }
+        var mappings = [Int64: String]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let sourceIdentity = columnText(statement, 1), !sourceIdentity.isEmpty else { continue }
+            mappings[sqlite3_column_int64(statement, 0)] = sourceIdentity
+        }
+        return .init(sourceIdentitiesByRowID: mappings)
+    }
+
+    private func tableExists(_ tableName: String) throws -> Bool {
+        let statement = try prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_text(statement, 1, tableName, -1, archiveV1SourceSQLiteTransient) == SQLITE_OK else { throw ArchiveError.databaseFailure }
+        let result = sqlite3_step(statement)
+        guard result == SQLITE_ROW || result == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return result == SQLITE_ROW
+    }
+
     private func columnNames(tableName: String) throws -> [String] {
         let statement = try prepare("PRAGMA table_info(\(quotedIdentifier(tableName)))")
         defer { sqlite3_finalize(statement) }
@@ -190,6 +227,21 @@ private final class ReadOnlyArchiveV1SourceDatabase {
     private func prepare(_ sql: String) throws -> OpaquePointer? { var statement: OpaquePointer?; guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK else { throw ArchiveError.databaseFailure }; return statement }
     private func requireHandle() -> OpaquePointer { guard let handle else { preconditionFailure("Source database is closed") }; return handle }
     private func columnText(_ statement: OpaquePointer?, _ index: Int32) -> String? { guard let value = sqlite3_column_text(statement, index) else { return nil }; return String(cString: value) }
+}
+
+private struct ArchiveV1MessageIdentityMap: Sendable {
+    let sourceIdentitiesByRowID: [Int64: String]
+
+    func sourceIdentity(for rowID: Int64) -> String? { sourceIdentitiesByRowID[rowID] }
+
+    func conversationSourceIdentity(for tableName: String) -> String? {
+        guard let digest = WeChatConversationTableIdentity(tableName: tableName)?.chatDirectoryComponent else { return nil }
+        return sourceIdentitiesByRowID.values.first { sourceIdentity in
+            Insecure.MD5.hash(data: Data(sourceIdentity.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined() == digest
+        }
+    }
 }
 
 private extension Dictionary where Key == String, Value == ArchivedSQLiteValue {

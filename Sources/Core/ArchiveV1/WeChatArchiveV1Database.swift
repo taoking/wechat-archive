@@ -6,7 +6,7 @@ private let archiveV1SQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_
 /// Private Archive v1 database. It is intentionally separate from the older
 /// rebuildable search index: this schema is the lossless import source of truth.
 public final class WeChatArchiveV1Database: @unchecked Sendable {
-    public static let schemaVersion = 2
+    public static let schemaVersion = 3
     private var handle: OpaquePointer?
     public let url: URL
 
@@ -47,7 +47,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     }
 
     public func requiredTables() throws -> Set<String> {
-        let expected: Set<String> = ["import_runs", "conversations", "messages", "message_source_values", "media_assets", "message_media_links"]
+        let expected: Set<String> = ["import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links"]
         let names = try tableNames()
         guard expected.isSubset(of: names) else { throw ArchiveError.invalidArchive }
         return expected
@@ -78,16 +78,111 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(requireHandle()) == 1 else { throw ArchiveError.databaseFailure }
     }
 
-    public func upsertConversation(sourceIdentity: String, createdAt: Int64? = nil) throws -> String {
-        if let existing = try conversationID(sourceIdentity: sourceIdentity) { return existing }
+    public func upsertConversation(
+        sourceIdentity: String,
+        type: ArchiveV1ConversationType = .unknown,
+        displayName: String? = nil,
+        contactID: String? = nil,
+        createdAt: Int64? = nil
+    ) throws -> String {
+        if let existing = try conversationID(sourceIdentity: sourceIdentity) {
+            let update = try prepare("""
+                UPDATE conversations
+                SET conversation_type = CASE WHEN ? = 'unknown' THEN conversation_type ELSE ? END,
+                    display_name = COALESCE(?, display_name),
+                    contact_id = COALESCE(?, contact_id),
+                    created_at = COALESCE(created_at, ?)
+                WHERE id = ?
+                """)
+            defer { sqlite3_finalize(update) }
+            try bind(type.rawValue, at: 1, to: update)
+            try bind(type.rawValue, at: 2, to: update)
+            try bind(displayName, at: 3, to: update)
+            try bind(contactID, at: 4, to: update)
+            try bind(createdAt, at: 5, to: update)
+            try bind(existing, at: 6, to: update)
+            guard sqlite3_step(update) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+            return existing
+        }
         let id = UUID().uuidString.lowercased()
-        let statement = try prepare("INSERT INTO conversations (id, source_identity, conversation_type, display_name, created_at) VALUES (?, ?, 'unknown', NULL, ?)")
+        let statement = try prepare("INSERT INTO conversations (id, source_identity, conversation_type, display_name, contact_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(statement) }
         try bind(id, at: 1, to: statement)
         try bind(sourceIdentity, at: 2, to: statement)
-        try bind(createdAt, at: 3, to: statement)
+        try bind(type.rawValue, at: 3, to: statement)
+        try bind(displayName, at: 4, to: statement)
+        try bind(contactID, at: 5, to: statement)
+        try bind(createdAt, at: 6, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
         return id
+    }
+
+    public func upsertContact(
+        sourceIdentity: String,
+        alias: String?,
+        remark: String?,
+        nickname: String?,
+        displayName: String?,
+        contactType: String?
+    ) throws -> String {
+        if let existing = try contactID(sourceIdentity: sourceIdentity) {
+            let statement = try prepare("""
+                UPDATE contacts SET alias = ?, remark = ?, nickname = ?, display_name = ?, contact_type = ? WHERE id = ?
+                """)
+            defer { sqlite3_finalize(statement) }
+            try bind(alias, at: 1, to: statement)
+            try bind(remark, at: 2, to: statement)
+            try bind(nickname, at: 3, to: statement)
+            try bind(displayName, at: 4, to: statement)
+            try bind(contactType, at: 5, to: statement)
+            try bind(existing, at: 6, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+            return existing
+        }
+        let id = UUID().uuidString.lowercased()
+        let statement = try prepare("INSERT INTO contacts (id, source_identity, alias, remark, nickname, display_name, contact_type) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(statement) }
+        try bind(id, at: 1, to: statement)
+        try bind(sourceIdentity, at: 2, to: statement)
+        try bind(alias, at: 3, to: statement)
+        try bind(remark, at: 4, to: statement)
+        try bind(nickname, at: 5, to: statement)
+        try bind(displayName, at: 6, to: statement)
+        try bind(contactType, at: 7, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return id
+    }
+
+    public func setAccount(sourceIdentity: String, displayName: String?) throws {
+        let statement = try prepare("INSERT INTO account (id, source_identity, display_name) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET source_identity = excluded.source_identity, display_name = excluded.display_name")
+        defer { sqlite3_finalize(statement) }
+        try bind(sourceIdentity, at: 1, to: statement)
+        try bind(displayName, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+    }
+
+    public func upsertGroupMember(
+        conversationID: String,
+        contactID: String?,
+        memberSourceID: String,
+        groupNickname: String?,
+        displayName: String?
+    ) throws {
+        let id = UUID().uuidString.lowercased()
+        let statement = try prepare("""
+            INSERT INTO group_members (id, conversation_id, contact_id, member_source_id, group_nickname, display_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id, member_source_id) DO UPDATE SET
+              contact_id = excluded.contact_id, group_nickname = excluded.group_nickname, display_name = excluded.display_name
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(id, at: 1, to: statement)
+        try bind(conversationID, at: 2, to: statement)
+        try bind(contactID, at: 3, to: statement)
+        try bind(memberSourceID, at: 4, to: statement)
+        try bind(groupNickname, at: 5, to: statement)
+        try bind(displayName, at: 6, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
     }
 
     public func insertMessage(
@@ -105,7 +200,10 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         textContent: String?,
         replySourceID: String?,
         sourceSequence: Int64,
-        sourceValues: [String: ArchivedSQLiteValue]
+        sourceValues: [String: ArchivedSQLiteValue],
+        senderContactID: String? = nil,
+        senderDisplayName: String? = nil,
+        direction: ArchiveV1MessageDirection = .unknown
     ) throws -> (id: String, inserted: Bool) {
         if let id = try messageID(sourceDatabase: sourceDatabase, sourceTable: sourceTable, sqliteRowID: sourceSQLiteRowID) {
             return (id, false)
@@ -113,8 +211,8 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         let id = UUID().uuidString.lowercased()
         try inTransaction {
             let statement = try prepare("""
-                INSERT INTO messages (id, conversation_id, source_database, source_table, source_sqlite_rowid, source_local_id, source_server_id, timestamp, sender_source_id, receiver_source_id, raw_local_type, normalized_type, text_content, reply_source_id, source_sequence, imported_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (id, conversation_id, source_database, source_table, source_sqlite_rowid, source_local_id, source_server_id, timestamp, sender_source_id, receiver_source_id, sender_contact_id, sender_display_name, direction, raw_local_type, normalized_type, text_content, reply_source_id, source_sequence, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
             defer { sqlite3_finalize(statement) }
             try bind(id, at: 1, to: statement)
@@ -127,12 +225,15 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
             try bind(timestamp, at: 8, to: statement)
             try bind(senderSourceID, at: 9, to: statement)
             try bind(receiverSourceID, at: 10, to: statement)
-            try bind(rawLocalType, at: 11, to: statement)
-            try bind(normalizedType.rawValue, at: 12, to: statement)
-            try bind(textContent, at: 13, to: statement)
-            try bind(replySourceID, at: 14, to: statement)
-            try bind(sourceSequence, at: 15, to: statement)
-            try bind(Date().timeIntervalSince1970, at: 16, to: statement)
+            try bind(senderContactID, at: 11, to: statement)
+            try bind(senderDisplayName, at: 12, to: statement)
+            try bind(direction.rawValue, at: 13, to: statement)
+            try bind(rawLocalType, at: 14, to: statement)
+            try bind(normalizedType.rawValue, at: 15, to: statement)
+            try bind(textContent, at: 16, to: statement)
+            try bind(replySourceID, at: 17, to: statement)
+            try bind(sourceSequence, at: 18, to: statement)
+            try bind(Date().timeIntervalSince1970, at: 19, to: statement)
             guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
             try insertSourceValues(sourceValues, for: id)
         }
@@ -203,6 +304,9 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     public func messageCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM messages")) }
     public func conversationCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM conversations")) }
     public func mediaAssetCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM media_assets")) }
+    public func contactCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM contacts")) }
+    public func groupCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM conversations WHERE conversation_type = 'group'")) }
+    public func groupMemberCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM group_members")) }
 
     public func sourceValues(sourceDatabase: String, sourceTable: String, sourceSQLiteRowID: Int64) throws -> [String: ArchivedSQLiteValue] {
         guard let messageID = try messageID(sourceDatabase: sourceDatabase, sourceTable: sourceTable, sqliteRowID: sourceSQLiteRowID) else { return [:] }
@@ -281,9 +385,14 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
             try execute("""
                 CREATE TABLE import_runs (id TEXT PRIMARY KEY, started_at REAL NOT NULL, completed_at REAL, app_version TEXT NOT NULL, archive_schema_version INTEGER NOT NULL, source_database_count INTEGER NOT NULL, message_count INTEGER NOT NULL, media_count INTEGER NOT NULL, status TEXT NOT NULL)
                 """)
-            try execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, conversation_type TEXT NOT NULL, display_name TEXT, created_at INTEGER)")
+            try execute("CREATE TABLE account (id INTEGER PRIMARY KEY CHECK(id = 1), source_identity TEXT NOT NULL UNIQUE, display_name TEXT)")
+            try execute("CREATE TABLE contacts (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, alias TEXT, remark TEXT, nickname TEXT, display_name TEXT, contact_type TEXT)")
+            try execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, conversation_type TEXT NOT NULL, display_name TEXT, contact_id TEXT REFERENCES contacts(id), created_at INTEGER)")
+            try execute("CREATE INDEX conversations_contact ON conversations(contact_id)")
+            try execute("CREATE TABLE group_members (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, contact_id TEXT REFERENCES contacts(id), member_source_id TEXT NOT NULL, group_nickname TEXT, display_name TEXT, UNIQUE(conversation_id, member_source_id))")
+            try execute("CREATE INDEX group_members_conversation ON group_members(conversation_id)")
             try execute("""
-                CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), source_database TEXT NOT NULL, source_table TEXT NOT NULL, source_sqlite_rowid INTEGER NOT NULL, source_local_id INTEGER, source_server_id INTEGER, timestamp INTEGER NOT NULL, sender_source_id TEXT, receiver_source_id TEXT, raw_local_type INTEGER, normalized_type TEXT NOT NULL, text_content TEXT, reply_source_id TEXT, source_sequence INTEGER NOT NULL, imported_at REAL NOT NULL, UNIQUE(source_database, source_table, source_sqlite_rowid))
+                CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), source_database TEXT NOT NULL, source_table TEXT NOT NULL, source_sqlite_rowid INTEGER NOT NULL, source_local_id INTEGER, source_server_id INTEGER, timestamp INTEGER NOT NULL, sender_source_id TEXT, receiver_source_id TEXT, sender_contact_id TEXT REFERENCES contacts(id), sender_display_name TEXT, direction TEXT NOT NULL, raw_local_type INTEGER, normalized_type TEXT NOT NULL, text_content TEXT, reply_source_id TEXT, source_sequence INTEGER NOT NULL, imported_at REAL NOT NULL, UNIQUE(source_database, source_table, source_sqlite_rowid))
                 """)
             try execute("CREATE INDEX messages_reconstruction ON messages(timestamp, source_sequence, source_database, source_table, source_sqlite_rowid)")
             try execute("""
@@ -293,7 +402,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
                 CREATE TABLE media_assets (id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, media_type TEXT NOT NULL, variant TEXT NOT NULL, source_format TEXT, decoded_format TEXT, status TEXT NOT NULL, raw_archive_path TEXT, decoded_archive_path TEXT, raw_size INTEGER, decoded_size INTEGER, width INTEGER, height INTEGER, duration REAL, sha256_raw TEXT, sha256_decoded TEXT, source_file_base TEXT, created_at REAL NOT NULL)
                 """)
             try execute("CREATE TABLE message_media_links (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, media_asset_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY(message_id, media_asset_id, role))")
-            try execute("PRAGMA user_version = 2")
+            try execute("PRAGMA user_version = 3")
         }
     }
 
@@ -324,6 +433,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     }
 
     private func conversationID(sourceIdentity: String) throws -> String? { try scalarString("SELECT id FROM conversations WHERE source_identity = ?", binding: sourceIdentity) }
+    private func contactID(sourceIdentity: String) throws -> String? { try scalarString("SELECT id FROM contacts WHERE source_identity = ?", binding: sourceIdentity) }
     private func messageID(sourceDatabase: String, sourceTable: String, sqliteRowID: Int64) throws -> String? {
         let statement = try prepare("SELECT id FROM messages WHERE source_database = ? AND source_table = ? AND source_sqlite_rowid = ?")
         defer { sqlite3_finalize(statement) }

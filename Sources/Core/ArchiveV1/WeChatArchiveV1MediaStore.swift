@@ -6,9 +6,17 @@ struct ArchiveV1StoredMedia: Sendable {
     let sha256: String
 }
 
+/// Internal seam for deterministic import-failure tests. Production always
+/// uses the protected, atomic `WeChatArchiveV1MediaStore` implementation.
+protocol ArchiveV1MediaStoring: Sendable {
+    func storeRawData(_ data: Data, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia
+    func storeRawFile(_ source: URL, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia
+    func storeDecodedData(_ data: Data, mediaType: ArchiveV1MediaType, format: String?, assetID: String) throws -> ArchiveV1StoredMedia
+}
+
 /// Writes only into the private archive destination. Source DAT files are read
 /// by the adapter and never renamed, changed, or deleted.
-struct WeChatArchiveV1MediaStore: Sendable {
+struct WeChatArchiveV1MediaStore: ArchiveV1MediaStoring, Sendable {
     let root: URL
 
     init(root: URL) throws {

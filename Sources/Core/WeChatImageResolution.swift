@@ -37,6 +37,25 @@ public enum MessageResourceFileBaseConfidence: String, Codable, Equatable, Senda
     case heuristic
 }
 
+/// The relationship between the message's own packed payload and the resource
+/// index. A value is usable for media binding only when the evidence is strong
+/// enough to rule out a wrong attachment.
+public enum MessageResourceFileBaseEvidence: String, Codable, Equatable, Sendable {
+    case confirmedBoth
+    case resourceExact
+    case messageStructured
+    case resourceFallback
+    case conflict
+    case unresolved
+
+    public var allowsMediaBinding: Bool {
+        switch self {
+        case .confirmedBoth, .resourceExact, .messageStructured: true
+        case .resourceFallback, .conflict, .unresolved: false
+        }
+    }
+}
+
 /// The value is local-only and deliberately not Codable. It is a file-base
 /// candidate, not a statement that its bytes have MD5 semantics.
 public struct MessageResourceFileBase: Equatable, Sendable {
@@ -59,7 +78,10 @@ public struct MessageResourcePackedInfoParser: Sendable {
 
     public init() {}
 
-    public func parse(_ data: Data) -> MessageResourceFileBase? {
+    public func parse(
+        _ data: Data,
+        source: MessageResourceFileBaseSource = .messageResourcePackedInfo
+    ) -> MessageResourceFileBase? {
         guard !data.isEmpty, data.count <= maximumBytes else { return nil }
         let bytes = [UInt8](data)
         if let offset = markerOffset(in: bytes) {
@@ -67,7 +89,7 @@ public struct MessageResourcePackedInfoParser: Sendable {
             if let value = hex32(at: start, in: bytes) {
                 return MessageResourceFileBase(
                     value: value,
-                    source: .messageResourcePackedInfo,
+                    source: source,
                     confidence: .structured
                 )
             }
@@ -76,7 +98,7 @@ public struct MessageResourcePackedInfoParser: Sendable {
             if let value = hex32(at: start, in: bytes) {
                 return MessageResourceFileBase(
                     value: value,
-                    source: .messageResourcePackedInfo,
+                    source: source,
                     confidence: .heuristic
                 )
             }
@@ -473,6 +495,7 @@ public enum WeChatImageResolutionDiagnostic: String, Codable, Equatable, Sendabl
     case messageResourceNotFound
     case packedInfoMissing
     case fileBaseNotFound
+    case fileBaseConflict
     case chatDirectoryMissing
     case monthDirectoryMissing
     case datFileMissing
@@ -492,6 +515,7 @@ public struct WeChatImageMessageResolution: Equatable, Sendable {
     public let resourceMatch: WeChatImageResourceMatch
     public let resourceDetailsFound: Bool
     public let fileBase: MessageResourceFileBase?
+    public let fileBaseEvidence: MessageResourceFileBaseEvidence
     public let assets: WeChatImageAssetSet
     public let datVersion: WeChatImageDATVersion
     public let diagnostics: [WeChatImageResolutionDiagnostic]
@@ -506,6 +530,7 @@ struct WeChatMessageResourceFileBaseResolution: Sendable {
     let resourceMatch: WeChatImageResourceMatch
     let resourceDetailsFound: Bool
     let fileBase: MessageResourceFileBase?
+    let fileBaseEvidence: MessageResourceFileBaseEvidence
     let diagnostics: [WeChatImageResolutionDiagnostic]
 }
 
@@ -543,12 +568,13 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
             return unresolved(.messageResourceNotFound)
         }
         let parser = MessageResourcePackedInfoParser()
-        let resourceBase = resource.packedInfo.flatMap(parser.parse)
-        let messageBase = messageFields.packedInfo.flatMap(parser.parse)
-        guard let fileBase = selectFileBase(message: messageBase, resource: resourceBase) else {
+        let resourceBase = resource.packedInfo.flatMap { parser.parse($0, source: .messageResourcePackedInfo) }
+        let messageBase = messageFields.packedInfo.flatMap { parser.parse($0, source: .messagePackedInfoData) }
+        let selected = selectFileBase(message: messageBase, resource: resourceBase, resourceMatch: resource.match)
+        guard let fileBase = selected.fileBase else {
             var diagnostics: [WeChatImageResolutionDiagnostic] = []
             if resource.packedInfo == nil && messageFields.packedInfo == nil { diagnostics.append(.packedInfoMissing) }
-            diagnostics.append(.fileBaseNotFound)
+            diagnostics.append(selected.evidence == .conflict ? .fileBaseConflict : .fileBaseNotFound)
             return .init(
                 conversation: conversation,
                 createTime: messageFields.createTime,
@@ -556,6 +582,7 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
                 resourceMatch: resource.match,
                 resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
                 fileBase: nil,
+                fileBaseEvidence: selected.evidence,
                 diagnostics: diagnostics
             )
         }
@@ -566,27 +593,43 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
             resourceMatch: resource.match,
             resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
             fileBase: fileBase,
+            fileBaseEvidence: selected.evidence,
             diagnostics: []
         )
     }
 
     private func selectFileBase(
         message: MessageResourceFileBase?,
-        resource: MessageResourceFileBase?
-    ) -> MessageResourceFileBase? {
+        resource: MessageResourceFileBase?,
+        resourceMatch: WeChatImageResourceMatch
+    ) -> (fileBase: MessageResourceFileBase?, evidence: MessageResourceFileBaseEvidence) {
         switch (message, resource) {
         case let (.some(message), .some(resource)) where message.value == resource.value:
-            return MessageResourceFileBase(
-                value: resource.value,
-                source: .both,
-                confidence: message.confidence == .structured || resource.confidence == .structured ? .structured : .heuristic
+            return (
+                MessageResourceFileBase(
+                    value: resource.value,
+                    source: .both,
+                    confidence: message.confidence == .structured || resource.confidence == .structured ? .structured : .heuristic
+                ),
+                .confirmedBoth
             )
-        case let (_, .some(resource)):
-            return resource
-        case let (.some(message), nil):
-            return MessageResourceFileBase(value: message.value, source: .messagePackedInfoData, confidence: message.confidence)
+        case (.some, .some):
+            return (nil, .conflict)
+        case let (nil, .some(resource)) where resourceMatch == .exact:
+            return (resource, .resourceExact)
+        case (nil, .some):
+            // A local-ID-only match is diagnostic evidence, never enough to
+            // attach a possibly unrelated file.
+            return (nil, .resourceFallback)
+        case let (.some(message), nil) where message.confidence == .structured:
+            return (
+                MessageResourceFileBase(value: message.value, source: .messagePackedInfoData, confidence: .structured),
+                .messageStructured
+            )
+        case (.some, nil):
+            return (nil, .unresolved)
         case (nil, nil):
-            return nil
+            return (nil, .unresolved)
         }
     }
 
@@ -598,6 +641,7 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
             resourceMatch: .notFound,
             resourceDetailsFound: false,
             fileBase: nil,
+            fileBaseEvidence: .unresolved,
             diagnostics: [diagnostic]
         )
     }
@@ -654,12 +698,16 @@ public struct WeChatImageMessageResolver: Sendable {
         calendar: Calendar = .current
     ) throws -> WeChatImageMessageResolution {
         let resource = try WeChatMessageResourceFileBaseResolver().resolve(message: message, candidate: candidate, exportRoot: exportRoot)
-        guard let conversation = resource.conversation, let createTime = resource.createTime, let fileBase = resource.fileBase else {
+        guard resource.fileBaseEvidence.allowsMediaBinding,
+              let conversation = resource.conversation,
+              let createTime = resource.createTime,
+              let fileBase = resource.fileBase else {
             return .init(
                 resourceDatabaseFound: resource.resourceDatabaseFound,
                 resourceMatch: resource.resourceMatch,
                 resourceDetailsFound: resource.resourceDetailsFound,
                 fileBase: resource.fileBase,
+                fileBaseEvidence: resource.fileBaseEvidence,
                 assets: WeChatImageAssetSet(),
                 datVersion: .unknown,
                 diagnostics: resource.diagnostics
@@ -682,6 +730,7 @@ public struct WeChatImageMessageResolver: Sendable {
             resourceMatch: resource.resourceMatch,
             resourceDetailsFound: resource.resourceDetailsFound,
             fileBase: fileBase,
+            fileBaseEvidence: resource.fileBaseEvidence,
             assets: assets,
             datVersion: version,
             diagnostics: diagnostics
@@ -717,7 +766,7 @@ private struct MessageResourceMessageFields: Sendable {
               let localID = record.values[localColumn]?.integerValue,
               let localType = record.values[typeColumn]?.integerValue,
               let createTime = record.values[timeColumn]?.integerValue else { return nil }
-        let serverColumn = first(["server_id", "msgsvrid", "server_msg_id"])
+        let serverColumn = first(["server_id", "svr_id", "msgsvrid", "server_msg_id"])
         let packedColumn = candidate.columns.first { $0.lowercased() == "packed_info_data" } ?? candidate.columns.first { $0.lowercased().contains("packed") }
         let packedInfo: Data?
         if case let .blob(blob)? = packedColumn.flatMap({ record.values[$0] }) {

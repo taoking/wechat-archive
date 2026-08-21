@@ -23,7 +23,11 @@ struct ArchiveImportView: View {
     }
 
     private var canImport: Bool {
-        canAnalyze && analysis != nil && archiveDestinationIsEmpty
+        canAnalyze && analysis != nil && archiveDestinationIsEmpty && !isWeChatRunning
+    }
+
+    private var isWeChatRunning: Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.tencent.xinWeChat").isEmpty
     }
 
     private var archiveDestinationIsEmpty: Bool {
@@ -59,6 +63,10 @@ struct ArchiveImportView: View {
                 Text("Full Export opens plaintext SQLite and original media read-only. It does not copy keys or modify WeChat data. The destination must be new or empty; an existing archive is never merged. Archive folders use 0700 and private files use 0600.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if isWeChatRunning {
+                    Label("Quit WeChat and try again before Full Export.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
 
                 HStack {
                     Button(isWorking ? "Working…" : "Analyze Export", action: analyzeImport)
@@ -128,6 +136,9 @@ struct ArchiveImportView: View {
                         SummaryValue(label: "Voice", value: summary.voiceCount)
                         SummaryValue(label: "Unknown", value: summary.unknownCount)
                         SummaryValue(label: "Conversations", value: summary.conversationCount)
+                        SummaryValue(label: "Contacts", value: summary.contactCount)
+                        SummaryValue(label: "Groups", value: summary.groupCount)
+                        SummaryValue(label: "Group Members", value: summary.groupMemberCount)
                     }
                     HStack(spacing: 18) {
                         SummaryValue(label: "Raw DAT", value: summary.rawDATArchived)
@@ -265,6 +276,10 @@ struct ArchiveImportView: View {
 
     private func importArchive() {
         guard let plainSQLiteRoot, let accountRoot, let archiveRoot else { return }
+        guard !isWeChatRunning else {
+            status = "Quit WeChat and try again. Full Export is blocked while WeChat is running."
+            return
+        }
         let token = ArchiveImportCancellation()
         cancellation = token
         isWorking = true
