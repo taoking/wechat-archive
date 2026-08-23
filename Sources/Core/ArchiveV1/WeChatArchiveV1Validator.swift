@@ -16,23 +16,36 @@ public struct WeChatArchiveV1Validator: Sendable {
         let conversationCount = try database.conversationCount()
         let schemaVersion = try database.schemaVersion()
         let media = try database.mediaRows()
+        let avatars = schemaVersion >= 4 ? try database.avatarRows() : []
         let mediaHashesPassed = try media.allSatisfy { row in
             try verify(path: row.rawPath, hash: row.rawHash, below: root) &&
             verify(path: row.decodedPath, hash: row.decodedHash, below: root)
         }
+        let avatarHashesPassed = try avatars.allSatisfy { row in
+            try verify(path: row.path, hash: row.hash, below: root)
+        }
+        let expectedPaths = Set(
+            media.flatMap { [$0.rawPath, $0.decodedPath] }.compactMap { $0 } +
+            avatars.compactMap(\.path)
+        )
+        let orphanFilesPassed = try noOrphanMediaFiles(below: root, expectedPaths: expectedPaths)
         let manifestPassed = manifest.format == "WeChatArchive" &&
-            manifest.version == WeChatArchiveV1Database.schemaVersion &&
-            schemaVersion == WeChatArchiveV1Database.schemaVersion &&
+            manifest.version == schemaVersion &&
+            (1...WeChatArchiveV1Database.schemaVersion).contains(schemaVersion) &&
             manifest.messageCount == messageCount &&
             manifest.mediaAssetCount == media.count &&
-            manifest.conversationCount == conversationCount
+            manifest.conversationCount == conversationCount &&
+            (schemaVersion < 4 || manifest.avatarAssetCount == avatars.count)
         return ArchiveV1ValidationReport(
             sqliteIntegrityPassed: try database.integrityCheck(),
             foreignKeysPassed: try database.foreignKeyCheck(),
             manifestPassed: manifestPassed,
             mediaHashesPassed: mediaHashesPassed,
+            avatarHashesPassed: avatarHashesPassed,
+            orphanFilesPassed: orphanFilesPassed,
             messageCount: messageCount,
-            mediaAssetCount: media.count
+            mediaAssetCount: media.count,
+            avatarAssetCount: avatars.count
         )
     }
 
@@ -69,6 +82,29 @@ public struct WeChatArchiveV1Validator: Sendable {
         let valuePath = url.resolvingSymlinksInPath().standardizedFileURL.path()
         return valuePath.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
     }
+
+    private func noOrphanMediaFiles(below root: URL, expectedPaths: Set<String>) throws -> Bool {
+        let mediaRoot = root.appending(path: "media")
+        guard FileManager.default.fileExists(atPath: mediaRoot.path()) else { return expectedPaths.isEmpty }
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path()
+        guard let enumerator = FileManager.default.enumerator(
+            at: mediaRoot,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        ) else { throw ArchiveError.invalidArchive }
+        for case let file as URL in enumerator {
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { return false }
+            guard values.isRegularFile == true else { continue }
+            let resolved = file.resolvingSymlinksInPath().standardizedFileURL
+            let path = resolved.path()
+            let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+            guard path.hasPrefix(prefix) else { return false }
+            let relative = String(path.dropFirst(prefix.count))
+            guard expectedPaths.contains(relative) else { return false }
+        }
+        return true
+    }
 }
 
 private final class ArchiveV1ValidationDatabase {
@@ -104,6 +140,16 @@ private final class ArchiveV1ValidationDatabase {
         var rows = [(String?, String?, String?, String?)]()
         while sqlite3_step(statement) == SQLITE_ROW {
             rows.append((text(statement, 0), text(statement, 1), text(statement, 2), text(statement, 3)))
+        }
+        return rows
+    }
+
+    func avatarRows() throws -> [(path: String?, hash: String?)] {
+        let statement = try prepare("SELECT archive_path, sha256 FROM avatar_assets")
+        defer { sqlite3_finalize(statement) }
+        var rows = [(String?, String?)]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append((text(statement, 0), text(statement, 1)))
         }
         return rows
     }

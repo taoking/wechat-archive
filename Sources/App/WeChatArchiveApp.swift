@@ -17,13 +17,13 @@ struct WeChatArchiveApp: App {
 }
 
 private enum AppSection: String, CaseIterable, Hashable, Identifiable {
-    case archive = "Archive"
-    case databaseExport = "Database Export"
-    case schemaDiscovery = "Schema Discovery"
-    case messageDiscovery = "Message Discovery"
-    case archiveImport = "Archive Export"
-    case archiveViewer = "Archive Viewer"
-    case settings = "Settings"
+    case archive = "归档概览"
+    case databaseExport = "数据库导出"
+    case schemaDiscovery = "结构发现"
+    case messageDiscovery = "消息发现"
+    case archiveImport = "归档导出"
+    case archiveViewer = "归档查看器"
+    case settings = "设置"
 
     var id: String { rawValue }
     var symbol: String {
@@ -47,7 +47,7 @@ private struct ArchiveShellView: View {
             List(AppSection.allCases, selection: $section) { item in
                 Label(item.rawValue, systemImage: item.symbol).tag(item)
             }
-            .navigationTitle("WeChat Archive")
+            .navigationTitle("微信聊天归档")
         } detail: {
             switch section ?? .archive {
             case .archive: DashboardView()
@@ -67,19 +67,19 @@ private struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("WeChat Archive").font(.largeTitle.bold())
-                Text("本机导出普通 SQLite，发现数据库结构，并可一次性完整导出可离线查看的私有 Archive。")
+                Text("微信聊天归档").font(.largeTitle.bold())
+                Text("在本机导出普通 SQLite、发现数据库结构，并一次性完整导出可离线查看的私人归档。")
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                    StatisticCard(value: "3C", label: "Current phase", symbol: "square.and.arrow.down.on.square")
-                    StatisticCard(value: "Local", label: "Processing", symbol: "macbook")
-                    StatisticCard(value: "0", label: "Network uploads", symbol: "network.slash")
-                    StatisticCard(value: "Lossless", label: "Archive exports", symbol: "archivebox")
+                    StatisticCard(value: "3C", label: "当前阶段", symbol: "square.and.arrow.down.on.square")
+                    StatisticCard(value: "本机", label: "处理方式", symbol: "macbook")
+                    StatisticCard(value: "0", label: "网络上传", symbol: "network.slash")
+                    StatisticCard(value: "无损", label: "归档方式", symbol: "archivebox")
                 }
-                GroupBox("Current Scope") {
+                GroupBox("当前范围") {
                     HStack {
                         Image(systemName: "checkmark.shield").foregroundStyle(.green)
-                        Text("Archive Export 会逐行保存全部 SQLite source values，支持文本、图片、视频、语音与未知消息；Archive Viewer 可在不依赖微信源数据的情况下离线查看。")
+                        Text("归档导出会逐行保存全部 SQLite 原始字段，支持文本、图片、视频、语音与未知消息；归档查看器可在不依赖微信源数据的情况下离线查看。")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -87,7 +87,7 @@ private struct DashboardView: View {
             }
             .padding(32)
         }
-        .navigationTitle("Archive")
+        .navigationTitle("归档概览")
     }
 }
 
@@ -125,57 +125,57 @@ private struct DatabaseExportView: View {
 
     var body: some View {
         Form {
-            Section("WeChat Database Export") {
-                LabeledContent("Database Directory") {
+            Section("微信数据库导出") {
+                LabeledContent("数据库目录") {
                     if let databaseRoot = session.databaseRoot {
                         Label(databaseRoot.path(), systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                             .lineLimit(2)
                             .textSelection(.enabled)
                     } else {
-                        Text("Not selected").foregroundStyle(.secondary)
+                        Text("未选择").foregroundStyle(.secondary)
                     }
                 }
                 HStack {
-                    Button("Choose Folder", action: chooseDatabaseDirectory)
-                    TextField("Paste absolute db_storage path", text: $databaseRootPath)
+                    Button("选择文件夹", action: chooseDatabaseDirectory)
+                    TextField("粘贴 db_storage 的绝对路径", text: $databaseRootPath)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(useEnteredDatabaseDirectory)
-                    Button("Use Path", action: useEnteredDatabaseDirectory)
+                    Button("使用此路径", action: useEnteredDatabaseDirectory)
                 }
                 .disabled(isWorking)
-                Text("若文件选择器无法进入容器目录，可粘贴完整的绝对路径，例如 `/Users/你/.../db_storage`，然后点击 Use Path。")
+                Text("若文件选择器无法进入容器目录，可粘贴完整的绝对路径，例如 `/Users/你/.../db_storage`，然后点击“使用此路径”。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                LabeledContent("Key Map") {
+                LabeledContent("密钥映射") {
                     if let keyMapURL = session.keyMapURL {
                         Label(displayPath(keyMapURL), systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                             .lineLimit(2)
                             .textSelection(.enabled)
                     } else {
-                        Text("Not selected").foregroundStyle(.secondary)
+                        Text("未选择").foregroundStyle(.secondary)
                     }
                 }
                 HStack {
-                    Button("Use ~/.wx-cli/all_keys.json", action: useDefaultKeyMap)
-                    Button("Choose File", action: chooseKeyMap)
+                    Button("使用 ~/.wx-cli/all_keys.json", action: useDefaultKeyMap)
+                    Button("选择文件", action: chooseKeyMap)
                 }
                 .disabled(isWorking)
                 Text("导出前请完全退出微信，避免遗漏尚未 checkpoint 的 WAL 数据。all_keys.json 仅在内存读取，不会复制到导出目录。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Label(canScan ? "Ready to scan" : "Choose a database directory and key map", systemImage: canScan ? "checkmark.circle.fill" : "exclamationmark.circle")
+                Label(canScan ? "可以扫描" : "请选择数据库目录和密钥映射", systemImage: canScan ? "checkmark.circle.fill" : "exclamationmark.circle")
                     .foregroundStyle(canScan ? .green : .secondary)
-                Button(isWorking ? "Working…" : "Scan", action: scan)
+                Button(isWorking ? "处理中…" : "扫描", action: scan)
                     .disabled(!canScan)
             }
 
-            Section("Scan Results") {
+            Section("扫描结果") {
                 HStack(spacing: 18) {
-                    SummaryValue(label: "Databases", value: summary.detected)
-                    SummaryValue(label: "Matched Keys", value: summary.matched)
-                    SummaryValue(label: "Missing Keys", value: summary.missingKeys)
+                    SummaryValue(label: "数据库", value: summary.detected)
+                    SummaryValue(label: "已匹配密钥", value: summary.matched)
+                    SummaryValue(label: "缺少密钥", value: summary.missingKeys)
                 }
                 if !session.databases.isEmpty {
                     List(session.databases) { database in
@@ -183,38 +183,38 @@ private struct DatabaseExportView: View {
                     }
                     .frame(minHeight: 150, maxHeight: 280)
                 }
-                Button(isWorking ? "Working…" : "Validate All", action: validateAll)
+                Button(isWorking ? "处理中…" : "全部验证", action: validateAll)
                     .disabled(!session.databases.contains(where: \.hasAvailableKey) || isWorking)
             }
 
-            Section("Export") {
-                LabeledContent("Export Directory") {
-                    Text(exportRoot?.lastPathComponent ?? "Not selected").foregroundStyle(.secondary)
+            Section("导出") {
+                LabeledContent("导出目录") {
+                    Text(exportRoot?.lastPathComponent ?? "未选择").foregroundStyle(.secondary)
                 }
-                Button("Choose Export Folder", action: chooseExportDirectory)
+                Button("选择导出文件夹", action: chooseExportDirectory)
                     .disabled(isWorking)
                 Text("输出目录和新建子目录权限为 0700，导出的普通 SQLite 数据库权限为 0600。已有同名文件会跳过，绝不覆盖。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button(isWorking ? "Working…" : "Export Databases", action: exportDatabases)
+                Button(isWorking ? "处理中…" : "导出数据库", action: exportDatabases)
                     .disabled(exportRoot == nil || !session.databases.contains(where: {
                         $0.validationStatus == .valid && $0.hasAvailableKey
                     }) || isWorking)
             }
 
-            Section("Report") {
+            Section("报告") {
                 HStack(spacing: 18) {
-                    SummaryValue(label: "Validated", value: summary.validated)
-                    SummaryValue(label: "Invalid", value: summary.invalid)
-                    SummaryValue(label: "Exported", value: summary.exported)
-                    SummaryValue(label: "Export Failed", value: summary.exportFailed)
+                    SummaryValue(label: "验证成功", value: summary.validated)
+                    SummaryValue(label: "无效", value: summary.invalid)
+                    SummaryValue(label: "已导出", value: summary.exported)
+                    SummaryValue(label: "导出失败", value: summary.exportFailed)
                 }
                 Text(status).textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("WeChat Database Export")
+        .navigationTitle("微信数据库导出")
     }
 
     private func chooseDatabaseDirectory() {
@@ -237,8 +237,8 @@ private struct DatabaseExportView: View {
         session.selectDatabaseDirectory(url, defaultKeyMapURL: defaultKeyMapURL)
         databaseRootPath = session.databaseRoot?.path() ?? ""
         status = session.keyMapURL == nil
-            ? "Database directory selected. Please choose all_keys.json."
-            : "Database directory and wx-cli key map ready. Click Scan."
+            ? "已选择数据库目录。请选择 all_keys.json。"
+            : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
     }
 
     private func useDefaultKeyMap() {
@@ -249,7 +249,7 @@ private struct DatabaseExportView: View {
         session.selectKeyMap(keyMapURL)
         status = session.databaseRoot == nil
             ? "已选择默认 key map；请选择数据库目录。"
-            : "Database directory and wx-cli key map ready. Click Scan."
+            : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
     }
 
     private func chooseKeyMap() {
@@ -263,8 +263,8 @@ private struct DatabaseExportView: View {
             if let keyMapURL = panel.url {
                 session.selectKeyMap(keyMapURL)
                 status = session.databaseRoot == nil
-                    ? "key map 已选择；请选择数据库目录。"
-                    : "Database directory and wx-cli key map ready. Click Scan."
+                    ? "密钥映射已选择；请选择数据库目录。"
+                    : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
             }
         }
     }
@@ -280,7 +280,7 @@ private struct DatabaseExportView: View {
     private func scan() {
         guard let databaseRoot = session.databaseRoot, let keyMapURL = session.keyMapURL else { return }
         isWorking = true
-        status = "Scanning…"
+        status = "正在扫描…"
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) {
                 BatchOperationResult { () throws in
@@ -288,7 +288,7 @@ private struct DatabaseExportView: View {
                     return try WeChatDatabaseScanner().scan(databaseRoot: databaseRoot, keyMap: keyMap)
                 }
             }.value
-            apply(result, success: "Scan complete")
+            apply(result, success: "扫描完成")
         }
     }
 
@@ -296,7 +296,7 @@ private struct DatabaseExportView: View {
         guard !session.databases.isEmpty else { return }
         let input = session.databases
         isWorking = true
-        status = "Validating…"
+        status = "正在验证…"
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) {
                 BatchOperationResult { () throws in
@@ -304,7 +304,7 @@ private struct DatabaseExportView: View {
                     return WeChatDatabaseExportCoordinator(decryptor: decryptor).validateAll(input)
                 }
             }.value
-            apply(result, success: "Validation complete")
+            apply(result, success: "验证完成")
         }
     }
 
@@ -312,7 +312,7 @@ private struct DatabaseExportView: View {
         guard let exportRoot else { return }
         let input = session.databases
         isWorking = true
-        status = "Exporting…"
+        status = "正在导出…"
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) {
                 BatchOperationResult { () throws in
@@ -321,7 +321,7 @@ private struct DatabaseExportView: View {
                         .exportValidatedDatabases(input, to: exportRoot)
                 }
             }.value
-            apply(result, success: "Export complete")
+            apply(result, success: "导出完成")
         }
     }
 
@@ -329,9 +329,9 @@ private struct DatabaseExportView: View {
         if let databases = result.databases {
             session.setDatabases(databases)
             let summary = WeChatDatabaseExportSummary(databases: databases)
-            status = "\(success). Detected: \(summary.detected), Matched: \(summary.matched), Validated: \(summary.validated), Exported: \(summary.exported)."
+            status = "\(success)。已发现：\(summary.detected)；已匹配：\(summary.matched)；已验证：\(summary.validated)；已导出：\(summary.exported)。"
         } else {
-            status = result.failureMessage ?? "Local database operation failed."
+            status = result.failureMessage ?? "本地数据库操作失败。"
         }
         isWorking = false
     }
@@ -361,7 +361,7 @@ private struct SchemaDiscoveryView: View {
     @State private var reportDirectory: URL?
     @State private var progress: SQLiteSchemaScanProgress?
     @State private var isWorking = false
-    @State private var status = "Choose the Phase 1 plain SQLite export directory. No key map is needed."
+    @State private var status = "请选择第一阶段导出的普通 SQLite 目录，无需密钥映射。"
 
     private var canAnalyze: Bool {
         exportRoot != nil && !isWorking
@@ -369,33 +369,33 @@ private struct SchemaDiscoveryView: View {
 
     var body: some View {
         Form {
-            Section("Schema Discovery") {
-                LabeledContent("Plain SQLite Directory") {
+            Section("结构发现") {
+                LabeledContent("普通 SQLite 目录") {
                     if let exportRoot {
                         Label(displayRelativePath(exportRoot), systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                             .lineLimit(2)
                             .textSelection(.enabled)
                     } else {
-                        Text("Not selected").foregroundStyle(.secondary)
+                        Text("未选择").foregroundStyle(.secondary)
                     }
                 }
                 HStack {
-                    Button("Choose Folder", action: chooseExportRoot)
-                    TextField("Paste absolute export path", text: $exportRootPath)
+                    Button("选择文件夹", action: chooseExportRoot)
+                    TextField("粘贴导出目录的绝对路径", text: $exportRootPath)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(useEnteredExportRoot)
-                    Button("Use Path", action: useEnteredExportRoot)
+                    Button("使用此路径", action: useEnteredExportRoot)
                 }
                 .disabled(isWorking)
                 Text("选择第一阶段生成的普通 SQLite 根目录。分析只以只读方式打开 `*.db`，不需要 all_keys.json 或密钥。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button(isWorking ? "Analyzing…" : "Analyze Databases", action: analyze)
+                Button(isWorking ? "正在分析…" : "分析数据库", action: analyze)
                     .disabled(!canAnalyze)
                 if let progress, isWorking {
                     Label(
-                        "\(progress.completedDatabaseCount) / \(progress.totalDatabaseCount) databases — \(redactedRelativePath(progress.currentRelativePath))",
+                        "\(progress.completedDatabaseCount) / \(progress.totalDatabaseCount) 个数据库 — \(redactedRelativePath(progress.currentRelativePath))",
                         systemImage: "cylinder.split.1x2"
                     )
                     .foregroundStyle(.secondary)
@@ -404,55 +404,55 @@ private struct SchemaDiscoveryView: View {
             }
 
             if let report {
-                Section("Analysis Complete") {
+                Section("分析完成") {
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Databases", value: report.summary.databaseCount)
-                        SummaryValue(label: "Tables", value: report.summary.tableCount)
-                        SummaryValue(label: "Schema Groups", value: report.schemaGroups.count)
-                        SummaryValue(label: "Rows", value: report.summary.rowCount)
+                        SummaryValue(label: "数据库", value: report.summary.databaseCount)
+                        SummaryValue(label: "表", value: report.summary.tableCount)
+                        SummaryValue(label: "结构组", value: report.schemaGroups.count)
+                        SummaryValue(label: "行", value: report.summary.rowCount)
                     }
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Messages", value: report.summary.messageDatabases)
-                        SummaryValue(label: "Contacts", value: report.summary.contactDatabases)
-                        SummaryValue(label: "Sessions", value: report.summary.conversationDatabases)
-                        SummaryValue(label: "Media", value: report.summary.mediaDatabases)
-                        SummaryValue(label: "Unknown", value: report.summary.unknownDatabases)
+                        SummaryValue(label: "消息", value: report.summary.messageDatabases)
+                        SummaryValue(label: "联系人", value: report.summary.contactDatabases)
+                        SummaryValue(label: "会话", value: report.summary.conversationDatabases)
+                        SummaryValue(label: "媒体", value: report.summary.mediaDatabases)
+                        SummaryValue(label: "未知", value: report.summary.unknownDatabases)
                     }
                     if let reportDirectory {
-                        Button("Open Report Folder") {
+                        Button("打开报告文件夹") {
                             NSWorkspace.shared.open(reportDirectory)
                         }
                     }
-                    Text("Reports contain schema names, declared types, constraints, indexes, foreign keys and aggregate row counts only. They do not include text samples, BLOB data, contact values or keys.")
+                    Text("报告仅包含结构名称、声明类型、约束、索引、外键和聚合行数；不包含文本样本、BLOB 数据、联系人值或密钥。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Database List") {
+                Section("数据库列表") {
                     List(report.databases) { database in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(redactedRelativePath(database.relativePath)).textSelection(.enabled)
-                            Text("\(database.classification.displayName) · \(database.rowCount) rows · \(database.tableCount) tables")
+                            Text("\(localizedClassification(database.classification)) · \(database.rowCount) 行 · \(database.tableCount) 张表")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     .frame(minHeight: 180, maxHeight: 320)
                     if !report.failures.isEmpty {
-                        Text("\(report.failures.count) database(s) could not be inspected as plain SQLite. Their paths are listed only in the local report.")
+                        Text("\(report.failures.count) 个数据库无法按普通 SQLite 检查；路径仅列在本机报告中。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
 
-            Section("Status") {
+            Section("状态") {
                 Text(status).textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Schema Discovery")
+        .navigationTitle("结构发现")
     }
 
     private func chooseExportRoot() {
@@ -476,7 +476,7 @@ private struct SchemaDiscoveryView: View {
         report = nil
         reportDirectory = nil
         progress = nil
-        status = "Plain SQLite directory selected. Click Analyze Databases."
+        status = "已选择普通 SQLite 目录。请点击“分析数据库”。"
     }
 
     private func analyze() {
@@ -485,14 +485,14 @@ private struct SchemaDiscoveryView: View {
         report = nil
         reportDirectory = nil
         progress = nil
-        status = "Analyzing database schemas…"
+        status = "正在分析数据库结构…"
         var continuation: AsyncStream<SQLiteSchemaScanProgress>.Continuation?
         let stream = AsyncStream<SQLiteSchemaScanProgress>(bufferingPolicy: .bufferingNewest(1)) {
             continuation = $0
         }
         guard let continuation else {
             isWorking = false
-            status = "Could not start schema analysis."
+            status = "无法开始结构分析。"
             return
         }
         let outputDirectory = exportRoot.appending(path: "SchemaReports")
@@ -546,6 +546,27 @@ private struct SchemaDiscoveryView: View {
             }
             .joined(separator: "/")
     }
+
+    private func localizedClassification(_ classification: WeChatDatabaseClassification) -> String {
+        let category: String = switch classification.category {
+        case .message: "消息"
+        case .contact: "联系人"
+        case .conversation: "会话"
+        case .group: "群聊"
+        case .media: "媒体"
+        case .emoticon: "表情"
+        case .favorite: "收藏"
+        case .bizchat: "企业会话"
+        case .index: "索引"
+        case .configuration: "配置"
+        case .unknown: "未知"
+        }
+        return switch classification.certainty {
+        case .detected: "已检测到\(category)"
+        case .likely: "可能是\(category)"
+        case .unknown: "未知"
+        }
+    }
 }
 
 private struct SchemaDiscoveryOperationResult: Sendable {
@@ -568,15 +589,15 @@ private struct SchemaDiscoveryOperationResult: Sendable {
             let locations = try SQLiteSchemaReportWriter().write(report, to: outputDirectory)
             self.report = report
             reportDirectory = locations.directoryURL
-            status = "Analysis complete. \(report.summary.databaseCount) databases, \(report.summary.tableCount) tables, \(report.schemaGroups.count) schema groups."
+            status = "分析完成。\(report.summary.databaseCount) 个数据库、\(report.summary.tableCount) 张表、\(report.schemaGroups.count) 个结构组。"
         } catch is CancellationError {
             report = nil
             reportDirectory = nil
-            status = "Schema analysis cancelled."
+            status = "结构分析已取消。"
         } catch {
             report = nil
             reportDirectory = nil
-            status = "Schema analysis could not complete. Verify that the selected folder contains plain SQLite databases."
+            status = "结构分析未能完成。请确认所选文件夹包含普通 SQLite 数据库。"
         }
     }
 }
@@ -593,17 +614,17 @@ private struct BatchOperationResult: Sendable {
             databases = nil
             switch error {
             case .decryptionRuntimeUnavailable:
-                failureMessage = "SQLCipher runtime unavailable. Run: brew bundle"
+                failureMessage = "SQLCipher 运行时不可用。请运行：brew bundle"
             case .databaseInUse:
-                failureMessage = "Database is in use. Please quit WeChat and try again."
+                failureMessage = "数据库正在使用中。请退出微信后重试。"
             case .keyInvalid:
-                failureMessage = "Key map is invalid."
+                failureMessage = "密钥映射无效。"
             default:
-                failureMessage = "Local database operation failed."
+                failureMessage = "本地数据库操作失败。"
             }
         } catch {
             databases = nil
-            failureMessage = "Local database operation failed."
+            failureMessage = "本地数据库操作失败。"
         }
     }
 }
@@ -672,18 +693,18 @@ private struct DatabaseResultRow: View {
 
     private var label: String {
         switch database.exportStatus {
-        case .exported: "Exported"
-        case .destinationExists: "Destination exists"
-        case .failed: "Export failed"
-        case .skippedMissingKey: "Key missing"
-        case .skippedInvalid: "Key invalid"
-        case .skippedNotValidated: "Validate first"
+        case .exported: "已导出"
+        case .destinationExists: "目标已存在"
+        case .failed: "导出失败"
+        case .skippedMissingKey: "缺少密钥"
+        case .skippedInvalid: "密钥无效"
+        case .skippedNotValidated: "请先验证"
         case .notExported:
             switch database.validationStatus {
-            case .valid: "Valid"
-            case .invalid: "Key invalid"
-            case .missingKey: "Key missing"
-            case .notValidated: database.hasMatchedKey ? "Key matched" : "Key missing"
+            case .valid: "有效"
+            case .invalid: "密钥无效"
+            case .missingKey: "缺少密钥"
+            case .notValidated: database.hasMatchedKey ? "已匹配密钥" : "缺少密钥"
             }
         }
     }
@@ -692,21 +713,21 @@ private struct DatabaseResultRow: View {
 private struct SettingsView: View {
     var body: some View {
         Form {
-            Section("Privacy") {
+            Section("隐私") {
                 Label("聊天记录不会发送到服务器。", systemImage: "lock.shield")
                 Label("数据库密钥不会发送到服务器。", systemImage: "key.slash")
                 Label("应用没有后台上传、遥测或崩溃报告上传服务。", systemImage: "network.slash")
             }
-            Section("Backup") {
+            Section("备份") {
                 Text("建议采用 3-2-1：Mac 本地归档 + 外部磁盘/NAS + 一份离线备份。")
             }
-            Section("Appearance") {
+            Section("外观") {
                 Text("界面遵循 macOS 系统浅色、深色或自动主题，并支持键盘导航和 VoiceOver。")
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Settings")
+        .navigationTitle("设置")
     }
 }
 
@@ -725,6 +746,6 @@ import Foundation
 
 @main
 struct WeChatArchiveApp {
-    static func main() { print("WeChat Archive requires macOS SwiftUI.") }
+    static func main() { print("微信聊天归档需要 macOS SwiftUI。") }
 }
 #endif

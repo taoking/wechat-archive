@@ -9,6 +9,16 @@ public struct ArchiveViewerConversation: Identifiable, Equatable, Sendable {
     public let type: ArchiveV1ConversationType
     public let lastMessageTimestamp: Int64?
     public let messageCount: Int
+    public let lastMessagePreview: String?
+    public let memberCount: Int
+    public let avatar: ArchiveViewerAvatar?
+}
+
+public struct ArchiveViewerAvatar: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let relativePath: String
+    public let width: Int?
+    public let height: Int?
 }
 
 public struct ArchiveViewerPage<Item: Equatable & Sendable>: Equatable, Sendable {
@@ -44,6 +54,7 @@ public struct ArchiveViewerMessage: Identifiable, Equatable, Sendable {
     public let hasSender: Bool
     public let direction: ArchiveV1MessageDirection
     public let senderDisplayName: String?
+    public let avatar: ArchiveViewerAvatar?
     public var media: [ArchiveViewerMedia]
 }
 
@@ -53,6 +64,7 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
     private var handle: OpaquePointer?
     private var sourceRowIDColumn: String
     private var archiveSchemaVersion: Int
+    private var accountAvatar: ArchiveViewerAvatar?
     public let archiveRoot: URL
 
     public init(archiveRoot: URL) throws {
@@ -72,13 +84,17 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         self.archiveRoot = resolvedRoot
         self.sourceRowIDColumn = "source_sqlite_rowid"
         self.archiveSchemaVersion = 1
+        self.accountAvatar = nil
         do {
             try execute("PRAGMA query_only = ON")
             let version = try schemaVersion()
-            guard version == 1 || version == 2 || version == WeChatArchiveV1Database.schemaVersion else { throw ArchiveError.invalidArchive }
+            guard (1...WeChatArchiveV1Database.schemaVersion).contains(version) else { throw ArchiveError.invalidArchive }
             archiveSchemaVersion = version
             sourceRowIDColumn = version == 1 ? "source_row_identifier" : "source_sqlite_rowid"
             _ = try requiredTables()
+            if version >= 4 {
+                accountAvatar = try avatar(ownerType: .account, ownerID: "1")
+            }
         } catch {
             sqlite3_close(database)
             handle = nil
@@ -94,10 +110,25 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
 
     public func conversationPage(offset: Int = 0, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerConversation> {
         let pageSize = clamped(limit)
+        let avatarColumns = archiveSchemaVersion >= 4
+            ? ", avatar.id, avatar.archive_path, avatar.width, avatar.height"
+            : ", NULL, NULL, NULL, NULL"
+        let avatarJoin = archiveSchemaVersion >= 4
+            ? """
+              LEFT JOIN avatar_owner_links avatar_link ON avatar_link.owner_type = CASE WHEN c.conversation_type = 'group' THEN 'group' ELSE 'contact' END
+                AND avatar_link.owner_id = CASE WHEN c.conversation_type = 'group' THEN c.id ELSE c.contact_id END
+              LEFT JOIN avatar_assets avatar ON avatar.id = avatar_link.avatar_asset_id AND avatar.archive_path IS NOT NULL
+              """
+            : ""
         let statement = try prepare("""
-            SELECT c.id, c.display_name, c.conversation_type, MAX(m.timestamp), COUNT(m.id)
+            SELECT c.id, c.display_name, c.conversation_type, MAX(m.timestamp), COUNT(m.id),
+                   (SELECT normalized_type FROM messages latest WHERE latest.conversation_id = c.id ORDER BY timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC LIMIT 1),
+                   (SELECT text_content FROM messages latest WHERE latest.conversation_id = c.id ORDER BY timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC LIMIT 1),
+                   \(archiveSchemaVersion >= 3 ? "(SELECT COUNT(*) FROM group_members gm WHERE gm.conversation_id = c.id)" : "0")
+                   \(avatarColumns)
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
+            \(avatarJoin)
             GROUP BY c.id, c.display_name, c.conversation_type, c.created_at
             ORDER BY COALESCE(MAX(m.timestamp), c.created_at, 0) DESC, c.id ASC
             LIMIT ? OFFSET ?
@@ -110,14 +141,17 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
             guard let id = text(statement, 0) else { throw ArchiveError.invalidArchive }
             let ordinal = offset + conversations.count + 1
             let type = text(statement, 2).flatMap(ArchiveV1ConversationType.init(rawValue:)) ?? .unknown
-            let fallback = type == .group ? "Group Chat" : "Conversation \(ordinal)"
+            let fallback = type == .group ? "群聊" : "会话 \(ordinal)"
             let title = text(statement, 1).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
             conversations.append(.init(
                 id: id,
                 title: title,
                 type: type,
                 lastMessageTimestamp: integer(statement, 3),
-                messageCount: Int(sqlite3_column_int64(statement, 4))
+                messageCount: Int(sqlite3_column_int64(statement, 4)),
+                lastMessagePreview: conversationPreview(normalizedType: text(statement, 5), textContent: text(statement, 6)),
+                memberCount: Int(sqlite3_column_int64(statement, 7)),
+                avatar: avatar(statement, idIndex: 8, pathIndex: 9, widthIndex: 10, heightIndex: 11)
             ))
         }
         let hasMore = conversations.count > pageSize
@@ -132,22 +166,43 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
     }
 
     public func messagePage(conversationID: String, offset: Int = 0, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
+        try pagedMessagePage(conversationID: conversationID, offset: offset, limit: limit, newestFirst: false)
+    }
+
+    public func recentMessagePage(conversationID: String, offset: Int = 0, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
+        try pagedMessagePage(conversationID: conversationID, offset: offset, limit: limit, newestFirst: true)
+    }
+
+    private func pagedMessagePage(conversationID: String, offset: Int, limit: Int, newestFirst: Bool) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
         let pageSize = clamped(limit)
         let order = "timestamp ASC, source_sequence ASC, source_database ASC, source_table ASC, \(sourceRowIDColumn) ASC"
+        let pageOrder = newestFirst
+            ? "timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC"
+            : order
         let directionColumns = archiveSchemaVersion >= 3 ? "sender_display_name, direction" : "NULL AS sender_display_name, 'unknown' AS direction"
+        let senderContactColumn = archiveSchemaVersion >= 3 ? "sender_contact_id" : "NULL AS sender_contact_id"
+        let avatarColumns = archiveSchemaVersion >= 4 ? "sender_avatar.id, sender_avatar.archive_path, sender_avatar.width, sender_avatar.height" : "NULL, NULL, NULL, NULL"
+        let avatarJoin = archiveSchemaVersion >= 4
+            ? """
+              LEFT JOIN avatar_owner_links sender_avatar_link ON sender_avatar_link.owner_type = 'contact' AND sender_avatar_link.owner_id = page.sender_contact_id
+              LEFT JOIN avatar_assets sender_avatar ON sender_avatar.id = sender_avatar_link.avatar_asset_id AND sender_avatar.archive_path IS NOT NULL
+              """
+            : ""
         let statement = try prepare("""
             WITH page AS (
-                SELECT id, timestamp, normalized_type, raw_local_type, text_content, sender_source_id, \(directionColumns), source_sequence, source_database, source_table, \(sourceRowIDColumn)
+                SELECT id, timestamp, normalized_type, raw_local_type, text_content, sender_source_id, \(directionColumns), \(senderContactColumn), source_sequence, source_database, source_table, \(sourceRowIDColumn)
                 FROM messages
                 WHERE conversation_id = ?
-                ORDER BY \(order)
+                ORDER BY \(pageOrder)
                 LIMIT ? OFFSET ?
             )
-            SELECT page.id, page.timestamp, page.normalized_type, page.raw_local_type, page.text_content, page.sender_source_id, page.sender_display_name, page.direction,
+            SELECT page.id, page.timestamp, page.normalized_type, page.raw_local_type, page.text_content, page.sender_source_id, page.sender_display_name, page.direction, page.sender_contact_id,
+                   \(avatarColumns),
                    a.id, a.media_type, a.variant, a.status, a.raw_archive_path, a.decoded_archive_path, a.width, a.height, a.duration, a.raw_size, a.decoded_size
             FROM page
             LEFT JOIN message_media_links l ON l.message_id = page.id
             LEFT JOIN media_assets a ON a.id = l.media_asset_id
+            \(avatarJoin)
             ORDER BY \(order), a.media_type ASC, a.variant ASC
             """)
         defer { sqlite3_finalize(statement) }
@@ -166,6 +221,8 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
                 messageIndex = existing
             } else {
                 let rawType = sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 3)
+                let direction = text(statement, 7).flatMap(ArchiveV1MessageDirection.init(rawValue:)) ?? .unknown
+                let senderAvatar = avatar(statement, idIndex: 9, pathIndex: 10, widthIndex: 11, heightIndex: 12)
                 let message = ArchiveViewerMessage(
                     id: id,
                     timestamp: sqlite3_column_int64(statement, 1),
@@ -173,34 +230,39 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
                     rawLocalType: rawType,
                     textContent: text(statement, 4),
                     hasSender: text(statement, 5) != nil,
-                    direction: text(statement, 7).flatMap(ArchiveV1MessageDirection.init(rawValue:)) ?? .unknown,
+                    direction: direction,
                     senderDisplayName: text(statement, 6),
+                    avatar: direction == .outgoing ? accountAvatar : senderAvatar,
                     media: []
                 )
                 messageIndex = messages.count
                 indexes[id] = messageIndex
                 messages.append(message)
             }
-            guard let assetID = text(statement, 8) else { continue }
-            guard let mediaTypeValue = text(statement, 9), let mediaType = ArchiveV1MediaType(rawValue: mediaTypeValue),
-                  let variantValue = text(statement, 10), let variant = ArchiveV1MediaVariant(rawValue: variantValue),
-                  let statusValue = text(statement, 11), let status = ArchiveV1MediaStatus(rawValue: statusValue) else { throw ArchiveError.invalidArchive }
+            guard let assetID = text(statement, 13) else { continue }
+            guard let mediaTypeValue = text(statement, 14), let mediaType = ArchiveV1MediaType(rawValue: mediaTypeValue),
+                  let variantValue = text(statement, 15), let variant = ArchiveV1MediaVariant(rawValue: variantValue),
+                  let statusValue = text(statement, 16), let status = ArchiveV1MediaStatus(rawValue: statusValue) else { throw ArchiveError.invalidArchive }
             messages[messageIndex].media.append(.init(
                 id: assetID,
                 mediaType: mediaType,
                 variant: variant,
                 status: status,
-                rawRelativePath: text(statement, 12),
-                decodedRelativePath: text(statement, 13),
-                width: integer(statement, 14).map(Int.init),
-                height: integer(statement, 15).map(Int.init),
-                duration: sqlite3_column_type(statement, 16) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 16),
-                rawSize: integer(statement, 17),
-                decodedSize: integer(statement, 18)
+                rawRelativePath: text(statement, 17),
+                decodedRelativePath: text(statement, 18),
+                width: integer(statement, 19).map(Int.init),
+                height: integer(statement, 20).map(Int.init),
+                duration: sqlite3_column_type(statement, 21) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 21),
+                rawSize: integer(statement, 22),
+                decodedSize: integer(statement, 23)
             ))
         }
         let hasMore = messages.count > pageSize
-        if hasMore { messages.removeLast() }
+        if hasMore {
+            // The extra row is the oldest row when the CTE selected newest
+            // first, but becomes the last row in ordinary forward paging.
+            if newestFirst { messages.removeFirst() } else { messages.removeLast() }
+        }
         return .init(items: messages, hasMore: hasMore)
     }
 
@@ -208,6 +270,11 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         let preferred = preferDecoded ? [media.decodedRelativePath, media.rawRelativePath] : [media.rawRelativePath, media.decodedRelativePath]
         return preferred.compactMap { $0 }.compactMap(validMediaURL(relativePath:)).first
     }
+
+    public func avatarURL(for avatar: ArchiveViewerAvatar) -> URL? {
+        validMediaURL(relativePath: avatar.relativePath)
+    }
+
 
     private func validMediaURL(relativePath: String) -> URL? {
         let components = relativePath.split(separator: "/").map(String.init)
@@ -224,6 +291,46 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         return resolved
     }
 
+    private func avatar(ownerType: ArchiveV1AvatarOwnerType, ownerID: String) throws -> ArchiveViewerAvatar? {
+        let statement = try prepare("""
+            SELECT a.id, a.archive_path, a.width, a.height
+            FROM avatar_owner_links l
+            JOIN avatar_assets a ON a.id = l.avatar_asset_id
+            WHERE l.owner_type = ? AND l.owner_id = ? AND a.archive_path IS NOT NULL
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(ownerType.rawValue, at: 1, to: statement)
+        try bind(ownerID, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return avatar(statement, idIndex: 0, pathIndex: 1, widthIndex: 2, heightIndex: 3)
+    }
+
+    private func avatar(
+        _ statement: OpaquePointer?,
+        idIndex: Int32,
+        pathIndex: Int32,
+        widthIndex: Int32,
+        heightIndex: Int32
+    ) -> ArchiveViewerAvatar? {
+        guard let id = text(statement, idIndex), let path = text(statement, pathIndex) else { return nil }
+        return .init(id: id, relativePath: path, width: integer(statement, widthIndex).map(Int.init), height: integer(statement, heightIndex).map(Int.init))
+    }
+
+    private func conversationPreview(normalizedType: String?, textContent: String?) -> String? {
+        guard let normalizedType = normalizedType.flatMap(ArchiveV1NormalizedType.init(rawValue:)) else { return nil }
+        switch normalizedType {
+        case .text:
+            let compact = (textContent ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !compact.isEmpty else { return "[文本]" }
+            return compact.count > 50 ? String(compact.prefix(50)) + "…" : compact
+        case .image: return "[图片]"
+        case .video: return "[视频]"
+        case .voice: return "[语音]"
+        case .unknown: return "[其他消息]"
+        }
+    }
+
     private func schemaVersion() throws -> Int {
         let statement = try prepare("PRAGMA user_version")
         defer { sqlite3_finalize(statement) }
@@ -237,6 +344,9 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         var tables = Set<String>()
         while sqlite3_step(statement) == SQLITE_ROW { if let value = text(statement, 0) { tables.insert(value) } }
         let expected: Set<String> = ["conversations", "messages", "media_assets", "message_media_links"]
+        if archiveSchemaVersion >= 4 {
+            guard Set(["avatar_assets", "avatar_owner_links"]).isSubset(of: tables) else { throw ArchiveError.invalidArchive }
+        }
         guard expected.isSubset(of: tables) else { throw ArchiveError.invalidArchive }
         return tables
     }

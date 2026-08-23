@@ -6,7 +6,7 @@ private let archiveV1SQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_
 /// Private Archive v1 database. It is intentionally separate from the older
 /// rebuildable search index: this schema is the lossless import source of truth.
 public final class WeChatArchiveV1Database: @unchecked Sendable {
-    public static let schemaVersion = 3
+    public static let schemaVersion = 4
     private var handle: OpaquePointer?
     public let url: URL
 
@@ -47,7 +47,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     }
 
     public func requiredTables() throws -> Set<String> {
-        let expected: Set<String> = ["import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links"]
+        let expected: Set<String> = ["import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links", "avatar_assets", "avatar_owner_links"]
         let names = try tableNames()
         guard expected.isSubset(of: names) else { throw ArchiveError.invalidArchive }
         return expected
@@ -123,11 +123,13 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         remark: String?,
         nickname: String?,
         displayName: String?,
-        contactType: String?
+        contactType: String?,
+        avatarSmallURL: String? = nil,
+        avatarLargeURL: String? = nil
     ) throws -> String {
         if let existing = try contactID(sourceIdentity: sourceIdentity) {
             let statement = try prepare("""
-                UPDATE contacts SET alias = ?, remark = ?, nickname = ?, display_name = ?, contact_type = ? WHERE id = ?
+                UPDATE contacts SET alias = ?, remark = ?, nickname = ?, display_name = ?, contact_type = ?, avatar_small_url = ?, avatar_large_url = ? WHERE id = ?
                 """)
             defer { sqlite3_finalize(statement) }
             try bind(alias, at: 1, to: statement)
@@ -135,12 +137,14 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
             try bind(nickname, at: 3, to: statement)
             try bind(displayName, at: 4, to: statement)
             try bind(contactType, at: 5, to: statement)
-            try bind(existing, at: 6, to: statement)
+            try bind(avatarSmallURL, at: 6, to: statement)
+            try bind(avatarLargeURL, at: 7, to: statement)
+            try bind(existing, at: 8, to: statement)
             guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
             return existing
         }
         let id = UUID().uuidString.lowercased()
-        let statement = try prepare("INSERT INTO contacts (id, source_identity, alias, remark, nickname, display_name, contact_type) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        let statement = try prepare("INSERT INTO contacts (id, source_identity, alias, remark, nickname, display_name, contact_type, avatar_small_url, avatar_large_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(statement) }
         try bind(id, at: 1, to: statement)
         try bind(sourceIdentity, at: 2, to: statement)
@@ -149,6 +153,8 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         try bind(nickname, at: 5, to: statement)
         try bind(displayName, at: 6, to: statement)
         try bind(contactType, at: 7, to: statement)
+        try bind(avatarSmallURL, at: 8, to: statement)
+        try bind(avatarLargeURL, at: 9, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
         return id
     }
@@ -307,6 +313,58 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     public func contactCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM contacts")) }
     public func groupCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM conversations WHERE conversation_type = 'group'")) }
     public func groupMemberCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM group_members")) }
+    public func avatarAssetCount() throws -> Int { Int(try scalarInt("SELECT COUNT(*) FROM avatar_assets")) }
+
+    public func upsertAvatarAsset(
+        sourceKey: String,
+        variant: String = "best",
+        sourceFormat: String?,
+        archivePath: String?,
+        width: Int?,
+        height: Int?,
+        size: Int64?,
+        sha256: String?,
+        sourceURL: String?,
+        status: ArchiveV1AvatarStatus
+    ) throws -> String {
+        let existingID = try scalarString("SELECT id FROM avatar_assets WHERE source_key = ?", binding: sourceKey)
+        let id = existingID ?? UUID().uuidString.lowercased()
+        let statement = try prepare("""
+            INSERT INTO avatar_assets (id, source_key, variant, source_format, archive_path, width, height, size, sha256, source_url, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+              variant = excluded.variant, source_format = excluded.source_format, archive_path = excluded.archive_path,
+              width = excluded.width, height = excluded.height, size = excluded.size, sha256 = excluded.sha256,
+              source_url = excluded.source_url, status = excluded.status
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(id, at: 1, to: statement)
+        try bind(sourceKey, at: 2, to: statement)
+        try bind(variant, at: 3, to: statement)
+        try bind(sourceFormat, at: 4, to: statement)
+        try bind(archivePath, at: 5, to: statement)
+        try bind(width.map(Int64.init), at: 6, to: statement)
+        try bind(height.map(Int64.init), at: 7, to: statement)
+        try bind(size, at: 8, to: statement)
+        try bind(sha256, at: 9, to: statement)
+        try bind(sourceURL, at: 10, to: statement)
+        try bind(status.rawValue, at: 11, to: statement)
+        try bind(Date().timeIntervalSince1970, at: 12, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return existingID ?? id
+    }
+
+    public func linkAvatar(assetID: String, ownerType: ArchiveV1AvatarOwnerType, ownerID: String) throws {
+        let statement = try prepare("""
+            INSERT INTO avatar_owner_links (owner_type, owner_id, avatar_asset_id) VALUES (?, ?, ?)
+            ON CONFLICT(owner_type, owner_id) DO UPDATE SET avatar_asset_id = excluded.avatar_asset_id
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(ownerType.rawValue, at: 1, to: statement)
+        try bind(ownerID, at: 2, to: statement)
+        try bind(assetID, at: 3, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+    }
 
     public func sourceValues(sourceDatabase: String, sourceTable: String, sourceSQLiteRowID: Int64) throws -> [String: ArchivedSQLiteValue] {
         guard let messageID = try messageID(sourceDatabase: sourceDatabase, sourceTable: sourceTable, sqliteRowID: sourceSQLiteRowID) else { return [:] }
@@ -386,7 +444,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
                 CREATE TABLE import_runs (id TEXT PRIMARY KEY, started_at REAL NOT NULL, completed_at REAL, app_version TEXT NOT NULL, archive_schema_version INTEGER NOT NULL, source_database_count INTEGER NOT NULL, message_count INTEGER NOT NULL, media_count INTEGER NOT NULL, status TEXT NOT NULL)
                 """)
             try execute("CREATE TABLE account (id INTEGER PRIMARY KEY CHECK(id = 1), source_identity TEXT NOT NULL UNIQUE, display_name TEXT)")
-            try execute("CREATE TABLE contacts (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, alias TEXT, remark TEXT, nickname TEXT, display_name TEXT, contact_type TEXT)")
+            try execute("CREATE TABLE contacts (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, alias TEXT, remark TEXT, nickname TEXT, display_name TEXT, contact_type TEXT, avatar_small_url TEXT, avatar_large_url TEXT)")
             try execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, source_identity TEXT NOT NULL UNIQUE, conversation_type TEXT NOT NULL, display_name TEXT, contact_id TEXT REFERENCES contacts(id), created_at INTEGER)")
             try execute("CREATE INDEX conversations_contact ON conversations(contact_id)")
             try execute("CREATE TABLE group_members (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, contact_id TEXT REFERENCES contacts(id), member_source_id TEXT NOT NULL, group_nickname TEXT, display_name TEXT, UNIQUE(conversation_id, member_source_id))")
@@ -402,7 +460,10 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
                 CREATE TABLE media_assets (id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, media_type TEXT NOT NULL, variant TEXT NOT NULL, source_format TEXT, decoded_format TEXT, status TEXT NOT NULL, raw_archive_path TEXT, decoded_archive_path TEXT, raw_size INTEGER, decoded_size INTEGER, width INTEGER, height INTEGER, duration REAL, sha256_raw TEXT, sha256_decoded TEXT, source_file_base TEXT, created_at REAL NOT NULL)
                 """)
             try execute("CREATE TABLE message_media_links (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, media_asset_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY(message_id, media_asset_id, role))")
-            try execute("PRAGMA user_version = 3")
+            try execute("CREATE TABLE avatar_assets (id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, variant TEXT NOT NULL, source_format TEXT, archive_path TEXT, width INTEGER, height INTEGER, size INTEGER, sha256 TEXT, source_url TEXT, status TEXT NOT NULL, created_at REAL NOT NULL)")
+            try execute("CREATE TABLE avatar_owner_links (owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, avatar_asset_id TEXT NOT NULL REFERENCES avatar_assets(id) ON DELETE CASCADE, PRIMARY KEY(owner_type, owner_id))")
+            try execute("CREATE INDEX avatar_owner_assets ON avatar_owner_links(avatar_asset_id)")
+            try execute("PRAGMA user_version = 4")
         }
     }
 

@@ -16,7 +16,7 @@ struct ArchiveImportView: View {
     @State private var isWorking = false
     @State private var limit: ArchiveImportLimit = .all
     @State private var cancellation: ArchiveImportCancellation?
-    @State private var status = "Select the plain SQLite export, original WeChat account root, and a new or empty archive destination."
+    @State private var status = "请选择普通 SQLite 导出目录、原始微信账号根目录，以及新的或空的归档目标目录。"
 
     private var canAnalyze: Bool {
         plainSQLiteRoot != nil && accountRoot != nil && archiveRoot != nil && !isWorking
@@ -38,129 +38,136 @@ struct ArchiveImportView: View {
 
     var body: some View {
         Form {
-            Section("Archive Export") {
+            Section("归档导出") {
                 directoryInput(
-                    title: "Plain SQLite Export Root",
+                    title: "普通 SQLite 导出目录",
                     value: plainSQLiteRoot,
                     path: $plainSQLitePath,
                     choose: choosePlainSQLiteRoot,
                     usePath: usePlainSQLiteRoot
                 )
                 directoryInput(
-                    title: "Original WeChat Account Root",
+                    title: "原始微信账号根目录",
                     value: accountRoot,
                     path: $accountRootPath,
                     choose: chooseAccountRoot,
                     usePath: useAccountRoot
                 )
                 directoryInput(
-                    title: "Archive Destination",
+                    title: "归档目标目录",
                     value: archiveRoot,
                     path: $archiveRootPath,
                     choose: chooseArchiveRoot,
                     usePath: useArchiveRoot
                 )
-                Text("Full Export opens plaintext SQLite and original media read-only. It does not copy keys or modify WeChat data. The destination must be new or empty; an existing archive is never merged. Archive folders use 0700 and private files use 0600.")
+                Text("完整导出会以只读方式打开普通 SQLite 和原始媒体文件，不会复制密钥或修改微信数据。目标目录必须是新建或空目录；不会合并已有归档。归档目录权限为 0700，私有文件权限为 0600。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if isWeChatRunning {
-                    Label("Quit WeChat and try again before Full Export.", systemImage: "exclamationmark.triangle.fill")
+                    Label("请先完全退出微信，再执行完整导出。", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
+                Label(
+                    SilkProcessVoiceDecoder.isAvailable ? "语音解码器：可用" : "语音解码器：未安装（语音原始数据仍会归档）",
+                    systemImage: SilkProcessVoiceDecoder.isAvailable ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.footnote)
+                .foregroundStyle(SilkProcessVoiceDecoder.isAvailable ? Color.gray : Color.orange)
 
                 HStack {
-                    Button(isWorking ? "Working…" : "Analyze Export", action: analyzeImport)
+                    Button(isWorking ? "处理中…" : "分析导出", action: analyzeImport)
                         .disabled(!canAnalyze)
-                    Picker("Import Limit", selection: $limit) {
+                    Picker("导入数量", selection: $limit) {
                         ForEach(ArchiveImportLimit.allCases) { option in
                             Text(option.label).tag(option)
                         }
                     }
                     .frame(maxWidth: 290)
                     .disabled(isWorking)
-                    Button("Full Export", action: importArchive)
+                    Button("完整导出", action: importArchive)
                         .disabled(!canImport)
                     if isWorking {
-                        Button("Cancel") { cancellation?.cancel() }
+                        Button("取消") { cancellation?.cancel() }
                     }
                 }
             }
 
             if let analysis {
-                Section("Export Analysis") {
+                Section("导出分析") {
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Message DBs", value: analysis.messageDatabaseCount)
-                        SummaryValue(label: "Message Tables", value: analysis.messageTableCount)
-                        SummaryValue(label: "Estimated Messages", value: analysis.estimatedMessageCount)
+                        SummaryValue(label: "消息数据库", value: analysis.messageDatabaseCount)
+                        SummaryValue(label: "消息表", value: analysis.messageTableCount)
+                        SummaryValue(label: "预计消息数", value: analysis.estimatedMessageCount)
                     }
-                    Text("The import streams records one at a time; it does not load an entire message table into memory.")
+                    Text("导入会逐条读取记录，不会一次将整张消息表载入内存。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
 
             if let progress, isWorking {
-                Section("Full Export Progress") {
-                    Text("Exporting messages")
+                Section("完整导出进度") {
+                    Text("正在导出消息")
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Messages", value: progress.messagesRead)
-                        SummaryValue(label: "Imported", value: progress.messagesImported)
-                        SummaryValue(label: "Images Resolved", value: progress.imagesResolved)
-                        SummaryValue(label: "Decoded", value: progress.imagesDecoded)
-                        SummaryValue(label: "Raw-only", value: progress.imagesRawOnly)
-                        SummaryValue(label: "Missing", value: progress.imagesMissing)
+                        SummaryValue(label: "已读取消息", value: progress.messagesRead)
+                        SummaryValue(label: "已导入", value: progress.messagesImported)
+                        SummaryValue(label: "已关联图片", value: progress.imagesResolved)
+                        SummaryValue(label: "已解码", value: progress.imagesDecoded)
+                        SummaryValue(label: "仅原始文件", value: progress.imagesRawOnly)
+                        SummaryValue(label: "缺失", value: progress.imagesMissing)
                     }
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Text", value: progress.textCount)
-                        SummaryValue(label: "Image", value: progress.imageCount)
-                        SummaryValue(label: "Video", value: progress.videoCount)
-                        SummaryValue(label: "Voice", value: progress.voiceCount)
-                        SummaryValue(label: "Unknown", value: progress.unknownCount)
+                        SummaryValue(label: "文本", value: progress.textCount)
+                        SummaryValue(label: "图片", value: progress.imageCount)
+                        SummaryValue(label: "视频", value: progress.videoCount)
+                        SummaryValue(label: "语音", value: progress.voiceCount)
+                        SummaryValue(label: "未知", value: progress.unknownCount)
                     }
-                    Text("Media copied: \(ByteCountFormatter.string(fromByteCount: progress.mediaBytesCopied, countStyle: .file))")
+                    Text("已复制媒体：\(ByteCountFormatter.string(fromByteCount: progress.mediaBytesCopied, countStyle: .file))")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("Database: message database · Table: message table")
+                    Text("数据库：消息数据库 · 数据表：消息表")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
 
             if let summary {
-                Section("Full Export Result") {
+                Section("完整导出结果") {
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Messages", value: summary.messagesImported)
-                        SummaryValue(label: "Text", value: summary.textCount)
-                        SummaryValue(label: "Images", value: summary.imageCount)
-                        SummaryValue(label: "Video", value: summary.videoCount)
-                        SummaryValue(label: "Voice", value: summary.voiceCount)
-                        SummaryValue(label: "Unknown", value: summary.unknownCount)
-                        SummaryValue(label: "Conversations", value: summary.conversationCount)
-                        SummaryValue(label: "Contacts", value: summary.contactCount)
-                        SummaryValue(label: "Groups", value: summary.groupCount)
-                        SummaryValue(label: "Group Members", value: summary.groupMemberCount)
+                        SummaryValue(label: "消息", value: summary.messagesImported)
+                        SummaryValue(label: "文本", value: summary.textCount)
+                        SummaryValue(label: "图片", value: summary.imageCount)
+                        SummaryValue(label: "视频", value: summary.videoCount)
+                        SummaryValue(label: "语音", value: summary.voiceCount)
+                        SummaryValue(label: "未知", value: summary.unknownCount)
+                        SummaryValue(label: "会话", value: summary.conversationCount)
+                        SummaryValue(label: "联系人", value: summary.contactCount)
+                        SummaryValue(label: "群聊", value: summary.groupCount)
+                        SummaryValue(label: "群成员", value: summary.groupMemberCount)
+                        SummaryValue(label: "头像", value: summary.avatarAssetCount)
                     }
                     HStack(spacing: 18) {
-                        SummaryValue(label: "Raw DAT", value: summary.rawDATArchived)
-                        SummaryValue(label: "Decoded", value: summary.decodedImages)
-                        SummaryValue(label: "Video Files", value: summary.rawVideoArchived)
-                        SummaryValue(label: "Raw Voice", value: summary.rawVoiceArchived)
-                        SummaryValue(label: "Missing", value: summary.missingLocalMedia)
-                        SummaryValue(label: "Decode Failures", value: summary.decodeFailures)
+                        SummaryValue(label: "原始 DAT", value: summary.rawDATArchived)
+                        SummaryValue(label: "已解码", value: summary.decodedImages)
+                        SummaryValue(label: "视频文件", value: summary.rawVideoArchived)
+                        SummaryValue(label: "原始语音", value: summary.rawVoiceArchived)
+                        SummaryValue(label: "缺失", value: summary.missingLocalMedia)
+                        SummaryValue(label: "解码失败", value: summary.decodeFailures)
                     }
-                    Text("Every imported message retains its complete original SQLite row. Unknown types remain archived as unknown rather than discarded.")
+                    Text("每条已导入消息都会保留完整的原始 SQLite 行。未知类型将以未知消息归档，不会被丢弃。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Section("Status") {
+            Section("状态") {
                 Text(status).textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Archive Export")
+        .navigationTitle("归档导出")
     }
 
     @ViewBuilder
@@ -178,22 +185,22 @@ struct ArchiveImportView: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             } else {
-                Text("Not selected").foregroundStyle(.secondary)
+                Text("未选择").foregroundStyle(.secondary)
             }
         }
         HStack {
-            Button("Choose Folder", action: choose)
-            TextField("Paste absolute path", text: path)
+            Button("选择文件夹", action: choose)
+            TextField("粘贴绝对路径", text: path)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(usePath)
-            Button("Use Path", action: usePath)
+            Button("使用此路径", action: usePath)
         }
         .disabled(isWorking)
     }
 
-    private func choosePlainSQLiteRoot() { chooseDirectory("Choose the Phase 1 plaintext SQLite export") { setPlainSQLiteRoot($0) } }
-    private func chooseAccountRoot() { chooseDirectory("Choose the original WeChat account root") { setAccountRoot($0) } }
-    private func chooseArchiveRoot() { chooseDirectory("Choose a new or empty WeChatArchive destination folder") { setArchiveRoot($0) } }
+    private func choosePlainSQLiteRoot() { chooseDirectory("选择第一阶段导出的普通 SQLite 目录") { setPlainSQLiteRoot($0) } }
+    private func chooseAccountRoot() { chooseDirectory("选择原始微信账号根目录") { setAccountRoot($0) } }
+    private func chooseArchiveRoot() { chooseDirectory("选择新的或空的 WeChatArchive 归档目标目录") { setArchiveRoot($0) } }
 
     private func usePlainSQLiteRoot() { useDirectoryPath(plainSQLitePath, setter: setPlainSQLiteRoot) }
     private func useAccountRoot() { useDirectoryPath(accountRootPath, setter: setAccountRoot) }
@@ -202,7 +209,7 @@ struct ArchiveImportView: View {
             let url = try ArchiveDestinationPath.resolve(archiveRootPath)
             setArchiveRoot(url)
         } catch {
-            status = "The archive destination must be an absolute path whose existing parent is a local directory."
+            status = "归档目标必须是绝对路径，且其已有父目录必须是本机目录。"
         }
     }
 
@@ -221,7 +228,7 @@ struct ArchiveImportView: View {
             let url = try LocalDatabaseDirectoryPath.resolve(path)
             setter(url)
         } catch {
-            status = "The path must be an existing local absolute directory."
+            status = "该路径必须是已存在的本机绝对目录。"
         }
     }
 
@@ -242,7 +249,7 @@ struct ArchiveImportView: View {
         archiveRootPath = archiveRoot?.path() ?? ""
         resetAnalysis()
         if !archiveDestinationIsEmpty {
-            status = "Archive already exists or destination is not empty. Choose a new empty folder for Full Export."
+            status = "归档已存在或目标目录不为空。请为完整导出选择新的空目录。"
         }
     }
 
@@ -250,14 +257,14 @@ struct ArchiveImportView: View {
         analysis = nil
         summary = nil
         progress = nil
-        status = "Paths selected. Click Analyze Export before full export."
+        status = "路径已选择。请先点击“分析导出”，再执行完整导出。"
     }
 
     private func analyzeImport() {
         guard let plainSQLiteRoot else { return }
         isWorking = true
         summary = nil
-        status = "Analyzing message databases…"
+        status = "正在分析消息数据库…"
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) {
                 Result { try WeChatArchiveV1Importer(imageKeyProvider: WeChatKVCommImageKeyProvider()).analyze(plainSQLiteRoot: plainSQLiteRoot) }
@@ -265,10 +272,10 @@ struct ArchiveImportView: View {
             switch result {
             case let .success(value):
                 analysis = value
-                status = "Export analysis complete. Choose a limit, then start Full Export."
+                status = "导出分析完成。请选择导入数量，然后开始完整导出。"
             case .failure:
                 analysis = nil
-                status = "Export analysis could not complete. Verify the plaintext export root."
+                status = "导出分析未能完成。请确认普通 SQLite 导出目录。"
             }
             isWorking = false
         }
@@ -277,7 +284,7 @@ struct ArchiveImportView: View {
     private func importArchive() {
         guard let plainSQLiteRoot, let accountRoot, let archiveRoot else { return }
         guard !isWeChatRunning else {
-            status = "Quit WeChat and try again. Full Export is blocked while WeChat is running."
+            status = "请退出微信后重试。微信运行期间无法执行完整导出。"
             return
         }
         let token = ArchiveImportCancellation()
@@ -285,7 +292,7 @@ struct ArchiveImportView: View {
         isWorking = true
         progress = nil
         summary = nil
-        status = "Exporting private archive…"
+        status = "正在导出私人归档…"
         let importOptions = limit.options
         var continuation: AsyncStream<ArchiveV1ImportProgress>.Continuation?
         let stream = AsyncStream<ArchiveV1ImportProgress>(bufferingPolicy: .bufferingNewest(1)) {
@@ -321,10 +328,10 @@ struct ArchiveImportView: View {
         case let .success(value):
             summary = value
             status = value.status == .cancelled
-                ? "Export cancelled. Completed message transactions remain valid; use a new destination for another full export."
-                : "Full Export complete. Open the archive with Archive Viewer."
+                ? "导出已取消。已完成的消息事务仍然有效；如需再次完整导出，请使用新的目标目录。"
+                : "完整导出完成。请使用归档查看器打开归档。"
         case .failure:
-            status = "Archive export could not complete. The destination is kept only for validation; use a new empty destination to retry."
+            status = "归档导出未能完成。目标目录仅保留用于验证；请使用新的空目录重试。"
         }
         progress = nil
         cancellation = nil
@@ -348,7 +355,7 @@ private enum ArchiveImportLimit: String, CaseIterable, Identifiable {
         switch self {
         case .oneHundred: "100"
         case .oneThousand: "1,000"
-        case .all: "All"
+        case .all: "全部"
         }
     }
     var options: ArchiveV1ImportOptions {

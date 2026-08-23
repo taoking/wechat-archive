@@ -12,6 +12,19 @@ protocol ArchiveV1MediaStoring: Sendable {
     func storeRawData(_ data: Data, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia
     func storeRawFile(_ source: URL, mediaType: ArchiveV1MediaType, variant: ArchiveV1MediaVariant, sourceFormat: String?, assetID: String) throws -> ArchiveV1StoredMedia
     func storeDecodedData(_ data: Data, mediaType: ArchiveV1MediaType, format: String?, assetID: String) throws -> ArchiveV1StoredMedia
+    func storeAvatarData(_ data: Data, ownerType: ArchiveV1AvatarOwnerType, format: String, assetID: String) throws -> ArchiveV1StoredMedia
+    func removeStoredMedia(_ media: ArchiveV1StoredMedia)
+}
+
+extension ArchiveV1MediaStoring {
+    func storeAvatarData(_ data: Data, ownerType: ArchiveV1AvatarOwnerType, format: String, assetID: String) throws -> ArchiveV1StoredMedia {
+        _ = (data, ownerType, format, assetID)
+        throw ArchiveError.ioFailure
+    }
+
+    func removeStoredMedia(_ media: ArchiveV1StoredMedia) {
+        _ = media
+    }
 }
 
 /// Writes only into the private archive destination. Source DAT files are read
@@ -27,6 +40,7 @@ struct WeChatArchiveV1MediaStore: ArchiveV1MediaStoring, Sendable {
         let images = media.appending(path: "images")
         let video = media.appending(path: "video")
         let voice = media.appending(path: "voice")
+        let avatars = media.appending(path: "avatars")
         try Self.createProtectedDirectory(media, below: self.root)
         try Self.createProtectedDirectory(images, below: self.root)
         try Self.createProtectedDirectory(images.appending(path: "raw"), below: self.root)
@@ -38,6 +52,10 @@ struct WeChatArchiveV1MediaStore: ArchiveV1MediaStoring, Sendable {
         try Self.createProtectedDirectory(voice, below: self.root)
         try Self.createProtectedDirectory(voice.appending(path: "raw"), below: self.root)
         try Self.createProtectedDirectory(voice.appending(path: "decoded"), below: self.root)
+        try Self.createProtectedDirectory(avatars, below: self.root)
+        try Self.createProtectedDirectory(avatars.appending(path: "account"), below: self.root)
+        try Self.createProtectedDirectory(avatars.appending(path: "contacts"), below: self.root)
+        try Self.createProtectedDirectory(avatars.appending(path: "groups"), below: self.root)
     }
 
     func storeRawDAT(_ data: Data, assetID: String) throws -> ArchiveV1StoredMedia {
@@ -77,6 +95,27 @@ struct WeChatArchiveV1MediaStore: ArchiveV1MediaStoring, Sendable {
         case .video: throw ArchiveError.invalidInput
         }
         return try store(data, relativeDirectory: directory, filename: "\(assetID).\(decodedExtension(format))")
+    }
+
+    func storeAvatarData(_ data: Data, ownerType: ArchiveV1AvatarOwnerType, format: String, assetID: String) throws -> ArchiveV1StoredMedia {
+        let directory: String
+        switch ownerType {
+        case .account: directory = "media/avatars/account"
+        case .contact: directory = "media/avatars/contacts"
+        case .group: directory = "media/avatars/groups"
+        }
+        return try store(data, relativeDirectory: directory, filename: "\(assetID).\(decodedExtension(format))")
+    }
+
+    func removeStoredMedia(_ media: ArchiveV1StoredMedia) {
+        let components = media.relativePath.split(separator: "/").map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return }
+        let url = components.reduce(root) { $0.appending(path: $1) }.standardizedFileURL
+        guard Self.isDescendant(url, of: root),
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true,
+              values.isSymbolicLink != true else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     private func store(_ data: Data, relativeDirectory: String, filename: String) throws -> ArchiveV1StoredMedia {

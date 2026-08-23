@@ -72,7 +72,22 @@ public enum ArchiveV1MediaStatus: String, Codable, Equatable, Sendable {
     case decodedUnknownFormat
     case unsupportedVersion
     case resolutionConflict
+    /// Legacy v3 status retained only so existing archives remain readable.
     case archiveCopyFailed
+    case rawCopyFailed
+    case decodedCopyFailed
+}
+
+public enum ArchiveV1AvatarOwnerType: String, Codable, Equatable, Sendable {
+    case account
+    case contact
+    case group
+}
+
+public enum ArchiveV1AvatarStatus: String, Codable, Equatable, Sendable {
+    case archived
+    case remoteAvailable
+    case missing
 }
 
 public enum ArchiveV1ImportStatus: String, Codable, Equatable, Sendable {
@@ -122,6 +137,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
     public let contactCount: Int
     public let groupCount: Int
     public let groupMemberCount: Int
+    public let avatarAssetCount: Int
     public let rawDATArchived: Int
     public let decodedImages: Int
     public let rawVideoArchived: Int
@@ -147,6 +163,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         contactCount: Int = 0,
         groupCount: Int = 0,
         groupMemberCount: Int = 0,
+        avatarAssetCount: Int = 0,
         rawDATArchived: Int,
         decodedImages: Int,
         rawVideoArchived: Int,
@@ -171,6 +188,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         self.contactCount = contactCount
         self.groupCount = groupCount
         self.groupMemberCount = groupMemberCount
+        self.avatarAssetCount = avatarAssetCount
         self.rawDATArchived = rawDATArchived
         self.decodedImages = decodedImages
         self.rawVideoArchived = rawVideoArchived
@@ -204,19 +222,35 @@ public struct ArchiveV1ValidationReport: Equatable, Sendable {
     public let foreignKeysPassed: Bool
     public let manifestPassed: Bool
     public let mediaHashesPassed: Bool
+    public let avatarHashesPassed: Bool
+    public let orphanFilesPassed: Bool
     public let messageCount: Int
     public let mediaAssetCount: Int
+    public let avatarAssetCount: Int
 
-    public init(sqliteIntegrityPassed: Bool, foreignKeysPassed: Bool, manifestPassed: Bool, mediaHashesPassed: Bool, messageCount: Int, mediaAssetCount: Int) {
+    public init(
+        sqliteIntegrityPassed: Bool,
+        foreignKeysPassed: Bool,
+        manifestPassed: Bool,
+        mediaHashesPassed: Bool,
+        avatarHashesPassed: Bool = true,
+        orphanFilesPassed: Bool = true,
+        messageCount: Int,
+        mediaAssetCount: Int,
+        avatarAssetCount: Int = 0
+    ) {
         self.sqliteIntegrityPassed = sqliteIntegrityPassed
         self.foreignKeysPassed = foreignKeysPassed
         self.manifestPassed = manifestPassed
         self.mediaHashesPassed = mediaHashesPassed
+        self.avatarHashesPassed = avatarHashesPassed
+        self.orphanFilesPassed = orphanFilesPassed
         self.messageCount = messageCount
         self.mediaAssetCount = mediaAssetCount
+        self.avatarAssetCount = avatarAssetCount
     }
 
     public var passed: Bool {
-        sqliteIntegrityPassed && foreignKeysPassed && manifestPassed && mediaHashesPassed
+        sqliteIntegrityPassed && foreignKeysPassed && manifestPassed && mediaHashesPassed && avatarHashesPassed && orphanFilesPassed
     }
 }

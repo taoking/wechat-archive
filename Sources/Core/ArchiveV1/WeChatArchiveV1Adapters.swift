@@ -338,7 +338,11 @@ struct WeChatVoiceMessageAdapter {
         self.decoder = decoder
     }
 
-    func variants(message: ArchiveV1SourceMessage, exportRoot: URL) throws -> [ArchiveV1MediaInput] {
+    func variants(
+        message: ArchiveV1SourceMessage,
+        exportRoot: URL,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) throws -> [ArchiveV1MediaInput] {
         guard let localID = message.values.integer(named: ["local_id", "message_id", "msg_id"]),
               let serverID = message.values.integer(named: ["server_id", "svr_id", "msg_svr_id", "message_svr_id"]),
               let createTime = message.values.integer(named: ["create_time", "createTime", "timestamp", "time"]) else {
@@ -363,7 +367,7 @@ struct WeChatVoiceMessageAdapter {
                     )]
                 }
                 do {
-                    let decoded = try decoder.decode(data)
+                    let decoded = try decoder.decode(data, shouldCancel: shouldCancel)
                     let wav = try WAVWriter().write(decoded)
                     return [.init(
                         mediaType: .voice,

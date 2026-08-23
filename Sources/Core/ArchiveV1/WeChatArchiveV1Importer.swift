@@ -19,6 +19,7 @@ struct ArchiveV1Manifest: Codable {
     let imageMediaCount: Int
     let videoMediaCount: Int
     let voiceMediaCount: Int
+    let avatarAssetCount: Int?
 }
 
 private struct ArchiveV1ImportReport: Codable {
@@ -43,6 +44,7 @@ private struct ArchiveV1ImportReport: Codable {
     let videoThumbnailsFound: Int
     let voiceRawFound: Int
     let voiceDecoded: Int
+    let avatarAssetCount: Int
     let errorsByCategory: [String: Int]
 }
 
@@ -112,9 +114,14 @@ public struct WeChatArchiveV1Importer: Sendable {
         accountRoot: URL,
         destinationRoot: URL,
         options: ArchiveV1ImportOptions = .developmentDefault,
-        shouldCancel: @Sendable () -> Bool = { false },
+        shouldCancel: @escaping @Sendable () -> Bool = { false },
         progress: (@Sendable (ArchiveV1ImportProgress) -> Void)? = nil
     ) throws -> ArchiveV1ImportSummary {
+        try validateImportRoots(
+            plainSQLiteRoot: plainSQLiteRoot,
+            accountRoot: accountRoot,
+            destinationRoot: destinationRoot
+        )
         let destination = try prepareArchiveRoot(destinationRoot)
         let mediaStore = try mediaStoreFactory(destination)
         let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
@@ -125,7 +132,15 @@ public struct WeChatArchiveV1Importer: Sendable {
         var sourceDatabaseCount = 0
         do {
             let contactImport = try WeChatContactAdapter().read(plainSQLiteRoot: plainSQLiteRoot, accountRoot: accountRoot)
-            let identities = try archiveContacts(contactImport, database: database)
+            let archivedContacts = try archiveContacts(contactImport, database: database)
+            try archiveAvatars(
+                contactImport,
+                archivedContacts: archivedContacts,
+                plainSQLiteRoot: plainSQLiteRoot,
+                mediaStore: mediaStore,
+                database: database,
+                state: &state
+            )
             sourceDatabaseCount = try sourceReader.stream(exportRoot: plainSQLiteRoot, limit: options.limit) { message in
                 guard !shouldCancel() else {
                     state.status = .cancelled
@@ -137,7 +152,8 @@ public struct WeChatArchiveV1Importer: Sendable {
                     mediaStore: mediaStore,
                     plainSQLiteRoot: plainSQLiteRoot,
                     accountRoot: accountRoot,
-                    identities: identities,
+                    identities: archivedContacts.identities,
+                    shouldCancel: shouldCancel,
                     state: &state
                 )
                 progress?(.init(
@@ -161,6 +177,12 @@ public struct WeChatArchiveV1Importer: Sendable {
             try database.finishImportRun(runID, status: summary.status, sourceDatabaseCount: sourceDatabaseCount, summary: summary)
             try writeMetadata(destination: destination, summary: summary, sourceDatabaseCount: sourceDatabaseCount, database: database)
             return summary
+        } catch is CancellationError {
+            state.status = .cancelled
+            let summary = try makeSummary(state: state, database: database)
+            try database.finishImportRun(runID, status: .cancelled, sourceDatabaseCount: sourceDatabaseCount, summary: summary)
+            try writeMetadata(destination: destination, summary: summary, sourceDatabaseCount: sourceDatabaseCount, database: database)
+            return summary
         } catch {
             state.status = .failed
             let summary = try? makeSummary(state: state, database: database)
@@ -179,6 +201,7 @@ public struct WeChatArchiveV1Importer: Sendable {
         plainSQLiteRoot: URL,
         accountRoot: URL,
         identities: ArchiveV1IdentityIndex,
+        shouldCancel: @escaping @Sendable () -> Bool,
         state: inout ImportState
     ) throws {
         let rawType = message.values.integer(named: ["local_type", "msg_type", "message_type", "type"])
@@ -278,7 +301,13 @@ public struct WeChatArchiveV1Importer: Sendable {
             }
         case .voice:
             do {
-                inputs = try WeChatVoiceMessageAdapter().variants(message: message, exportRoot: plainSQLiteRoot)
+                inputs = try WeChatVoiceMessageAdapter().variants(
+                    message: message,
+                    exportRoot: plainSQLiteRoot,
+                    shouldCancel: shouldCancel
+                )
+            } catch VoiceDecoderError.cancelled {
+                throw CancellationError()
             } catch {
                 inputs = [.init(mediaType: .voice, variant: .raw, status: .missing, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)]
             }
@@ -290,7 +319,7 @@ public struct WeChatArchiveV1Importer: Sendable {
         }
     }
 
-    private func archiveContacts(_ contactImport: ArchiveV1ContactImport, database: WeChatArchiveV1Database) throws -> ArchiveV1IdentityIndex {
+    private func archiveContacts(_ contactImport: ArchiveV1ContactImport, database: WeChatArchiveV1Database) throws -> ArchiveV1ArchivedContacts {
         var contacts = [String: ArchiveV1ArchivedContact]()
         for contact in contactImport.contacts {
             let id = try database.upsertContact(
@@ -299,7 +328,9 @@ public struct WeChatArchiveV1Importer: Sendable {
                 remark: contact.remark,
                 nickname: contact.nickname,
                 displayName: contact.displayName,
-                contactType: contact.contactType
+                contactType: contact.contactType,
+                avatarSmallURL: contact.avatarSmallURL,
+                avatarLargeURL: contact.avatarLargeURL
             )
             contacts[contact.sourceIdentity] = .init(id: id, displayName: contact.displayName, isGroup: contact.isGroup)
         }
@@ -330,10 +361,89 @@ public struct WeChatArchiveV1Importer: Sendable {
             groupMemberDisplays[.init(groupSourceIdentity: member.groupSourceIdentity, memberSourceIdentity: member.memberSourceIdentity)] = member.displayName
         }
         return .init(
-            contacts: contacts,
-            groupMemberDisplays: groupMemberDisplays,
-            ownerSourceIdentity: contactImport.ownerSourceIdentity
+            identities: .init(
+                contacts: contacts,
+                groupMemberDisplays: groupMemberDisplays,
+                ownerSourceIdentity: contactImport.ownerSourceIdentity
+            ),
+            groupConversationIDs: groupConversationIDs
         )
+    }
+
+    private func archiveAvatars(
+        _ contactImport: ArchiveV1ContactImport,
+        archivedContacts: ArchiveV1ArchivedContacts,
+        plainSQLiteRoot: URL,
+        mediaStore: any ArchiveV1MediaStoring,
+        database: WeChatArchiveV1Database,
+        state: inout ImportState
+    ) throws {
+        let candidates = try WeChatAvatarAdapter().read(plainSQLiteRoot: plainSQLiteRoot, contacts: contactImport.contacts)
+        for contact in contactImport.contacts {
+            guard let archived = archivedContacts.identities.contacts[contact.sourceIdentity],
+                  let candidate = candidates[contact.sourceIdentity] else { continue }
+            let primaryOwner: ArchiveV1AvatarOwnerType
+            if contact.sourceIdentity == archivedContacts.identities.ownerSourceIdentity {
+                primaryOwner = .account
+            } else if contact.isGroup {
+                primaryOwner = .group
+            } else {
+                primaryOwner = .contact
+            }
+            let assetID: String
+            if let data = candidate.localData, let format = candidate.format {
+                var stored: ArchiveV1StoredMedia?
+                do {
+                    let copied = try mediaStore.storeAvatarData(data, ownerType: primaryOwner, format: format, assetID: UUID().uuidString.lowercased())
+                    stored = copied
+                    assetID = try database.upsertAvatarAsset(
+                        sourceKey: candidate.sourceIdentity,
+                        sourceFormat: format,
+                        archivePath: copied.relativePath,
+                        width: candidate.width,
+                        height: candidate.height,
+                        size: copied.size,
+                        sha256: copied.sha256,
+                        sourceURL: candidate.sourceURL,
+                        status: .archived
+                    )
+                    state.avatarAssetsArchived += 1
+                    state.archivedMediaBytes += copied.size
+                } catch {
+                    if let stored { mediaStore.removeStoredMedia(stored) }
+                    assetID = try database.upsertAvatarAsset(
+                        sourceKey: candidate.sourceIdentity,
+                        sourceFormat: candidate.format,
+                        archivePath: nil,
+                        width: candidate.width,
+                        height: candidate.height,
+                        size: nil,
+                        sha256: nil,
+                        sourceURL: candidate.sourceURL,
+                        status: candidate.sourceURL == nil ? .missing : .remoteAvailable
+                    )
+                }
+            } else {
+                assetID = try database.upsertAvatarAsset(
+                    sourceKey: candidate.sourceIdentity,
+                    sourceFormat: nil,
+                    archivePath: nil,
+                    width: nil,
+                    height: nil,
+                    size: nil,
+                    sha256: nil,
+                    sourceURL: candidate.sourceURL,
+                    status: candidate.status
+                )
+            }
+            try database.linkAvatar(assetID: assetID, ownerType: .contact, ownerID: archived.id)
+            if contact.sourceIdentity == archivedContacts.identities.ownerSourceIdentity {
+                try database.linkAvatar(assetID: assetID, ownerType: .account, ownerID: "1")
+            }
+            if let groupID = archivedContacts.groupConversationIDs[contact.sourceIdentity] {
+                try database.linkAvatar(assetID: assetID, ownerType: .group, ownerID: groupID)
+            }
+        }
     }
 
     private func archiveMedia(
@@ -354,7 +464,15 @@ public struct WeChatArchiveV1Importer: Sendable {
                 raw = nil
             }
         } catch {
-            try recordArchiveCopyFailure(input, messageID: messageID, assetID: assetID, database: database)
+            try recordMedia(
+                input,
+                messageID: messageID,
+                assetID: assetID,
+                status: .rawCopyFailed,
+                raw: nil,
+                decoded: nil,
+                database: database
+            )
             state.decodeFailures += 1
             return
         }
@@ -362,16 +480,58 @@ public struct WeChatArchiveV1Importer: Sendable {
         do {
             decoded = try input.decodedData.map { try mediaStore.storeDecodedData($0, mediaType: input.mediaType, format: input.decodedFormat, assetID: assetID) }
         } catch {
-            try recordArchiveCopyFailure(input, messageID: messageID, assetID: assetID, database: database)
-            state.decodeFailures += 1
+            do {
+                try recordMedia(
+                    input,
+                    messageID: messageID,
+                    assetID: assetID,
+                    status: .decodedCopyFailed,
+                    raw: raw,
+                    decoded: nil,
+                    database: database
+                )
+            } catch {
+                if let raw { mediaStore.removeStoredMedia(raw) }
+                throw error
+            }
+            state.archivedMediaBytes += raw?.size ?? 0
+            recordState(for: input, raw: raw, decoded: nil, effectiveStatus: .decodedCopyFailed, state: &state)
             return
         }
+        do {
+            try recordMedia(
+                input,
+                messageID: messageID,
+                assetID: assetID,
+                status: input.status,
+                raw: raw,
+                decoded: decoded,
+                database: database
+            )
+        } catch {
+            if let decoded { mediaStore.removeStoredMedia(decoded) }
+            if let raw { mediaStore.removeStoredMedia(raw) }
+            throw error
+        }
+        state.archivedMediaBytes += (raw?.size ?? 0) + (decoded?.size ?? 0)
+        recordState(for: input, raw: raw, decoded: decoded, state: &state)
+    }
+
+    private func recordMedia(
+        _ input: ArchiveV1MediaInput,
+        messageID: String,
+        assetID: String,
+        status: ArchiveV1MediaStatus,
+        raw: ArchiveV1StoredMedia?,
+        decoded: ArchiveV1StoredMedia?,
+        database: WeChatArchiveV1Database
+    ) throws {
         _ = try database.insertMediaAsset(
             messageID: messageID,
             assetID: assetID,
             mediaType: input.mediaType,
             variant: input.variant,
-            status: input.status,
+            status: status,
             sourceFormat: input.sourceFormat,
             decodedFormat: input.decodedFormat,
             rawArchivePath: raw?.relativePath,
@@ -385,13 +545,25 @@ public struct WeChatArchiveV1Importer: Sendable {
             decodedSHA256: decoded?.sha256,
             sourceFileBase: input.sourceFileBase
         )
-        state.archivedMediaBytes += (raw?.size ?? 0) + (decoded?.size ?? 0)
-        if input.status == .missing { state.missingLocalMedia += 1 }
+    }
+
+    private func recordState(
+        for input: ArchiveV1MediaInput,
+        raw: ArchiveV1StoredMedia?,
+        decoded: ArchiveV1StoredMedia?,
+        effectiveStatus: ArchiveV1MediaStatus? = nil,
+        state: inout ImportState
+    ) {
+        let status = effectiveStatus ?? input.status
+        if status == .missing { state.missingLocalMedia += 1 }
         switch input.mediaType {
         case .image:
             if raw != nil { state.rawDATArchived += 1; state.imageVariantsResolved += 1 }
-            if input.status == .decoded { state.decodedImages += 1 }
-            if raw != nil && input.status != .decoded && input.status != .missing { state.rawOnlyImages += 1; state.decodeFailures += 1 }
+            if decoded != nil && status == .decoded { state.decodedImages += 1 }
+            if raw != nil && decoded == nil && status != .missing {
+                state.rawOnlyImages += 1
+                state.decodeFailures += 1
+            }
         case .video:
             if raw != nil && input.variant == .thumbnail { state.videoThumbnailsArchived += 1 }
             if raw != nil && input.variant != .thumbnail { state.rawVideoArchived += 1 }
@@ -399,33 +571,6 @@ public struct WeChatArchiveV1Importer: Sendable {
             if raw != nil { state.rawVoiceArchived += 1 }
             if decoded != nil { state.decodedVoiceArchived += 1 }
         }
-    }
-
-    private func recordArchiveCopyFailure(
-        _ input: ArchiveV1MediaInput,
-        messageID: String,
-        assetID: String,
-        database: WeChatArchiveV1Database
-    ) throws {
-        _ = try database.insertMediaAsset(
-            messageID: messageID,
-            assetID: assetID,
-            mediaType: input.mediaType,
-            variant: input.variant,
-            status: .archiveCopyFailed,
-            sourceFormat: input.sourceFormat,
-            decodedFormat: input.decodedFormat,
-            rawArchivePath: nil,
-            decodedArchivePath: nil,
-            rawSize: nil,
-            decodedSize: nil,
-            width: input.width,
-            height: input.height,
-            duration: input.duration,
-            rawSHA256: nil,
-            decodedSHA256: nil,
-            sourceFileBase: nil
-        )
     }
 
     private func makeSummary(state: ImportState, database: WeChatArchiveV1Database) throws -> ArchiveV1ImportSummary {
@@ -444,6 +589,7 @@ public struct WeChatArchiveV1Importer: Sendable {
             contactCount: try database.contactCount(),
             groupCount: try database.groupCount(),
             groupMemberCount: try database.groupMemberCount(),
+            avatarAssetCount: try database.avatarAssetCount(),
             rawDATArchived: state.rawDATArchived,
             decodedImages: state.decodedImages,
             rawVideoArchived: state.rawVideoArchived,
@@ -475,7 +621,8 @@ public struct WeChatArchiveV1Importer: Sendable {
             groupMemberCount: summary.groupMemberCount,
             imageMediaCount: summary.rawDATArchived,
             videoMediaCount: summary.rawVideoArchived + summary.videoThumbnailsArchived,
-            voiceMediaCount: summary.rawVoiceArchived + summary.decodedVoiceArchived
+            voiceMediaCount: summary.rawVoiceArchived + summary.decodedVoiceArchived,
+            avatarAssetCount: summary.avatarAssetCount
         )
         let errors = summary.decodeFailures == 0 ? [:] : ["mediaDecode": summary.decodeFailures]
         let report = ArchiveV1ImportReport(
@@ -500,6 +647,7 @@ public struct WeChatArchiveV1Importer: Sendable {
             videoThumbnailsFound: summary.videoThumbnailsArchived,
             voiceRawFound: summary.rawVoiceArchived,
             voiceDecoded: summary.decodedVoiceArchived,
+            avatarAssetCount: summary.avatarAssetCount,
             errorsByCategory: errors
         )
         try writePrivateJSON(manifest, to: destination.appending(path: "archive-manifest.json"))
@@ -521,6 +669,47 @@ public struct WeChatArchiveV1Importer: Sendable {
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path())
         return root.resolvingSymlinksInPath().standardizedFileURL
     }
+
+    private func validateImportRoots(plainSQLiteRoot: URL, accountRoot: URL, destinationRoot: URL) throws {
+        let plain = try canonicalDirectory(plainSQLiteRoot, mustExist: true)
+        let account = try canonicalDirectory(accountRoot, mustExist: true)
+        let destination = try canonicalDirectory(destinationRoot, mustExist: false)
+        let roots = [plain, account, destination]
+        for left in roots.indices {
+            for right in roots.indices where left < right {
+                guard !pathsOverlap(roots[left], roots[right]) else { throw ArchiveError.invalidInput }
+            }
+        }
+    }
+
+    private func canonicalDirectory(_ url: URL, mustExist: Bool) throws -> URL {
+        let requested = url.standardizedFileURL
+        let manager = FileManager.default
+        if mustExist {
+            let values = try requested.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+            return requested.resolvingSymlinksInPath().standardizedFileURL
+        }
+        if manager.fileExists(atPath: requested.path()) {
+            let values = try requested.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw ArchiveError.invalidInput }
+            return requested.resolvingSymlinksInPath().standardizedFileURL
+        }
+        let parent = requested.deletingLastPathComponent()
+        let values = try parent.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true,
+              requested.lastPathComponent != ".", requested.lastPathComponent != ".." else { throw ArchiveError.invalidInput }
+        return parent.resolvingSymlinksInPath().appending(path: requested.lastPathComponent).standardizedFileURL
+    }
+
+    private func pathsOverlap(_ left: URL, _ right: URL) -> Bool {
+        isSameOrDescendant(left, of: right) || isSameOrDescendant(right, of: left)
+    }
+
+    private func isSameOrDescendant(_ value: URL, of parent: URL) -> Bool {
+        let parentPath = parent.path().hasSuffix("/") ? parent.path() : parent.path() + "/"
+        return value.path() == parent.path() || value.path().hasPrefix(parentPath)
+    }
 }
 
 private struct ImportState {
@@ -540,6 +729,7 @@ private struct ImportState {
     var videoThumbnailsArchived = 0
     var rawVoiceArchived = 0
     var decodedVoiceArchived = 0
+    var avatarAssetsArchived = 0
     var archivedMediaBytes: Int64 = 0
     var missingLocalMedia = 0
     var decodeFailures = 0
@@ -577,7 +767,7 @@ private struct ArchiveV1IdentityIndex: Sendable {
     func conversation(for sourceIdentity: String) -> ArchiveV1ConversationIdentity {
         if sourceIdentity.lowercased().hasSuffix("@chatroom") {
             let contact = contacts[sourceIdentity]
-            return .init(type: .group, displayName: contact?.displayName ?? "Group Chat", contactID: contact?.id)
+            return .init(type: .group, displayName: contact?.displayName ?? "群聊", contactID: contact?.id)
         }
         if let contact = contacts[sourceIdentity] {
             return .init(type: .private, displayName: contact.displayName, contactID: contact.id)
@@ -593,6 +783,11 @@ private struct ArchiveV1IdentityIndex: Sendable {
         }
         return .init(contactID: contacts[sourceIdentity]?.id, displayName: contacts[sourceIdentity]?.displayName)
     }
+}
+
+private struct ArchiveV1ArchivedContacts: Sendable {
+    let identities: ArchiveV1IdentityIndex
+    let groupConversationIDs: [String: String]
 }
 
 private extension Dictionary where Key == String, Value == ArchivedSQLiteValue {

@@ -13,20 +13,24 @@ struct ArchiveViewerView: View {
     @State private var selectedConversationID: String?
     @State private var messages = [ArchiveViewerMessage]()
     @State private var messageHasMore = false
-    @State private var status = "Choose a WeChatArchive folder. The viewer opens only archive.sqlite in read-only mode."
+    @State private var status = "请选择 WeChatArchive 文件夹。查看器仅以只读方式打开 archive.sqlite。"
     @State private var expandedVideoID: String?
     @StateObject private var voicePlayback = VoicePlaybackController()
+
+    private var selectedConversation: ArchiveViewerConversation? {
+        conversations.first { $0.id == selectedConversationID }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("WeChatArchive Folder") {
+                Section("WeChatArchive 文件夹") {
                     HStack {
-                        Button("Choose Folder", action: chooseArchive)
-                        TextField("Paste archive folder path", text: $archivePath)
+                        Button("选择文件夹", action: chooseArchive)
+                        TextField("粘贴归档文件夹路径", text: $archivePath)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit(openArchive)
-                        Button("Open Read-Only", action: openArchive)
+                        Button("只读打开", action: openArchive)
                     }
                     Text(status)
                         .font(.footnote)
@@ -40,53 +44,82 @@ struct ArchiveViewerView: View {
             HStack(spacing: 0) {
                 List(selection: $selectedConversationID) {
                     ForEach(conversations) { conversation in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(conversation.title).lineLimit(1)
-                            if let timestamp = conversation.lastMessageTimestamp, timestamp > 0 {
-                                Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .omitted, time: .shortened))
-                                    .font(.caption2)
+                        HStack(alignment: .center, spacing: 10) {
+                            ArchiveAvatarView(viewer: viewer, avatar: conversation.avatar, size: 42)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(conversation.title).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                    if let timestamp = conversation.lastMessageTimestamp, timestamp > 0 {
+                                        Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .omitted, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Text(conversation.lastMessagePreview ?? "")
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
                             }
                         }
                         .tag(conversation.id)
                     }
                     if conversationHasMore {
-                        Button("Load More Conversations", action: loadMoreConversations)
+                        Button("加载更多会话", action: loadMoreConversations)
                     }
                 }
                 .frame(minWidth: 180, idealWidth: 230, maxWidth: 280)
                 .overlay(alignment: .center) {
-                    if viewer != nil && conversations.isEmpty { ContentUnavailableView("No conversations", systemImage: "bubble.left") }
+                    if viewer != nil && conversations.isEmpty { ContentUnavailableView("暂无会话", systemImage: "bubble.left") }
                 }
 
                 Divider()
 
-                ScrollView {
+                VStack(spacing: 0) {
+                    if let selectedConversation {
+                        HStack(spacing: 10) {
+                            ArchiveAvatarView(viewer: viewer, avatar: selectedConversation.avatar, size: 34)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(selectedConversation.title).font(.headline)
+                                if selectedConversation.type == .group {
+                                    Text("\(selectedConversation.memberCount) 位成员").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 10)
+                        Divider()
+                    }
+                    ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
+                        if selectedConversationID != nil, messageHasMore {
+                            Button("加载更早的消息", action: loadMore)
+                                .frame(maxWidth: .infinity)
+                        }
                         ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                             ArchiveTimelineMessageRow(
                                 message: message,
                                 showTimestamp: shouldShowTimestamp(at: index),
                                 viewer: viewer,
                                 expandedVideoID: $expandedVideoID,
-                                voicePlayback: voicePlayback
+                                voicePlayback: voicePlayback,
+                                showSenderName: selectedConversation?.type == .group
                             )
-                        }
-                        if selectedConversationID != nil, messageHasMore {
-                            Button("Load More", action: loadMore)
-                                .frame(maxWidth: .infinity)
                         }
                     }
                     .padding()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .center) {
-                    if viewer != nil && selectedConversationID == nil { ContentUnavailableView("Select a conversation", systemImage: "message") }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(alignment: .center) {
+                        if viewer != nil && selectedConversationID == nil { ContentUnavailableView("请选择会话", systemImage: "message") }
+                    }
                 }
             }
         }
         .onChange(of: selectedConversationID) { _, _ in loadMessages() }
-        .navigationTitle("Archive Viewer")
+        .navigationTitle("归档查看器")
+        .onDisappear { voicePlayback.stop() }
     }
 
     private func chooseArchive() {
@@ -94,7 +127,7 @@ struct ArchiveViewerView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a WeChatArchive folder"
+        panel.message = "选择 WeChatArchive 文件夹"
         if panel.runModal() == .OK, let url = panel.url {
             archivePath = url.path()
             openArchive()
@@ -113,7 +146,7 @@ struct ArchiveViewerView: View {
             selectedConversationID = loadedConversations.first?.id
             messages = []
             expandedVideoID = nil
-            status = "Archive opened read-only. The viewer uses only this archive folder."
+            status = "归档已以只读方式打开。查看器仅使用此归档文件夹。"
             loadMessages()
         } catch {
             viewer = nil
@@ -121,32 +154,32 @@ struct ArchiveViewerView: View {
             conversationHasMore = false
             selectedConversationID = nil
             messages = []
-            status = "Could not open a valid WeChatArchive folder."
+            status = "无法打开有效的 WeChatArchive 文件夹。"
         }
     }
 
     private func loadMessages() {
         guard let viewer, let conversationID = selectedConversationID else { return }
         do {
-            let page = try viewer.messagePage(conversationID: conversationID, limit: 100)
+            let page = try viewer.recentMessagePage(conversationID: conversationID, limit: 100)
             messages = page.items
             messageHasMore = page.hasMore
             expandedVideoID = nil
             voicePlayback.stop()
         } catch {
             messages = []
-            status = "Could not read the selected archive timeline."
+            status = "无法读取所选归档会话时间线。"
         }
     }
 
     private func loadMore() {
         guard let viewer, let conversationID = selectedConversationID else { return }
         do {
-            let page = try viewer.messagePage(conversationID: conversationID, offset: messages.count, limit: 100)
-            messages.append(contentsOf: page.items)
+            let page = try viewer.recentMessagePage(conversationID: conversationID, offset: messages.count, limit: 100)
+            messages.insert(contentsOf: page.items, at: 0)
             messageHasMore = page.hasMore
         } catch {
-            status = "Could not load more archived messages."
+            status = "无法加载更多归档消息。"
         }
     }
 
@@ -157,7 +190,7 @@ struct ArchiveViewerView: View {
             conversations.append(contentsOf: page.items)
             conversationHasMore = page.hasMore
         } catch {
-            status = "Could not load more archived conversations."
+            status = "无法加载更多归档会话。"
         }
     }
 
@@ -179,6 +212,8 @@ private struct ArchiveTimelineMessageRow: View {
     let viewer: WeChatArchiveViewerDatabase?
     @Binding var expandedVideoID: String?
     @ObservedObject var voicePlayback: VoicePlaybackController
+    let showSenderName: Bool
+    @State private var showsImagePreview = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -194,9 +229,12 @@ private struct ArchiveTimelineMessageRow: View {
                     .background(bubbleColor, in: Capsule())
             } else {
                 HStack {
-                    if message.direction == .outgoing { Spacer(minLength: 64) }
+                    if message.direction == .outgoing { Spacer(minLength: 36) }
+                    if message.direction != .outgoing {
+                        ArchiveAvatarView(viewer: viewer, avatar: message.avatar, size: 34)
+                    }
                     VStack(alignment: .leading, spacing: 8) {
-                        if message.direction != .outgoing, let sender = message.senderDisplayName, !sender.isEmpty {
+                        if showSenderName, message.direction != .outgoing, let sender = message.senderDisplayName, !sender.isEmpty {
                             Text(sender).font(.caption).foregroundStyle(.secondary)
                         }
                         content
@@ -204,7 +242,10 @@ private struct ArchiveTimelineMessageRow: View {
                     .frame(maxWidth: 560, alignment: .leading)
                     .padding(12)
                     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 12))
-                    if message.direction != .outgoing { Spacer(minLength: 64) }
+                    if message.direction == .outgoing {
+                        ArchiveAvatarView(viewer: viewer, avatar: message.avatar, size: 34)
+                    }
+                    if message.direction != .outgoing { Spacer(minLength: 36) }
                 }
             }
         }
@@ -227,7 +268,7 @@ private struct ArchiveTimelineMessageRow: View {
         case .video: videoContent
         case .voice: voiceContent
         case .unknown:
-            Text("[Unsupported message type \(message.rawLocalType.map(String.init) ?? "unknown")]").foregroundStyle(.secondary)
+            Text("[暂不支持的消息]").foregroundStyle(.secondary)
         }
     }
 
@@ -237,9 +278,20 @@ private struct ArchiveTimelineMessageRow: View {
            let viewer,
            let url = viewer.mediaURL(for: media, preferDecoded: true),
            let image = NSImage(contentsOf: url) {
-            Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 360, alignment: .leading)
+            Button {
+                showsImagePreview = true
+            } label: {
+                Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 360, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showsImagePreview) {
+                ArchiveImagePreview(url: url)
+            }
+            if media.variant == .thumbnail {
+                Text("仅有缩略图").font(.caption2).foregroundStyle(.secondary)
+            }
         } else {
-            Label("Image unavailable — raw media archived", systemImage: "photo").foregroundStyle(.secondary)
+            Label("图片不可用，已归档原始媒体", systemImage: "photo").foregroundStyle(.secondary)
         }
     }
 
@@ -252,14 +304,14 @@ private struct ArchiveTimelineMessageRow: View {
             Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 220, alignment: .leading)
         }
         if let video = preferredVideo, let viewer, let url = viewer.mediaURL(for: video, preferDecoded: false) {
-            Button(expandedVideoID == video.id ? "Hide Video" : "Play Video \(durationLabel(video.duration))") {
+            Button(expandedVideoID == video.id ? "隐藏视频" : "播放视频 \(durationLabel(video.duration))") {
                 expandedVideoID = expandedVideoID == video.id ? nil : video.id
             }
             if expandedVideoID == video.id {
                 VideoPlayer(player: AVPlayer(url: url)).frame(maxWidth: 560, minHeight: 260, maxHeight: 360)
             }
         } else {
-            Label("Video unavailable — archive retains any available media", systemImage: "video").foregroundStyle(.secondary)
+            Label("视频不可用，归档保留了可用媒体", systemImage: "video").foregroundStyle(.secondary)
         }
     }
 
@@ -272,17 +324,17 @@ private struct ArchiveTimelineMessageRow: View {
             Button {
                 voicePlayback.toggle(id: voice.id, url: url)
             } label: {
-                Label(voicePlayback.playingID == voice.id ? "Pause \(durationLabel(voice.duration))" : "Play \(durationLabel(voice.duration))", systemImage: voicePlayback.playingID == voice.id ? "pause.fill" : "play.fill")
+                Label(voicePlayback.playingID == voice.id ? "暂停 \(voicePlayback.progressLabel(fallbackDuration: voice.duration))" : "播放 \(durationLabel(voice.duration))", systemImage: voicePlayback.playingID == voice.id ? "pause.fill" : "play.fill")
             }
         } else if message.media.contains(where: { $0.mediaType == .voice && $0.rawRelativePath != nil }) {
-            Label("Raw Silk voice archived — playback conversion is unavailable", systemImage: "waveform").foregroundStyle(.secondary)
+            Label("已归档原始 Silk 语音，暂无法播放转换结果", systemImage: "waveform").foregroundStyle(.secondary)
         } else {
-            Label("Voice media unavailable", systemImage: "waveform.slash").foregroundStyle(.secondary)
+            Label("语音媒体不可用", systemImage: "waveform.slash").foregroundStyle(.secondary)
         }
     }
 
     private var timestampLabel: String {
-        guard message.timestamp > 0 else { return "Unknown time" }
+        guard message.timestamp > 0 else { return "未知时间" }
         return Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .abbreviated, time: .shortened)
     }
 
@@ -307,17 +359,88 @@ private struct ArchiveTimelineMessageRow: View {
         return nil
     }
 
-    private func durationLabel(_ value: Double?) -> String { "\(max(0, Int((value ?? 0).rounded())))\"" }
+    private func durationLabel(_ value: Double?) -> String { "\(max(0, Int((value ?? 0).rounded()))) 秒" }
+}
+
+@MainActor
+private final class ArchiveAvatarImageCache {
+    static let shared = ArchiveAvatarImageCache()
+    private let values = NSCache<NSString, NSImage>()
+
+    func image(for key: String, load: () -> NSImage?) -> NSImage? {
+        if let image = values.object(forKey: key as NSString) { return image }
+        guard let image = load() else { return nil }
+        values.setObject(image, forKey: key as NSString, cost: max(1, Int(image.size.width * image.size.height)))
+        return image
+    }
+}
+
+@MainActor
+private struct ArchiveAvatarView: View {
+    let viewer: WeChatArchiveViewerDatabase?
+    let avatar: ArchiveViewerAvatar?
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: "person.fill").foregroundStyle(.secondary).padding(size * 0.25)
+            }
+        }
+        .frame(width: size, height: size)
+        .background(Color.secondary.opacity(0.14), in: Circle())
+        .clipShape(Circle())
+    }
+
+    private var image: NSImage? {
+        guard let avatar, let viewer, let url = viewer.avatarURL(for: avatar) else { return nil }
+        return ArchiveAvatarImageCache.shared.image(for: avatar.id) { NSImage(contentsOf: url) }
+    }
+}
+
+private struct ArchiveImagePreview: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var scale: CGFloat = 1
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("图片预览").font(.headline)
+                Spacer()
+                Button("适应窗口") { scale = 1 }
+                Button("100%") { scale = 1 }
+                Slider(value: $scale, in: 0.25...3).frame(width: 160)
+                Button("关闭", action: dismiss.callAsFunction)
+            }
+            .padding(.horizontal)
+            if let image = NSImage(contentsOf: url) {
+                ScrollView([.horizontal, .vertical]) {
+                    Image(nsImage: image).resizable().scaledToFit()
+                        .frame(width: max(1, image.size.width * scale), height: max(1, image.size.height * scale))
+                        .padding()
+                }
+            } else {
+                ContentUnavailableView("图片不可用", systemImage: "photo")
+            }
+        }
+        .frame(minWidth: 480, minHeight: 360)
+    }
 }
 
 @MainActor
 private final class VoicePlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var playingID: String?
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var duration: TimeInterval = 0
     private var player: AVAudioPlayer?
+    private var timer: Timer?
 
     func toggle(id: String, url: URL) {
         if playingID == id, let player, player.isPlaying {
-            player.pause(); playingID = nil; return
+            player.pause(); playingID = nil; timer?.invalidate(); timer = nil; return
         }
         stop()
         guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
@@ -326,11 +449,29 @@ private final class VoicePlaybackController: NSObject, ObservableObject, AVAudio
         player.prepareToPlay()
         guard player.play() else { self.player = nil; return }
         playingID = id
+        duration = player.duration
+        currentTime = player.currentTime
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let player = self.player else { return }
+                self.currentTime = player.currentTime
+            }
+        }
     }
 
-    func stop() { player?.stop(); player = nil; playingID = nil }
+    func progressLabel(fallbackDuration: Double?) -> String {
+        let total = duration > 0 ? duration : (fallbackDuration ?? 0)
+        return "\(seconds(currentTime)) / \(seconds(total))"
+    }
+
+    func stop() {
+        timer?.invalidate(); timer = nil
+        player?.stop(); player = nil; playingID = nil; currentTime = 0; duration = 0
+    }
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor [weak self] in self?.stop() }
     }
+
+    private func seconds(_ value: TimeInterval) -> String { "\(max(0, Int(value.rounded()))) 秒" }
 }
 #endif

@@ -19,6 +19,16 @@ public struct DecodedVoice: Equatable, Sendable {
 
 public protocol VoiceDecoder: Sendable {
     func decode(_ data: Data) throws -> DecodedVoice
+    func decode(_ data: Data, shouldCancel: @escaping @Sendable () -> Bool) throws -> DecodedVoice
+}
+
+public extension VoiceDecoder {
+    func decode(_ data: Data, shouldCancel: @escaping @Sendable () -> Bool) throws -> DecodedVoice {
+        guard !shouldCancel() else { throw VoiceDecoderError.cancelled }
+        let decoded = try decode(data)
+        guard !shouldCancel() else { throw VoiceDecoderError.cancelled }
+        return decoded
+    }
 }
 
 public enum VoiceDecoderError: Error, Equatable, Sendable {
@@ -27,6 +37,8 @@ public enum VoiceDecoderError: Error, Equatable, Sendable {
     case processFailed
     case invalidPCM
     case ioFailure
+    case timeout
+    case cancelled
 }
 
 /// Writes standards-compliant little-endian 16-bit PCM WAV. It deliberately
@@ -67,20 +79,32 @@ public struct SilkProcessVoiceDecoder: VoiceDecoder {
     private let executableURL: URL?
     private let outputSampleRate: Int
     private let maximumPCMBytes: Int
+    private let timeout: TimeInterval
 
     public init(
         executableURL: URL? = nil,
         outputSampleRate: Int = 24_000,
-        maximumPCMBytes: Int = 128 * 1_024 * 1_024
+        maximumPCMBytes: Int = 128 * 1_024 * 1_024,
+        timeout: TimeInterval = 30
     ) {
         self.executableURL = executableURL ?? Self.defaultExecutableURL()
         self.outputSampleRate = outputSampleRate
         self.maximumPCMBytes = maximumPCMBytes
+        self.timeout = min(max(timeout, 0.01), 300)
     }
 
+    /// Allows the export UI to warn before a long export starts. This probes
+    /// only a local executable path and never invokes the decoder.
+    public static var isAvailable: Bool { defaultExecutableURL() != nil }
+
     public func decode(_ data: Data) throws -> DecodedVoice {
+        try decode(data, shouldCancel: { false })
+    }
+
+    public func decode(_ data: Data, shouldCancel: @escaping @Sendable () -> Bool) throws -> DecodedVoice {
         guard VoiceFormatDetector().detect(data) == .silk else { throw VoiceDecoderError.unsupportedFormat }
         guard let executableURL, isSafeExecutable(executableURL) else { throw VoiceDecoderError.decoderUnavailable }
+        guard !shouldCancel() else { throw VoiceDecoderError.cancelled }
         // The supported SDK decoder resamples every accepted Silk stream to
         // the explicitly requested API rate, so this is output metadata, not
         // an assumption about the stream's original sampling rate.
@@ -107,7 +131,18 @@ public struct SilkProcessVoiceDecoder: VoiceDecoder {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             try process.run()
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning {
+                if shouldCancel() {
+                    process.terminate()
+                    throw VoiceDecoderError.cancelled
+                }
+                if Date() >= deadline {
+                    process.terminate()
+                    throw VoiceDecoderError.timeout
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
             guard process.terminationStatus == 0 else { throw VoiceDecoderError.processFailed }
             let metadata = try outputURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard metadata.isRegularFile == true, metadata.isSymbolicLink != true,

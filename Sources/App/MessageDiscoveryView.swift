@@ -20,7 +20,7 @@ struct MessageDiscoveryView: View {
     @State private var progress: MediaScanProgress?
     @State private var isWorking = false
     @State private var cancellation: MessageDiscoveryCancellation?
-    @State private var status = "Choose the Phase 1 plain SQLite directory. Its Phase 2 schema report will be loaded automatically."
+    @State private var status = "请选择第一阶段导出的普通 SQLite 目录。系统会自动加载其第二阶段结构报告。"
 
     private var canDiscover: Bool {
         exportRoot != nil && mediaRoot != nil && selectedCandidate != nil && !isWorking
@@ -32,44 +32,44 @@ struct MessageDiscoveryView: View {
 
     var body: some View {
         Form {
-            Section("Message Discovery") {
-                LabeledContent("Plain SQLite Directory") {
+            Section("消息发现") {
+                LabeledContent("普通 SQLite 目录") {
                     selectedDirectoryLabel(exportRoot)
                 }
                 HStack {
-                    Button("Choose Folder", action: chooseExportRoot)
-                    TextField("Paste absolute export path", text: $exportRootPath)
+                    Button("选择文件夹", action: chooseExportRoot)
+                    TextField("粘贴导出目录的绝对路径", text: $exportRootPath)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(useEnteredExportRoot)
-                    Button("Use Path", action: useEnteredExportRoot)
+                    Button("使用此路径", action: useEnteredExportRoot)
                 }
                 .disabled(isWorking)
 
-                LabeledContent("Phase 2 Schema Report") {
+                LabeledContent("第二阶段结构报告") {
                     if let schemaReportURL {
                         Label(displayPath(schemaReportURL), systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                             .lineLimit(2)
                             .textSelection(.enabled)
                     } else {
-                        Text("Not found — run Schema Discovery first").foregroundStyle(.secondary)
+                        Text("未找到，请先运行“结构发现”").foregroundStyle(.secondary)
                     }
                 }
                 Text("选择普通 SQLite 根目录后，应用只读取 `SchemaReports/schema-summary.json` 来列出消息表候选，不会重新读取聊天记录。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Button("Reload Phase 2 Report", action: loadDefaultSchemaReport)
+                Button("重新加载第二阶段报告", action: loadDefaultSchemaReport)
                     .disabled(exportRoot == nil || isWorking)
 
-                LabeledContent("Original WeChat Data Root") {
+                LabeledContent("原始微信数据根目录") {
                     selectedDirectoryLabel(mediaRoot)
                 }
                 HStack {
-                    Button("Choose Folder", action: chooseMediaRoot)
-                    TextField("Paste absolute original WeChat data path", text: $mediaRootPath)
+                    Button("选择文件夹", action: chooseMediaRoot)
+                    TextField("粘贴原始微信数据的绝对路径", text: $mediaRootPath)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(useEnteredMediaRoot)
-                    Button("Use Path", action: useEnteredMediaRoot)
+                    Button("使用此路径", action: useEnteredMediaRoot)
                 }
                 .disabled(isWorking)
                 Text("仅选择你本人有权访问的原始微信数据目录。扫描只读取文件头和必要的已缩小候选文件，不会复制、移动或修改媒体文件。")
@@ -77,19 +77,19 @@ struct MessageDiscoveryView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Candidate & Sample") {
-                Picker("Message Table", selection: $selectedCandidate) {
-                    Text("Select a discovered message table").tag(MessageTableCandidate?.none)
+            Section("候选表与样本") {
+                Picker("消息表", selection: $selectedCandidate) {
+                    Text("请选择已发现的消息表").tag(MessageTableCandidate?.none)
                     ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
-                        Text("Message table \(index + 1) · \(redactedRelativePath(candidate.databaseRelativePath)) · \(candidate.rowCount ?? 0) rows · score \(candidate.score)")
+                        Text("消息表 \(index + 1) · \(redactedRelativePath(candidate.databaseRelativePath)) · \(candidate.rowCount ?? 0) 行 · 评分 \(candidate.score)")
                             .tag(Optional(candidate))
                     }
                 }
                 .disabled(candidates.isEmpty || isWorking)
-                Picker("Sample Limit", selection: $sampleLimit) {
-                    Text("100 rows").tag(100)
-                    Text("250 rows").tag(250)
-                    Text("500 rows").tag(500)
+                Picker("样本数量", selection: $sampleLimit) {
+                    Text("100 行").tag(100)
+                    Text("250 行").tag(250)
+                    Text("500 行").tag(500)
                 }
                 .pickerStyle(.segmented)
                 .disabled(isWorking)
@@ -100,17 +100,17 @@ struct MessageDiscoveryView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 HStack {
-                    Button(isWorking ? "Discovering…" : "Discover Message & Media", action: discover)
+                    Button(isWorking ? "正在发现…" : "发现消息与媒体", action: discover)
                         .disabled(!canDiscover)
-                    Button("Resolve Image", action: resolveImage)
+                    Button("解析图片", action: resolveImage)
                         .disabled(!canResolveImage)
                     if isWorking {
-                        Button("Cancel") { cancellation?.cancel() }
+                        Button("取消") { cancellation?.cancel() }
                     }
                 }
                 if let progress, isWorking {
                     Label(
-                        "Scanned \(progress.scannedFileCount) files · \(progress.discoveredMediaCount) candidates · \(redactedRelativePath(progress.currentRelativePath))",
+                        "已扫描 \(progress.scannedFileCount) 个文件 · \(progress.discoveredMediaCount) 个候选项 · \(redactedRelativePath(progress.currentRelativePath))",
                         systemImage: "photo.stack"
                     )
                     .foregroundStyle(.secondary)
@@ -126,26 +126,26 @@ struct MessageDiscoveryView: View {
                 imageResolutionResults(imageResolutionRun)
             }
 
-            Section("Status") {
+            Section("状态") {
                 Text(status).textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .navigationTitle("Message Discovery")
+        .navigationTitle("消息发现")
     }
 
     @ViewBuilder
     private func discoveryResults(_ result: MessageMediaDiscoveryResult) -> some View {
-        Section("Limited Local Verification") {
+        Section("本机受限验证") {
             HStack(spacing: 18) {
-                MessageDiscoverySummaryValue(label: "Sampled", value: result.messageAnalysis.records.count)
-                MessageDiscoverySummaryValue(label: "Text-shaped", value: result.messageAnalysis.textCandidates.count)
-                MessageDiscoverySummaryValue(label: "Media refs", value: result.messageAnalysis.mediaReferences.count)
-                MessageDiscoverySummaryValue(label: "Resolved", value: result.links.filter { $0.resolvedFile != nil }.count)
+                MessageDiscoverySummaryValue(label: "已采样", value: result.messageAnalysis.records.count)
+                MessageDiscoverySummaryValue(label: "文本形态", value: result.messageAnalysis.textCandidates.count)
+                MessageDiscoverySummaryValue(label: "媒体引用", value: result.messageAnalysis.mediaReferences.count)
+                MessageDiscoverySummaryValue(label: "已解析", value: result.links.filter { $0.resolvedFile != nil }.count)
             }
             if let reportDirectory {
-                Button("Open Local Analysis Report") { NSWorkspace.shared.open(reportDirectory) }
+                Button("打开本机分析报告") { NSWorkspace.shared.open(reportDirectory) }
             }
             if !result.diagnostics.isEmpty {
                 Label(
@@ -159,41 +159,41 @@ struct MessageDiscoveryView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("Confirmed Field Mapping") {
+        Section("已确认字段映射") {
             ForEach(fieldMappingRows(result.messageAnalysis.fieldMapping), id: \.label) { row in
-                LabeledContent(row.label, value: row.column ?? "Not detected")
+                LabeledContent(row.label, value: row.column ?? "未检测到")
             }
             if let timestamp = result.messageAnalysis.timestampInference {
-                Text("Timestamp: \(timestamp.unit.rawValue), confidence \(String(format: "%.2f", timestamp.confidence)), valid \(timestamp.validSampleCount)/\(timestamp.sampleCount)")
+                Text("时间戳：\(timestamp.unit.rawValue)，置信度 \(String(format: "%.2f", timestamp.confidence))，有效 \(timestamp.validSampleCount)/\(timestamp.sampleCount)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
 
-        Section("Raw Type Observations") {
+        Section("原始类型观察") {
             if result.messageAnalysis.typeObservations.isEmpty {
-                Text("No integer raw type column was detected.").foregroundStyle(.secondary)
+                Text("未检测到整数原始类型字段。 ").foregroundStyle(.secondary)
             } else {
                 ForEach(result.messageAnalysis.typeObservations, id: \.rawType) { observation in
-                    Text("Raw type \(observation.rawType): \(observation.count) sampled rows")
+                    Text("原始类型 \(observation.rawType)：\(observation.count) 条采样记录")
                 }
             }
             ForEach(result.observedTypeMappings, id: \.rawType) { mapping in
                 Label(
-                    "Raw type \(mapping.rawType) → \(mapping.observedType.rawValue) (\(mapping.count) resolved local file(s), \(mapping.confidence.rawValue))",
+                    "原始类型 \(mapping.rawType) → \(mapping.observedType.rawValue)（\(mapping.count) 个已解析本机文件，\(mapping.confidence.rawValue)）",
                     systemImage: "checkmark.seal.fill"
                 )
                 .foregroundStyle(.green)
             }
         }
 
-        Section("Local Sample Preview") {
-            Text("Only this local window may show a shortened preview. It is neither written to the report nor sent over the network.")
+        Section("本机样本预览") {
+            Text("仅此本机窗口会显示简短预览。预览不会写入报告，也不会通过网络发送。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             ForEach(result.messageAnalysis.records.prefix(10), id: \.identity) { record in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Sampled local record")
+                    Text("本机采样记录")
                         .font(.caption.monospaced())
                     Text(sampleMetadata(record, analysis: result.messageAnalysis))
                         .font(.caption)
@@ -209,16 +209,16 @@ struct MessageDiscoveryView: View {
             }
         }
 
-        Section("Media File Resolution") {
+        Section("媒体文件解析") {
             if result.links.isEmpty {
-                Text("No structural media reference was found in the selected sample.").foregroundStyle(.secondary)
+                Text("在所选样本中未找到结构化媒体引用。 ").foregroundStyle(.secondary)
             } else {
                 ForEach(result.links, id: \.reference.sourceMessageIdentity) { link in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(link.reference.mediaTypeHint?.rawValue ?? "unknown") · \(link.confidence.rawValue)")
+                        Text("\(link.reference.mediaTypeHint?.rawValue ?? "未知") · \(link.confidence.rawValue)")
                         Text("\(link.diagnostic.rawValue)\(link.mappingRule.map { " · \($0.rawValue)" } ?? "") · \(link.reason)").font(.caption).foregroundStyle(.secondary)
                         if let file = link.resolvedFile {
-                            Text("Local media verified · \(file.format.rawValue) · \(file.fileSize) bytes\(file.imageDimensions.map { " · \($0.width) × \($0.height)" } ?? "")")
+                            Text("本机媒体已验证 · \(file.format.rawValue) · \(file.fileSize) 字节\(file.imageDimensions.map { " · \($0.width) × \($0.height)" } ?? "")")
                                 .font(.caption)
                                 .foregroundStyle(.green)
                         }
@@ -231,32 +231,32 @@ struct MessageDiscoveryView: View {
 
     @ViewBuilder
     private func imageResolutionResults(_ run: WeChatImageResolutionRun) -> some View {
-        Section("Image Resolution") {
-            LabeledContent("Type 3 rows sampled", value: "\(run.sampledRecordCount) (maximum 100)")
-            LabeledContent("Message resource") {
-                Text(run.resolution?.resourceMatch == .notFound ? "Not found" : "Found")
+        Section("图片解析") {
+            LabeledContent("已采样类型 3 记录", value: "\(run.sampledRecordCount)（最多 100 条）")
+            LabeledContent("消息资源") {
+                Text(run.resolution?.resourceMatch == .notFound ? "未找到" : "已找到")
                     .foregroundStyle(run.resolution?.resourceMatch == .notFound ? .orange : .green)
             }
-            LabeledContent("MessageResourceDetail") {
-                Text(run.resolution?.resourceDetailsFound == true ? "Found" : "Not found")
+            LabeledContent("消息资源详情") {
+                Text(run.resolution?.resourceDetailsFound == true ? "已找到" : "未找到")
                     .foregroundStyle(.secondary)
             }
-            LabeledContent("Local DAT") {
+            LabeledContent("本机 DAT") {
                 let assets = run.resolution?.assets
-                Text("main \(assets?.mainURL == nil ? "missing" : "found") · HD \(assets?.hdURL == nil ? "missing" : "found") · thumbnail \(assets?.thumbnailURL == nil ? "missing" : "found")")
+                Text("主图 \(assets?.mainURL == nil ? "缺失" : "已找到") · 高清 \(assets?.hdURL == nil ? "缺失" : "已找到") · 缩略图 \(assets?.thumbnailURL == nil ? "缺失" : "已找到")")
                     .foregroundStyle(.secondary)
             }
-            LabeledContent("DAT format", value: run.resolution?.datVersion.rawValue.uppercased() ?? "UNKNOWN")
-            LabeledContent("Image key") {
-                Text(run.keyVerificationPassed ? "Verified locally" : (run.keyDerivationAvailable ? "Candidate rejected" : "Unavailable"))
+            LabeledContent("DAT 格式", value: run.resolution?.datVersion.rawValue.uppercased() ?? "未知")
+            LabeledContent("图片密钥") {
+                Text(run.keyVerificationPassed ? "已在本机验证" : (run.keyDerivationAvailable ? "候选值已拒绝" : "不可用"))
                     .foregroundStyle(run.keyVerificationPassed ? .green : .orange)
             }
-            LabeledContent("Image decode") {
+            LabeledContent("图片解码") {
                 Text(imageDecodeSummary(run))
                     .foregroundStyle(run.imageConfirmed ? .green : .secondary)
             }
             if let imageReportDirectory {
-                Button("Open Local Image Resolution Report") { NSWorkspace.shared.open(imageReportDirectory) }
+                Button("打开本机图片解析报告") { NSWorkspace.shared.open(imageReportDirectory) }
             }
             if !run.diagnostics.isEmpty {
                 Label(run.diagnostics.map(\.rawValue).joined(separator: " · "), systemImage: "exclamationmark.triangle")
@@ -299,13 +299,13 @@ struct MessageDiscoveryView: View {
             selectedCandidate = candidates.first
             schemaReportURL = reportURL
             status = candidates.isEmpty
-                ? "Phase 2 report loaded, but it has no selectable message table candidates."
-                : "Phase 2 report loaded. Choose a source media root and run a limited discovery."
+                ? "第二阶段报告已加载，但其中没有可选择的消息表候选项。"
+                : "第二阶段报告已加载。请选择源媒体根目录并运行受限发现。"
         } catch {
             schemaReportURL = nil
             candidates = []
             selectedCandidate = nil
-            status = "Plain SQLite directory selected. Phase 2 report not found; run Schema Discovery first."
+            status = "已选择普通 SQLite 目录。未找到第二阶段报告；请先运行“结构发现”。"
         }
     }
 
@@ -327,8 +327,8 @@ struct MessageDiscoveryView: View {
         mediaRootPath = mediaRoot?.path() ?? ""
         resetDiscovery()
         status = schemaReportURL == nil
-            ? "Original data root selected. Load the Phase 2 schema report by selecting the plain SQLite directory."
-            : "Original data root selected. Ready for a limited message and media discovery."
+            ? "已选择原始数据根目录。请先选择普通 SQLite 目录以加载第二阶段结构报告。"
+            : "已选择原始数据根目录。可以执行受限的消息与媒体发现。"
     }
 
     private func resetDiscovery() {
@@ -345,12 +345,12 @@ struct MessageDiscoveryView: View {
         let cancellation = MessageDiscoveryCancellation()
         self.cancellation = cancellation
         isWorking = true
-        status = "Reading up to \(sampleLimit) rows and scanning selected local media…"
+        status = "正在读取最多 \(sampleLimit) 条记录并扫描所选本机媒体…"
         var continuation: AsyncStream<MediaScanProgress>.Continuation?
         let stream = AsyncStream<MediaScanProgress>(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         guard let continuation else {
             isWorking = false
-            status = "Could not start local discovery."
+            status = "无法开始本机发现。"
             return
         }
         let limit = sampleLimit
@@ -386,7 +386,7 @@ struct MessageDiscoveryView: View {
         imageResolutionRun = nil
         imageReportDirectory = nil
         isWorking = true
-        status = "Resolving at most 100 local type-3 rows through message_resource and one bounded attachment path…"
+        status = "正在通过 message_resource 和一个受限附件路径解析最多 100 条本机类型 3 记录…"
         let outputDirectory = exportRoot.appending(path: ".local-analysis")
         let worker = Task.detached(priority: .userInitiated) {
             ImageResolutionOperationResult(
@@ -413,21 +413,21 @@ struct MessageDiscoveryView: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             } else {
-                Text("Not selected").foregroundStyle(.secondary)
+                Text("未选择").foregroundStyle(.secondary)
             }
         }
     }
 
     private func fieldMappingRows(_ mapping: MessageFieldMapping) -> [(label: String, column: String?)] {
         [
-            ("Local message ID", mapping.messageIDColumn),
-            ("Server message ID", mapping.serverMessageIDColumn),
-            ("Timestamp", mapping.timestampColumn),
-            ("Raw type", mapping.rawTypeColumn),
-            ("Sender", mapping.senderColumn),
-            ("Conversation", mapping.conversationColumn),
-            ("Content", mapping.contentColumn),
-            ("Payload", mapping.payloadColumn)
+            ("本地消息 ID", mapping.messageIDColumn),
+            ("服务器消息 ID", mapping.serverMessageIDColumn),
+            ("时间戳", mapping.timestampColumn),
+            ("原始类型", mapping.rawTypeColumn),
+            ("发送者", mapping.senderColumn),
+            ("会话", mapping.conversationColumn),
+            ("内容", mapping.contentColumn),
+            ("载荷", mapping.payloadColumn)
         ]
     }
 
@@ -435,21 +435,21 @@ struct MessageDiscoveryView: View {
         let timestamp = analysis.fieldMapping.timestampColumn
             .flatMap { record.values[$0]?.integerValue }
             .flatMap { analysis.timestampInference?.date(for: $0) }
-            .map { $0.formatted(date: .abbreviated, time: .standard) } ?? "timestamp unavailable"
+            .map { $0.formatted(date: .abbreviated, time: .standard) } ?? "时间戳不可用"
         let rawType = analysis.fieldMapping.rawTypeColumn
             .flatMap { record.values[$0]?.integerValue }
-            .map(String.init) ?? "unavailable"
-        let kind = analysis.payloadInspections[record.identity]?.kind.rawValue ?? "unclassified"
-        return "time: \(timestamp) · raw type: \(rawType) · content kind: \(kind)"
+            .map(String.init) ?? "不可用"
+        let kind = analysis.payloadInspections[record.identity]?.kind.rawValue ?? "未分类"
+        return "时间：\(timestamp) · 原始类型：\(rawType) · 内容类型：\(kind)"
     }
 
     private func imageDecodeSummary(_ run: WeChatImageResolutionRun) -> String {
         func status(_ variant: WeChatImageDecodedVariant) -> String {
-            guard variant.present else { return "missing" }
-            guard variant.decoded else { return "not decoded" }
-            return variant.format?.rawValue.uppercased() ?? "decoded"
+            guard variant.present else { return "缺失" }
+            guard variant.decoded else { return "未解码" }
+            return variant.format?.rawValue.uppercased() ?? "已解码"
         }
-        return "thumbnail \(status(run.thumbnail)) · main \(status(run.main)) · HD \(status(run.hd))"
+        return "缩略图 \(status(run.thumbnail)) · 主图 \(status(run.main)) · 高清 \(status(run.hd))"
     }
 
     private func limitedPreview(_ record: SourceMessageRecord, analysis: MessageSampleAnalysis) -> String? {
@@ -544,15 +544,15 @@ private struct MessageDiscoveryOperationResult: Sendable {
             let locations = try MessageDiscoveryReportWriter().write(result, to: outputDirectory)
             self.result = result
             reportDirectory = locations.directoryURL
-            status = "Limited discovery complete. \(result.messageAnalysis.records.count) rows sampled; \(result.links.filter { $0.resolvedFile != nil }.count) media link(s) resolved."
+            status = "受限发现完成。已采样 \(result.messageAnalysis.records.count) 条记录；已解析 \(result.links.filter { $0.resolvedFile != nil }.count) 个媒体关联。"
         } catch is CancellationError {
             result = nil
             reportDirectory = nil
-            status = "Message and media discovery cancelled."
+            status = "消息与媒体发现已取消。"
         } catch {
             result = nil
             reportDirectory = nil
-            status = "Local discovery could not complete. Confirm the selected plain SQLite and original WeChat directories are accessible."
+            status = "本机发现未能完成。请确认所选普通 SQLite 目录和原始微信目录可访问。"
         }
     }
 }
@@ -578,12 +578,12 @@ private struct ImageResolutionOperationResult: Sendable {
             self.run = run
             reportDirectory = locations.directoryURL
             status = run.imageConfirmed
-                ? "Image chain verified locally. The local report contains status only."
-                : "Image resolution completed without a verified image. Review privacy-safe diagnostics."
+                ? "图片链路已在本机验证。本机报告仅包含状态。"
+                : "图片解析完成，但未验证图片。请查看保护隐私的诊断信息。"
         } catch {
             run = nil
             reportDirectory = nil
-            status = "Image resolution could not complete. Confirm the selected plain SQLite and original WeChat data directories are accessible."
+            status = "图片解析未能完成。请确认所选普通 SQLite 目录和原始微信数据目录可访问。"
         }
     }
 }

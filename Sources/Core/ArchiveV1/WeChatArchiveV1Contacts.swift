@@ -13,6 +13,8 @@ struct ArchiveV1ContactRecord: Sendable {
     let displayName: String
     let contactType: String?
     let numericID: Int64
+    let avatarSmallURL: String?
+    let avatarLargeURL: String?
 
     var isGroup: Bool { sourceIdentity.lowercased().hasSuffix("@chatroom") }
 }
@@ -132,7 +134,10 @@ private final class ContactSourceDatabase {
     }
 
     func contacts() throws -> [ArchiveV1ContactRecord] {
-        let statement = try prepare("SELECT id, username, alias, remark, nick_name, local_type FROM \"contact\" WHERE username IS NOT NULL AND username <> ''")
+        let columns = try tableColumns("contact")
+        let largeURL = columns.contains("big_head_url") ? "big_head_url" : "NULL"
+        let smallURL = columns.contains("small_head_url") ? "small_head_url" : "NULL"
+        let statement = try prepare("SELECT id, username, alias, remark, nick_name, local_type, \(largeURL), \(smallURL) FROM \"contact\" WHERE username IS NOT NULL AND username <> ''")
         defer { sqlite3_finalize(statement) }
         var values = [ArchiveV1ContactRecord]()
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -147,7 +152,9 @@ private final class ContactSourceDatabase {
                 nickname: nickname,
                 displayName: preferredDisplayName(remark: remark, nickname: nickname, alias: alias, sourceIdentity: sourceIdentity),
                 contactType: columnType(statement, 5) == SQLITE_NULL ? nil : String(sqlite3_column_int64(statement, 5)),
-                numericID: sqlite3_column_int64(statement, 0)
+                numericID: sqlite3_column_int64(statement, 0),
+                avatarSmallURL: text(statement, 7),
+                avatarLargeURL: text(statement, 6)
             ))
         }
         return values
@@ -183,6 +190,17 @@ private final class ContactSourceDatabase {
         let result = sqlite3_step(statement)
         guard result == SQLITE_ROW || result == SQLITE_DONE else { throw ArchiveError.databaseFailure }
         return result == SQLITE_ROW
+    }
+
+    private func tableColumns(_ tableName: String) throws -> Set<String> {
+        guard tableName == "contact" else { throw ArchiveError.invalidInput }
+        let statement = try prepare("PRAGMA table_info(\"contact\")")
+        defer { sqlite3_finalize(statement) }
+        var columns = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = text(statement, 1) { columns.insert(name.lowercased()) }
+        }
+        return columns
     }
 
     private func preferredDisplayName(remark: String?, nickname: String?, alias: String?, sourceIdentity: String) -> String {
