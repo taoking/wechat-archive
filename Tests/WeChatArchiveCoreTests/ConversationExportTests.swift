@@ -79,6 +79,28 @@ final class ConversationExportTests: XCTestCase {
         )
     }
 
+    func testConversationExporterKeepsEveryFormatAndAssetUnderAbsoluteOutputDirectory() throws {
+        let fixture = try makeFixture(conversationTitle: "绝对路径测试 😀")
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appendingPathComponent("Exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        for format in [ConversationExportFormat.html, .json, .markdown] {
+            let result = try WeChatArchiveConversationExporter().export(
+                archiveRoot: fixture.root,
+                conversationID: fixture.conversationID,
+                destinationRoot: destination,
+                format: format
+            )
+            let expectedPrimary = result.outputRoot.appendingPathComponent(format.filename)
+
+            XCTAssertEqual(result.outputRoot.deletingLastPathComponent().standardizedFileURL, destination.standardizedFileURL)
+            XCTAssertEqual(result.primaryFileURL.standardizedFileURL, expectedPrimary.standardizedFileURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: expectedPrimary.path(percentEncoded: false)))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: result.outputRoot.appendingPathComponent("avatars", isDirectory: true).path(percentEncoded: false)))
+        }
+    }
+
     func testTimelinePagingStateRetainsAnchorWhenPrependingOlderMessages() {
         var state = TimelinePagingState()
         XCTAssertEqual(state.replaceWithRecent(["m-3", "m-4"], hasMore: true), .scrollToBottom)
@@ -236,7 +258,7 @@ final class ConversationExportTests: XCTestCase {
             destinationRoot: realDestination,
             format: .html
         )
-        let exportedImages = URL(filePath: "media/images", relativeTo: result.outputRoot)
+        let exportedImages = result.outputRoot.appendingPathComponent("media/images", isDirectory: true)
         XCTAssertTrue((try FileManager.default.contentsOfDirectory(atPath: exportedImages.path(percentEncoded: false))).isEmpty)
     }
 

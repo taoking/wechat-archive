@@ -21,7 +21,7 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
         }
 
         let destination = try Self.validDestination(destinationRoot, archiveRoot: viewer.archiveRoot)
-        let staging = destination.appending(path: ".ChatExport-\(UUID().uuidString).staging")
+        let staging = destination.appendingPathComponent(".ChatExport-\(UUID().uuidString).staging", isDirectory: true)
         try Self.createPrivateDirectory(staging)
 
         do {
@@ -38,7 +38,7 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
                 shouldCancel: shouldCancel,
                 progress: progress
             )
-            let primary = staging.appending(path: format.filename)
+            let primary = staging.appendingPathComponent(format.filename)
             switch format {
             case .html:
                 try HTMLConversationExportWriter(context: context, fileURL: primary).write()
@@ -50,7 +50,7 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
             try context.checkCancellation()
             try FileManager.default.moveItem(at: staging, to: output)
             try Self.setPrivatePermissions(at: output)
-            return context.result(outputRoot: output, primaryFileURL: output.appending(path: format.filename))
+            return context.result(outputRoot: output, primaryFileURL: output.appendingPathComponent(format.filename))
         } catch {
             try? FileManager.default.removeItem(at: staging)
             if error is CancellationError || (error as? ConversationExportError) == .cancelled {
@@ -107,11 +107,11 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
         return bounded.isEmpty || bounded == "." || bounded == "-" ? "Conversation" : bounded
     }
 
-    /// Constructs a file URL from the filesystem path rather than the generic
-    /// URL appending API. This keeps a Unicode title as one file-system path
-    /// component instead of percent-encoding it twice on macOS Foundation.
+    /// The parent is an absolute, validated directory. Appending a single safe
+    /// path component avoids Foundation's platform-dependent relative file URL
+    /// resolution while preserving Unicode export names.
     private static func childDirectoryURL(named name: String, in parent: URL) -> URL {
-        URL(filePath: name, directoryHint: .isDirectory, relativeTo: parent).standardizedFileURL
+        parent.appendingPathComponent(name, isDirectory: true).standardizedFileURL
     }
 
     fileprivate static func createPrivateDirectory(_ url: URL) throws {
@@ -131,7 +131,7 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path(percentEncoded: false))
         let children = try FileManager.default.subpathsOfDirectory(atPath: url.path(percentEncoded: false))
         for child in children {
-            let childURL = URL(filePath: child, relativeTo: url)
+            let childURL = url.appendingPathComponent(child)
             let values = try childURL.resourceValues(forKeys: [.isDirectoryKey])
             try FileManager.default.setAttributes([.posixPermissions: values.isDirectory == true ? 0o700 : 0o600], ofItemAtPath: childURL.path(percentEncoded: false))
         }
@@ -170,10 +170,10 @@ private final class ExportContext {
         self.shouldCancel = shouldCancel
         self.progressHandler = progress
         self.totalMessages = conversation.messageCount
-        if options.includeImages { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appending(path: "media/images")) }
-        if options.includeVideo { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appending(path: "media/video")) }
-        if options.includeVoice { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appending(path: "media/voice")) }
-        if options.includeAvatars { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appending(path: "avatars")) }
+        if options.includeImages { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/images", isDirectory: true)) }
+        if options.includeVideo { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/video", isDirectory: true)) }
+        if options.includeVoice { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/voice", isDirectory: true)) }
+        if options.includeAvatars { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("avatars", isDirectory: true)) }
     }
 
     func checkCancellation() throws {
@@ -227,7 +227,7 @@ private final class ExportContext {
         let ext = safeExtension(source.pathExtension, fallback: kind == "voice" ? "wav" : kind == "video" ? "mp4" : "img")
         let token = ArchiveCryptography.sha256(Data(key.utf8)).prefix(24)
         let relative = "media/\(kind)/\(token).\(ext)"
-        let target = stagingRoot.appending(path: relative)
+        let target = stagingRoot.appendingPathComponent(relative)
         var priorBytes: Int64 = 0
         try CancellableFileCopier().copy(
             from: source,
@@ -258,7 +258,7 @@ private final class ExportContext {
         let ext = safeExtension(source.pathExtension, fallback: "img")
         let token = ArchiveCryptography.sha256(Data(("avatar:" + avatar.id).utf8)).prefix(24)
         let relative = "avatars/\(token).\(ext)"
-        let target = stagingRoot.appending(path: relative)
+        let target = stagingRoot.appendingPathComponent(relative)
         var priorBytes: Int64 = 0
         try CancellableFileCopier().copy(
             from: source,
