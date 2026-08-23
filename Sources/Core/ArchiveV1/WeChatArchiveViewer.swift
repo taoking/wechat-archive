@@ -148,17 +148,28 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         case .identifier: searchClause = "WHERE c.id = ?"
         }
         let statement = try prepare("""
-            SELECT c.id, c.display_name, c.conversation_type, MAX(m.timestamp), COUNT(m.id),
-                   (SELECT normalized_type FROM messages latest WHERE latest.conversation_id = c.id ORDER BY timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC LIMIT 1),
-                   (SELECT text_content FROM messages latest WHERE latest.conversation_id = c.id ORDER BY timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC LIMIT 1),
+            WITH filtered_conversations AS (
+                SELECT c.id, c.display_name, c.conversation_type, c.created_at, c.contact_id
+                FROM conversations c
+                \(searchClause)
+            ), latest_messages AS (
+                SELECT m.conversation_id, m.timestamp, m.normalized_type, m.text_content,
+                       COUNT(*) OVER (PARTITION BY m.conversation_id) AS message_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY m.conversation_id
+                           ORDER BY m.timestamp DESC, m.source_sequence DESC, m.source_database DESC, m.source_table DESC, m.\(sourceRowIDColumn) DESC
+                       ) AS timeline_rank
+                FROM messages m
+                JOIN filtered_conversations c ON c.id = m.conversation_id
+            )
+            SELECT c.id, c.display_name, c.conversation_type, latest.timestamp, COALESCE(latest.message_count, 0),
+                   latest.normalized_type, latest.text_content,
                    \(archiveSchemaVersion >= 3 ? "(SELECT COUNT(*) FROM group_members gm WHERE gm.conversation_id = c.id)" : "0")
                    \(avatarColumns)
-            FROM conversations c
-            LEFT JOIN messages m ON m.conversation_id = c.id
+            FROM filtered_conversations c
+            LEFT JOIN latest_messages latest ON latest.conversation_id = c.id AND latest.timeline_rank = 1
             \(avatarJoin)
-            \(searchClause)
-            GROUP BY c.id, c.display_name, c.conversation_type, c.created_at
-            ORDER BY COALESCE(MAX(m.timestamp), c.created_at, 0) DESC, c.id ASC
+            ORDER BY COALESCE(latest.timestamp, c.created_at, 0) DESC, c.id ASC
             LIMIT ? OFFSET ?
             """)
         defer { sqlite3_finalize(statement) }
@@ -359,7 +370,10 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         guard let normalizedType = normalizedType.flatMap(ArchiveV1NormalizedType.init(rawValue:)) else { return nil }
         switch normalizedType {
         case .text:
-            let compact = (textContent ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            let compact = (textContent ?? "")
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
             guard !compact.isEmpty else { return "[文本]" }
             return compact.count > 50 ? String(compact.prefix(50)) + "…" : compact
         case .image: return "[图片]"

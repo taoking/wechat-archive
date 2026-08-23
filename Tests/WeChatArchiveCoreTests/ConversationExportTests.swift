@@ -4,6 +4,119 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ConversationExportTests: XCTestCase {
+    func testCancellableFileCopierReportsChunkProgressAndRemovesPartialFile() throws {
+        let parent = FileManager.default.temporaryDirectory.appending(path: "CancellableCopy-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let sourceRoot = parent.appending(path: "Archive")
+        let stagingRoot = parent.appending(path: "Export.staging")
+        let source = sourceRoot.appending(path: "media/video/large.mp4")
+        let destination = stagingRoot.appending(path: "media/video/large.mp4")
+        try writePrivate(Data(repeating: 0x5A, count: 24 * 1_024 * 1_024), to: source)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        var progress = [Int64]()
+        XCTAssertThrowsError(try CancellableFileCopier().copy(
+            from: source,
+            to: destination,
+            sourceRoot: sourceRoot,
+            destinationRoot: stagingRoot,
+            shouldCancel: { (progress.last ?? 0) >= 16 * 1_024 * 1_024 },
+            progress: { progress.append($0) }
+        )) { error in
+            XCTAssertEqual(error as? ConversationExportError, .cancelled)
+        }
+
+        XCTAssertGreaterThanOrEqual(progress.count, 2)
+        XCTAssertGreaterThan(progress.last ?? 0, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path()))
+    }
+
+    func testConversationExporterCancelsDuringLargeVideoAndCleansStaging() throws {
+        let fixture = try makeFixture(largeVideoBytes: 24 * 1_024 * 1_024)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appending(path: "Exports")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        var copiedBytes: Int64 = 0
+
+        XCTAssertThrowsError(try WeChatArchiveConversationExporter().export(
+            archiveRoot: fixture.root,
+            conversationID: fixture.conversationID,
+            destinationRoot: destination,
+            format: .html,
+            shouldCancel: { copiedBytes >= 16 * 1_024 * 1_024 },
+            progress: { copiedBytes = $0.bytesCopied }
+        )) { error in
+            XCTAssertEqual(error as? ConversationExportError, .cancelled)
+        }
+
+        XCTAssertGreaterThanOrEqual(copiedBytes, 16 * 1_024 * 1_024)
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: destination.path())
+        XCTAssertFalse(siblings.contains { $0.contains(".ChatExport-") })
+        XCTAssertFalse(siblings.contains { $0.hasPrefix("ChatExport-") })
+    }
+
+    func testConversationExporterUsesUnicodeSafeOutputFolderWithoutPathEscape() throws {
+        let fixture = try makeFixture(conversationTitle: "测试 / : 群 😀")
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appending(path: "Exports")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let result = try WeChatArchiveConversationExporter().export(
+            archiveRoot: fixture.root,
+            conversationID: fixture.conversationID,
+            destinationRoot: destination,
+            format: .markdown
+        )
+
+        let outputName = (result.outputRoot.path(percentEncoded: false) as NSString).lastPathComponent
+        XCTAssertTrue(outputName.contains("测试"))
+        XCTAssertTrue(outputName.contains("😀"))
+        XCTAssertFalse(outputName.contains("/"))
+        XCTAssertFalse(outputName.contains(":"))
+        XCTAssertEqual(
+            result.outputRoot.deletingLastPathComponent().path(percentEncoded: false),
+            destination.standardizedFileURL.path(percentEncoded: false)
+        )
+    }
+
+    func testTimelinePagingStateRetainsAnchorWhenPrependingOlderMessages() {
+        var state = TimelinePagingState()
+        XCTAssertEqual(state.replaceWithRecent(["m-3", "m-4"], hasMore: true), .scrollToBottom)
+        XCTAssertEqual(state.prependOlder(["m-1", "m-2"], hasMore: false), .preserveAnchor("m-3"))
+        XCTAssertEqual(state.messageIDs, ["m-1", "m-2", "m-3", "m-4"])
+        XCTAssertFalse(state.hasMore)
+    }
+
+    func testSearchDebouncerOnlyAcceptsMostRecentQueryTicket() {
+        var debouncer = SearchDebouncer()
+        let a = debouncer.schedule()
+        let ab = debouncer.schedule()
+        let abc = debouncer.schedule()
+
+        XCTAssertFalse(debouncer.shouldRun(ticket: a))
+        XCTAssertFalse(debouncer.shouldRun(ticket: ab))
+        XCTAssertTrue(debouncer.shouldRun(ticket: abc))
+        debouncer.cancelAll()
+        XCTAssertFalse(debouncer.shouldRun(ticket: abc))
+    }
+
+    func testConversationTimestampFormatterUsesChatStyleDates() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 23, hour: 14, minute: 32)))
+        let today = try XCTUnwrap(calendar.date(byAdding: .minute, value: -3, to: now))
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: now))
+        let saturday = try XCTUnwrap(calendar.date(byAdding: .day, value: -2, to: now))
+        let earlierThisYear = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 2)))
+        let priorYear = try XCTUnwrap(calendar.date(from: DateComponents(year: 2025, month: 12, day: 31)))
+
+        XCTAssertEqual(ConversationTimestampFormatter.string(for: today, now: now, calendar: calendar), "14:29")
+        XCTAssertEqual(ConversationTimestampFormatter.string(for: yesterday, now: now, calendar: calendar), "昨天")
+        XCTAssertEqual(ConversationTimestampFormatter.string(for: saturday, now: now, calendar: calendar), "周五")
+        XCTAssertEqual(ConversationTimestampFormatter.string(for: earlierThisYear, now: now, calendar: calendar), "5月2日")
+        XCTAssertEqual(ConversationTimestampFormatter.string(for: priorYear, now: now, calendar: calendar), "2025/12/31")
+    }
+
     func testConversationExporterWritesEscapedPortableHTMLWithMediaAndAvatars() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
@@ -123,8 +236,8 @@ final class ConversationExportTests: XCTestCase {
             destinationRoot: realDestination,
             format: .html
         )
-        let exportedImages = result.outputRoot.appending(path: "media/images")
-        XCTAssertTrue((try FileManager.default.contentsOfDirectory(atPath: exportedImages.path())).isEmpty)
+        let exportedImages = URL(filePath: "media/images", relativeTo: result.outputRoot)
+        XCTAssertTrue((try FileManager.default.contentsOfDirectory(atPath: exportedImages.path(percentEncoded: false))).isEmpty)
     }
 
     func testConversationExporterStreamsFiveThousandMessagesInPages() throws {
@@ -160,6 +273,9 @@ final class ConversationExportTests: XCTestCase {
         preferences.lastPlainSQLiteRoot = URL(fileURLWithPath: "/fixture/plain")
         preferences.lastAccountRoot = URL(fileURLWithPath: "/fixture/account")
         preferences.lastArchiveParentDirectory = URL(fileURLWithPath: "/fixture/archives")
+        preferences.lastDatabaseStorageRoot = URL(fileURLWithPath: "/fixture/db_storage")
+        preferences.lastPlainSQLiteExportParent = URL(fileURLWithPath: "/fixture/plain-export")
+        preferences.lastKeyMapPath = URL(fileURLWithPath: "/fixture/all_keys.json")
         preferences.lastConversationExportDirectory = URL(fileURLWithPath: "/fixture/exports")
         preferences.lastConversationExportFormat = .markdown
         preferences.recordOpenedArchive(root)
@@ -168,12 +284,27 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertEqual(restored.lastPlainSQLiteRoot?.path, "/fixture/plain")
         XCTAssertEqual(restored.lastAccountRoot?.path, "/fixture/account")
         XCTAssertEqual(restored.lastArchiveParentDirectory?.path, "/fixture/archives")
+        XCTAssertEqual(restored.lastDatabaseStorageRoot?.path, "/fixture/db_storage")
+        XCTAssertEqual(restored.lastPlainSQLiteExportParent?.path, "/fixture/plain-export")
+        XCTAssertEqual(restored.lastKeyMapPath?.path, "/fixture/all_keys.json")
         XCTAssertEqual(restored.lastConversationExportDirectory?.path, "/fixture/exports")
         XCTAssertEqual(restored.lastConversationExportFormat, .markdown)
         XCTAssertEqual(try restored.validLastOpenedArchive()?.standardizedFileURL, root.standardizedFileURL)
-        XCTAssertFalse(defaults.dictionaryRepresentation().keys
-            .filter { $0.hasPrefix("workspace.") }
-            .contains { $0.localizedCaseInsensitiveContains("key") || $0.localizedCaseInsensitiveContains("aes") || $0.localizedCaseInsensitiveContains("password") })
+        let allowedWorkspaceKeys: Set<String> = [
+            "workspace.plainSQLiteRoot", "workspace.accountRoot", "workspace.archiveParent",
+            "workspace.databaseStorageRoot", "workspace.plainSQLiteExportParent", "workspace.databaseKeyMap",
+            "workspace.lastArchive", "workspace.recentArchives", "workspace.conversationExportDirectory",
+            "workspace.conversationExportFormat", "workspace.selectedConversation", "workspace.reopenLastArchive"
+        ]
+        let storedWorkspaceKeys = Set(defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("workspace.") })
+        XCTAssertTrue(storedWorkspaceKeys.isSubset(of: allowedWorkspaceKeys))
+        XCTAssertFalse(storedWorkspaceKeys.contains { $0.localizedCaseInsensitiveContains("aes") || $0.localizedCaseInsensitiveContains("password") || $0.localizedCaseInsensitiveContains("secret") })
+        XCTAssertEqual(defaults.data(forKey: "workspace.databaseKeyMap")
+            .flatMap { try? JSONDecoder().decode(PersistedFolderLocation.self, from: $0) }?.path, "/fixture/all_keys.json")
+
+        let unicode = URL(filePath: "/fixture/归档 😀", directoryHint: .isDirectory)
+        preferences.lastConversationExportDirectory = unicode
+        XCTAssertEqual(WorkspacePreferences(defaults: defaults).lastConversationExportDirectory?.path(percentEncoded: false).trimmingCharacters(in: CharacterSet(charactersIn: "/")), "fixture/归档 😀")
 
         try FileManager.default.removeItem(at: root)
         XCTAssertNil(try restored.validLastOpenedArchive())
@@ -214,22 +345,47 @@ final class ConversationExportTests: XCTestCase {
 
         XCTAssertGreaterThan(privateHTML.messagesExported, 0)
         XCTAssertGreaterThan(groupJSON.messagesExported, 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: privateHTML.primaryFileURL.path()))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: privateHTML.primaryFileURL.path(percentEncoded: false)))
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(contentsOf: groupJSON.primaryFileURL)))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: groupMarkdown.primaryFileURL.path()))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: groupMarkdown.primaryFileURL.path(percentEncoded: false)))
+
+        // Aggregate timing only: never print paths, names, IDs, or content.
+        let initialStart = Date()
+        let page = try viewer.conversationPage(limit: 100)
+        let initialMilliseconds = Date().timeIntervalSince(initialStart) * 1_000
+        guard let conversation = page.items.first else { throw XCTSkip("The local archive has no conversations.") }
+
+        let searchStart = Date()
+        _ = try viewer.searchConversationPage(query: String(conversation.title.prefix(1)), limit: 100)
+        let searchMilliseconds = Date().timeIntervalSince(searchStart) * 1_000
+        let recentStart = Date()
+        let recent = try viewer.recentMessagePage(conversationID: conversation.id, limit: 100)
+        let recentMilliseconds = Date().timeIntervalSince(recentStart) * 1_000
+        let olderStart = Date()
+        _ = try viewer.recentMessagePage(conversationID: conversation.id, offset: recent.items.count, limit: 100)
+        let olderMilliseconds = Date().timeIntervalSince(olderStart) * 1_000
+
+        let timelineIndex = try hasTimelineIndex(in: URL(fileURLWithPath: rootPath).appending(path: "archive.sqlite"))
+        print("Archive viewer query performance (ms): page=\(Int(initialMilliseconds)) search=\(Int(searchMilliseconds)) recent100=\(Int(recentMilliseconds)) older100=\(Int(olderMilliseconds)) timelineIndex=\(timelineIndex ? "yes" : "no")")
+        XCTAssertGreaterThanOrEqual(recent.items.count, 0)
     }
 
-    private func makeFixture(messageCount: Int = 5) throws -> ConversationExportFixture {
+    private func makeFixture(
+        messageCount: Int = 5,
+        conversationTitle: String = "Fixture Group 中文",
+        largeVideoBytes: Int? = nil
+    ) throws -> ConversationExportFixture {
         let parent = FileManager.default.temporaryDirectory.appending(path: "ConversationExport-\(UUID().uuidString)")
         let root = parent.appending(path: "WeChatArchive")
         let database = try WeChatArchiveV1Database(url: root.appending(path: "archive.sqlite"))
         defer { database.close() }
         let contactID = try database.upsertContact(sourceIdentity: "fixture-contact", alias: nil, remark: nil, nickname: "Fixture sender", displayName: "Fixture sender", contactType: "contact")
         try database.setAccount(sourceIdentity: "fixture-owner", displayName: "Fixture owner")
-        let conversationID = try database.upsertConversation(sourceIdentity: "fixture-conversation", type: .group, displayName: "Fixture Group 中文", contactID: contactID)
+        let conversationID = try database.upsertConversation(sourceIdentity: "fixture-conversation", type: .group, displayName: conversationTitle, contactID: contactID)
         let base = root.appending(path: "media")
         try writePrivate(Data([0x89, 0x50, 0x4E, 0x47]), to: base.appending(path: "images/decoded/image-asset.png"))
-        try writePrivate(Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]), to: base.appending(path: "video/play/video-asset.mp4"))
+        let videoData = largeVideoBytes.map { Data(repeating: 0x66, count: $0) } ?? Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])
+        try writePrivate(videoData, to: base.appending(path: "video/play/video-asset.mp4"))
         try writePrivate(Data("RIFF----WAVEfmt ".utf8), to: base.appending(path: "voice/decoded/voice-asset.wav"))
         try writePrivate(Data([0x89, 0x50, 0x4E, 0x47]), to: base.appending(path: "avatars/contacts/contact-avatar.png"))
         try writePrivate(Data([0x89, 0x50, 0x4E, 0x47]), to: base.appending(path: "avatars/account/account-avatar.png"))
@@ -267,7 +423,7 @@ final class ConversationExportTests: XCTestCase {
             case .voice:
                 _ = try database.insertMediaAsset(messageID: message.id, assetID: "voice-asset", mediaType: .voice, variant: .playback, status: .decoded, sourceFormat: "silk", decodedFormat: "wav", rawArchivePath: nil, decodedArchivePath: "media/voice/decoded/voice-asset.wav", rawSize: nil, decodedSize: 16, width: nil, height: nil, duration: 8, rawSHA256: nil, decodedSHA256: ArchiveCryptography.sha256(Data("RIFF----WAVEfmt ".utf8)), sourceFileBase: "private")
             case .video:
-                _ = try database.insertMediaAsset(messageID: message.id, assetID: "video-asset", mediaType: .video, variant: .play, status: .rawArchived, sourceFormat: "mp4", decodedFormat: nil, rawArchivePath: "media/video/play/video-asset.mp4", decodedArchivePath: nil, rawSize: 8, decodedSize: nil, width: 2, height: 2, duration: 9, rawSHA256: ArchiveCryptography.sha256(Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])), decodedSHA256: nil, sourceFileBase: "private")
+                _ = try database.insertMediaAsset(messageID: message.id, assetID: "video-asset", mediaType: .video, variant: .play, status: .rawArchived, sourceFormat: "mp4", decodedFormat: nil, rawArchivePath: "media/video/play/video-asset.mp4", decodedArchivePath: nil, rawSize: Int64(videoData.count), decodedSize: nil, width: 2, height: 2, duration: 9, rawSHA256: ArchiveCryptography.sha256(videoData), decodedSHA256: nil, sourceFileBase: "private")
             case .text, .unknown: break
             }
         }

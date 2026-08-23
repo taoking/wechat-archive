@@ -85,52 +85,55 @@ public final class WeChatArchiveConversationExporter: @unchecked Sendable {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let safeTitle = safeFilename(title)
         let base = "ChatExport-\(safeTitle)-\(formatter.string(from: date))"
-        var candidate = destination.appending(path: base)
+        var candidate = childDirectoryURL(named: base, in: destination)
         var suffix = 2
-        while FileManager.default.fileExists(atPath: candidate.path()) {
-            candidate = destination.appending(path: "\(base)-\(suffix)")
+        while FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) {
+            candidate = childDirectoryURL(named: "\(base)-\(suffix)", in: destination)
             suffix += 1
         }
         return candidate
     }
 
     private static func safeFilename(_ text: String) -> String {
-        let transformed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // `URL.appending(path:)` treats percent-encoded non-ASCII components
-        // differently across Foundation implementations. Keep the directory
-        // component ASCII-only; the human-readable title remains in the
-        // exported document itself.
-        let value = transformed.unicodeScalars.map { scalar -> String in
-            switch scalar.value {
-            case 48...57, 65...90, 97...122, 45, 95: return String(scalar)
-            default: return "-"
-            }
+        let forbidden = CharacterSet(charactersIn: "/:\\")
+            .union(.controlCharacters)
+        let cleaned = text.unicodeScalars.map { scalar -> String in
+            forbidden.contains(scalar) ? "-" : String(scalar)
         }.joined()
-            .replacingOccurrences(of: "--", with: "-")
-        let compact = value.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return compact.isEmpty ? "Conversation" : String(compact.prefix(64))
+        let compact = cleaned
+            .replacingOccurrences(of: "..", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bounded = String(compact.prefix(80))
+        return bounded.isEmpty || bounded == "." || bounded == "-" ? "Conversation" : bounded
+    }
+
+    /// Constructs a file URL from the filesystem path rather than the generic
+    /// URL appending API. This keeps a Unicode title as one file-system path
+    /// component instead of percent-encoding it twice on macOS Foundation.
+    private static func childDirectoryURL(named name: String, in parent: URL) -> URL {
+        URL(filePath: name, directoryHint: .isDirectory, relativeTo: parent).standardizedFileURL
     }
 
     fileprivate static func createPrivateDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path())
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path(percentEncoded: false))
     }
 
     fileprivate static func createPrivateFile(_ url: URL) throws -> FileHandle {
-        guard FileManager.default.createFile(atPath: url.path(), contents: nil, attributes: [.posixPermissions: 0o600]) else {
+        guard FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw ConversationExportError.ioFailure
         }
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path())
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path(percentEncoded: false))
         return try FileHandle(forWritingTo: url)
     }
 
     fileprivate static func setPrivatePermissions(at url: URL) throws {
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path())
-        let children = try FileManager.default.subpathsOfDirectory(atPath: url.path())
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path(percentEncoded: false))
+        let children = try FileManager.default.subpathsOfDirectory(atPath: url.path(percentEncoded: false))
         for child in children {
-            let childURL = url.appending(path: child)
+            let childURL = URL(filePath: child, relativeTo: url)
             let values = try childURL.resourceValues(forKeys: [.isDirectoryKey])
-            try FileManager.default.setAttributes([.posixPermissions: values.isDirectory == true ? 0o700 : 0o600], ofItemAtPath: childURL.path())
+            try FileManager.default.setAttributes([.posixPermissions: values.isDirectory == true ? 0o700 : 0o600], ofItemAtPath: childURL.path(percentEncoded: false))
         }
     }
 }
@@ -225,9 +228,19 @@ private final class ExportContext {
         let token = ArchiveCryptography.sha256(Data(key.utf8)).prefix(24)
         let relative = "media/\(kind)/\(token).\(ext)"
         let target = stagingRoot.appending(path: relative)
-        try FileManager.default.copyItem(at: source, to: target)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path())
-        bytesCopied += Int64((try target.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        var priorBytes: Int64 = 0
+        try CancellableFileCopier().copy(
+            from: source,
+            to: target,
+            sourceRoot: viewer.archiveRoot,
+            destinationRoot: stagingRoot,
+            shouldCancel: { [shouldCancel] in shouldCancel?() == true },
+            progress: { copied in
+                self.bytesCopied += copied - priorBytes
+                priorBytes = copied
+                self.reportProgress()
+            }
+        )
         assetPaths[key] = relative
         switch kind {
         case "images": imagesCopied += 1
@@ -246,9 +259,19 @@ private final class ExportContext {
         let token = ArchiveCryptography.sha256(Data(("avatar:" + avatar.id).utf8)).prefix(24)
         let relative = "avatars/\(token).\(ext)"
         let target = stagingRoot.appending(path: relative)
-        try FileManager.default.copyItem(at: source, to: target)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path())
-        bytesCopied += Int64((try target.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        var priorBytes: Int64 = 0
+        try CancellableFileCopier().copy(
+            from: source,
+            to: target,
+            sourceRoot: viewer.archiveRoot,
+            destinationRoot: stagingRoot,
+            shouldCancel: { [shouldCancel] in shouldCancel?() == true },
+            progress: { copied in
+                self.bytesCopied += copied - priorBytes
+                priorBytes = copied
+                self.reportProgress()
+            }
+        )
         avatarPaths[avatar.id] = relative
         avatarsCopied += 1
         return relative
@@ -263,6 +286,17 @@ private final class ExportContext {
     private func isSafeRegularFile(_ url: URL) throws -> Bool {
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
+    private func reportProgress() {
+        progressHandler?(.init(
+            messagesExported: messagesExported,
+            totalMessages: totalMessages,
+            imagesCopied: imagesCopied,
+            voiceCopied: voiceCopied,
+            videoCopied: videoCopied,
+            bytesCopied: bytesCopied
+        ))
     }
 }
 
@@ -322,7 +356,7 @@ private struct HTMLConversationExportWriter: ConversationExportWriter {
         <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <title>\(htmlEscape(conversation.title))</title>
         <style>
-        :root{color-scheme:light dark} body{margin:0;background:#f3f5f7;color:#1d1d1f;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;padding:16px max(20px,calc((100% - 900px)/2));background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-bottom:1px solid #ddd}.header-avatar,.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#c8cdd4}.placeholder{display:inline-block}.meta{color:#6d7178;font-size:12px}main{max-width:900px;margin:auto;padding:24px 16px 48px}.day{margin:22px auto 12px;width:max-content;color:#777;background:#e4e7ea;border-radius:12px;padding:4px 10px;font-size:12px}.row{display:flex;align-items:flex-end;gap:8px;margin:9px 0}.row.outgoing{justify-content:flex-end}.row.system{justify-content:center}.bubble{max-width:66%;padding:10px 12px;border-radius:14px;background:#fff;box-shadow:0 1px 1px #0000000d;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{background:#ccefb8}.system .bubble,.unknown{color:#70757c;background:#e7e9eb;font-size:13px}.sender{margin:0 0 4px;font-size:12px;color:#747980}.message-avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:#c8cdd4}.media-image{display:block;max-width:min(480px,100%);max-height:420px;border-radius:8px}.media-video{display:block;max-width:min(560px,100%);max-height:420px;border-radius:8px}.media-audio{max-width:320px;width:100%}.missing{color:#777;font-size:13px}@media (prefers-color-scheme:dark){body{background:#1e2023;color:#eee}.header{background:rgba(35,37,40,.92);border-color:#43464b}.bubble{background:#303338}.outgoing .bubble{background:#365d2b}.day,.system .bubble{background:#3b3e42}.meta,.sender{color:#aab0b8}}</style></head><body>
+        :root{color-scheme:light dark} body{margin:0;background:#f3f5f7;color:#1d1d1f;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;padding:16px max(20px,calc((100% - 900px)/2));background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-bottom:1px solid #ddd}.header-avatar,.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#c8cdd4}.placeholder{display:inline-block}.meta{color:#6d7178;font-size:12px}main{max-width:900px;margin:auto;padding:24px 16px 48px}.day{margin:22px auto 12px;width:max-content;color:#777;background:#e4e7ea;border-radius:12px;padding:4px 10px;font-size:12px}.row{display:flex;align-items:flex-end;gap:8px;margin:9px 0}.row.outgoing{justify-content:flex-end}.row.system{justify-content:center}.bubble{max-width:66%;padding:10px 12px;border-radius:14px;background:#fff;box-shadow:0 1px 1px #0000000d;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{background:#ccefb8}.system .bubble,.unknown{color:#70757c;background:#e7e9eb;font-size:13px}.sender{margin:0 0 4px;font-size:12px;color:#747980}.message-avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:#c8cdd4}.media-image{display:block;max-width:min(480px,100%);max-height:420px;border-radius:8px}.media-video{display:block;max-width:min(560px,100%);max-height:420px;border-radius:8px}.media-audio{max-width:320px;width:100%}.missing{color:#777;font-size:13px}@media print{body{background:#fff;color:#111}.header{position:static;background:#fff;backdrop-filter:none}.row{break-inside:avoid}.media-video,.media-audio{max-width:100%}}@media (prefers-color-scheme:dark){body{background:#1e2023;color:#eee}.header{background:rgba(35,37,40,.92);border-color:#43464b}.bubble{background:#303338}.outgoing .bubble{background:#365d2b}.day,.system .bubble{background:#3b3e42}.meta,.sender{color:#aab0b8}}</style></head><body>
         <header class="header">\(avatar)<div><strong>\(htmlEscape(conversation.title))</strong><div class="meta">\(conversation.messageCount) 条消息 · 导出于 \(htmlEscape(exportTimestamp(Date())))</div></div></header><main>
         """
     }

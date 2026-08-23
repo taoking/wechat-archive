@@ -82,7 +82,7 @@ public struct PersistedFolderLocation: Codable, Equatable, Sendable {
     }
 
     public init(_ url: URL) {
-        self.init(path: url.standardizedFileURL.path())
+        self.init(path: url.standardizedFileURL.path(percentEncoded: false))
     }
 
     public var url: URL { URL(fileURLWithPath: path).standardizedFileURL }
@@ -95,6 +95,11 @@ public final class WorkspacePreferences: @unchecked Sendable {
         static let plainRoot = "workspace.plainSQLiteRoot"
         static let accountRoot = "workspace.accountRoot"
         static let archiveParent = "workspace.archiveParent"
+        static let databaseStorageRoot = "workspace.databaseStorageRoot"
+        static let plainSQLiteExportParent = "workspace.plainSQLiteExportParent"
+        // This stores only the location of the user-selected JSON file. Its
+        // contents are never decoded or persisted by WorkspacePreferences.
+        static let databaseKeyMap = "workspace.databaseKeyMap"
         static let lastArchive = "workspace.lastArchive"
         static let recentArchives = "workspace.recentArchives"
         static let exportDirectory = "workspace.conversationExportDirectory"
@@ -115,6 +120,9 @@ public final class WorkspacePreferences: @unchecked Sendable {
     public var lastPlainSQLiteRoot: URL? { get { location(for: Key.plainRoot)?.url } set { set(location: newValue, for: Key.plainRoot) } }
     public var lastAccountRoot: URL? { get { location(for: Key.accountRoot)?.url } set { set(location: newValue, for: Key.accountRoot) } }
     public var lastArchiveParentDirectory: URL? { get { location(for: Key.archiveParent)?.url } set { set(location: newValue, for: Key.archiveParent) } }
+    public var lastDatabaseStorageRoot: URL? { get { location(for: Key.databaseStorageRoot)?.url } set { set(location: newValue, for: Key.databaseStorageRoot) } }
+    public var lastPlainSQLiteExportParent: URL? { get { location(for: Key.plainSQLiteExportParent)?.url } set { set(location: newValue, for: Key.plainSQLiteExportParent) } }
+    public var lastKeyMapPath: URL? { get { location(for: Key.databaseKeyMap)?.url } set { set(location: newValue, for: Key.databaseKeyMap) } }
     public var lastOpenedArchiveRoot: URL? { get { location(for: Key.lastArchive)?.url } set { set(location: newValue, for: Key.lastArchive) } }
     public var lastConversationExportDirectory: URL? { get { location(for: Key.exportDirectory)?.url } set { set(location: newValue, for: Key.exportDirectory) } }
     public var lastSelectedConversationID: String? { get { defaults.string(forKey: Key.selectedConversation) } set { defaults.set(newValue, forKey: Key.selectedConversation) } }
@@ -144,7 +152,7 @@ public final class WorkspacePreferences: @unchecked Sendable {
             return root
         } catch {
             lastOpenedArchiveRoot = nil
-            set(locations: locations(for: Key.recentArchives).filter { $0.path != root.path() }, for: Key.recentArchives)
+            set(locations: locations(for: Key.recentArchives).filter { $0.path != root.path(percentEncoded: false) }, for: Key.recentArchives)
             return nil
         }
     }
@@ -168,6 +176,87 @@ public final class WorkspacePreferences: @unchecked Sendable {
     private func set(locations: [PersistedFolderLocation], for key: String) {
         guard let data = try? JSONEncoder().encode(locations) else { return }
         defaults.set(data, forKey: key)
+    }
+}
+
+/// Describes whether a timeline update should reach the newest message or
+/// retain the first currently visible message after older entries are added.
+/// The SwiftUI layer owns viewport observation; this state keeps its paging
+/// decision deterministic and testable.
+public enum TimelineScrollInstruction: Equatable, Sendable {
+    case none
+    case scrollToBottom
+    case preserveAnchor(String)
+}
+
+public struct TimelinePagingState: Equatable, Sendable {
+    public private(set) var messageIDs: [String] = []
+    public private(set) var hasMore = false
+
+    public init() {}
+
+    @discardableResult
+    public mutating func replaceWithRecent(_ ids: [String], hasMore: Bool) -> TimelineScrollInstruction {
+        messageIDs = ids
+        self.hasMore = hasMore
+        return .scrollToBottom
+    }
+
+    @discardableResult
+    public mutating func prependOlder(_ ids: [String], hasMore: Bool) -> TimelineScrollInstruction {
+        let anchor = messageIDs.first
+        messageIDs.insert(contentsOf: ids, at: 0)
+        self.hasMore = hasMore
+        return anchor.map(TimelineScrollInstruction.preserveAnchor) ?? .none
+    }
+}
+
+/// A deterministic generation gate for a delayed search task. A newer query
+/// invalidates older tickets before they can replace the latest result.
+public struct SearchDebouncer: Equatable, Sendable {
+    private var generation: UInt = 0
+
+    public init() {}
+
+    @discardableResult
+    public mutating func schedule() -> UInt {
+        generation &+= 1
+        return generation
+    }
+
+    public func shouldRun(ticket: UInt) -> Bool { ticket == generation }
+
+    public mutating func cancelAll() { generation &+= 1 }
+}
+
+/// Formats a conversation's last-message time with the compact conventions
+/// used by chat applications, independent of the system's full date style.
+public enum ConversationTimestampFormatter {
+    public static func string(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        if calendar.isDate(date, inSameDayAs: now) {
+            return formatter("HH:mm", calendar: calendar).string(from: date)
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) {
+            return "昨天"
+        }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? .max
+        if days >= 2, days <= 6, calendar.component(.year, from: date) == calendar.component(.year, from: now) {
+            let weekday = calendar.component(.weekday, from: date)
+            return [1: "周日", 2: "周一", 3: "周二", 4: "周三", 5: "周四", 6: "周五", 7: "周六"][weekday] ?? ""
+        }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
+            return formatter("M月d日", calendar: calendar).string(from: date)
+        }
+        return formatter("yyyy/MM/dd", calendar: calendar).string(from: date)
+    }
+
+    private static func formatter(_ format: String, calendar: Calendar) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = format
+        return formatter
     }
 }
 
