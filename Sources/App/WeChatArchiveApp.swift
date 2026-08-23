@@ -85,7 +85,7 @@ private struct ArchiveShellView: View {
         } detail: {
             switch workspace.section ?? .archiveViewer {
             case .archive: DashboardView()
-            case .databaseExport: DatabaseExportView()
+            case .databaseExport: DatabaseExportView(workspace: workspace)
             case .schemaDiscovery: SchemaDiscoveryView()
             case .messageDiscovery: MessageDiscoveryView()
             case .archiveImport: ArchiveImportView(workspace: workspace)
@@ -160,11 +160,13 @@ private struct StatisticCard: View {
 }
 
 private struct DatabaseExportView: View {
+    let workspace: ArchiveWorkspace
     @State private var session = DatabaseExportSession()
     @State private var databaseRootPath = ""
     @State private var exportRoot: URL?
     @State private var isWorking = false
     @State private var status = "完全退出微信后，选择数据库根目录和 all_keys.json。"
+    @State private var restoredPersistedInputs = false
 
     private var summary: WeChatDatabaseExportSummary {
         WeChatDatabaseExportSummary(databases: session.databases)
@@ -266,6 +268,7 @@ private struct DatabaseExportView: View {
         .formStyle(.grouped)
         .padding()
         .navigationTitle("微信数据库导出")
+        .onAppear(perform: restorePersistedInputsIfNeeded)
     }
 
     private func chooseDatabaseDirectory() {
@@ -286,7 +289,9 @@ private struct DatabaseExportView: View {
     private func setDatabaseRoot(_ url: URL) {
         let defaultKeyMapURL = DefaultWXCLIKeyMapLocator().locate()
         session.selectDatabaseDirectory(url, defaultKeyMapURL: defaultKeyMapURL)
-        databaseRootPath = session.databaseRoot?.path() ?? ""
+        databaseRootPath = session.databaseRoot?.path(percentEncoded: false) ?? ""
+        workspace.preferences.lastDatabaseStorageRoot = session.databaseRoot
+        if let defaultKeyMapURL { workspace.preferences.lastKeyMapPath = defaultKeyMapURL }
         status = session.keyMapURL == nil
             ? "已选择数据库目录。请选择 all_keys.json。"
             : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
@@ -298,6 +303,7 @@ private struct DatabaseExportView: View {
             return
         }
         session.selectKeyMap(keyMapURL)
+        workspace.preferences.lastKeyMapPath = keyMapURL
         status = session.databaseRoot == nil
             ? "已选择默认 key map；请选择数据库目录。"
             : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
@@ -313,6 +319,7 @@ private struct DatabaseExportView: View {
         if panel.runModal() == .OK {
             if let keyMapURL = panel.url {
                 session.selectKeyMap(keyMapURL)
+                workspace.preferences.lastKeyMapPath = keyMapURL
                 status = session.databaseRoot == nil
                     ? "密钥映射已选择；请选择数据库目录。"
                     : "数据库目录与 wx-cli 密钥映射已就绪。请点击“扫描”。"
@@ -324,6 +331,7 @@ private struct DatabaseExportView: View {
         let panel = directoryPanel(message: "选择普通 SQLite 数据库的导出目录")
         if panel.runModal() == .OK {
             exportRoot = panel.url
+            workspace.preferences.lastPlainSQLiteExportParent = exportRoot
             status = "导出目录已选择；验证完成后可导出。"
         }
     }
@@ -398,10 +406,65 @@ private struct DatabaseExportView: View {
     }
 
     private func displayPath(_ url: URL) -> String {
-        let path = url.path()
-        let home = FileManager.default.homeDirectoryForCurrentUser.path()
+        let path = url.path(percentEncoded: false)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
         guard path.hasPrefix(home + "/") else { return path }
         return "~" + path.dropFirst(home.count)
+    }
+
+    /// Restores locations only. In particular this never opens all_keys.json;
+    /// WXCLIKeyMapProvider is constructed exclusively from the Scan action.
+    private func restorePersistedInputsIfNeeded() {
+        guard !restoredPersistedInputs else { return }
+        restoredPersistedInputs = true
+
+        var invalidPaths = false
+        let savedKeyMap = existingJSONFile(workspace.preferences.lastKeyMapPath)
+        if workspace.preferences.lastKeyMapPath != nil, savedKeyMap == nil {
+            workspace.preferences.lastKeyMapPath = nil
+            invalidPaths = true
+        }
+        let restoredKeyMap = savedKeyMap ?? DefaultWXCLIKeyMapLocator().locate()
+        if let databaseRoot = existingDirectory(workspace.preferences.lastDatabaseStorageRoot) {
+            session.selectDatabaseDirectory(databaseRoot, defaultKeyMapURL: restoredKeyMap)
+            databaseRootPath = databaseRoot.path(percentEncoded: false)
+            if let restoredKeyMap { workspace.preferences.lastKeyMapPath = restoredKeyMap }
+        } else if workspace.preferences.lastDatabaseStorageRoot != nil {
+            workspace.preferences.lastDatabaseStorageRoot = nil
+            invalidPaths = true
+        } else if let restoredKeyMap {
+            session.selectKeyMap(restoredKeyMap)
+            workspace.preferences.lastKeyMapPath = restoredKeyMap
+        }
+
+        if let storedExportParent = existingDirectory(workspace.preferences.lastPlainSQLiteExportParent) {
+            exportRoot = storedExportParent
+        } else if workspace.preferences.lastPlainSQLiteExportParent != nil {
+            workspace.preferences.lastPlainSQLiteExportParent = nil
+            invalidPaths = true
+        }
+
+        if invalidPaths {
+            status = "部分已保存路径已失效，请重新选择。"
+        } else if session.databaseRoot != nil, session.keyMapURL != nil {
+            status = "已恢复数据库目录和密钥映射路径。请点击“扫描”后再读取密钥。"
+        } else if session.databaseRoot != nil {
+            status = "已恢复数据库目录。请选择 all_keys.json。"
+        }
+    }
+
+    private func existingDirectory(_ url: URL?) -> URL? {
+        guard let url,
+              (try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]))?.isDirectory == true,
+              (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink != true else { return nil }
+        return url.standardizedFileURL
+    }
+
+    private func existingJSONFile(_ url: URL?) -> URL? {
+        guard let url, url.pathExtension.lowercased() == "json",
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+        return url.standardizedFileURL
     }
 }
 

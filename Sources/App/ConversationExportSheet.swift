@@ -50,7 +50,9 @@ struct ConversationExportSheet: View {
                     Toggle("语音（WAV）", isOn: $includeVoice)
                     Toggle("视频", isOn: $includeVideo)
                     Toggle("头像", isOn: $includeAvatars)
-                    Toggle("包含技术信息", isOn: $includeTechnicalMetadata)
+                    DisclosureGroup("高级选项") {
+                        Toggle("包含技术信息", isOn: $includeTechnicalMetadata)
+                    }
                 }
                 Section("导出位置") {
                     HStack {

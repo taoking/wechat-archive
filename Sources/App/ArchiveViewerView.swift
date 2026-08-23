@@ -18,9 +18,12 @@ struct ArchiveViewerView: View {
     @State private var status = "请选择 WeChatArchive 文件夹。查看器仅以只读方式打开 archive.sqlite。"
     @State private var searchText = ""
     @State private var showingExport = false
-    @State private var timelineScrollToken = UUID()
-    @State private var expandedVideoID: String?
+    @State private var timelinePaging = TimelinePagingState()
+    @State private var timelineScrollInstruction: TimelineScrollInstruction = .none
+    @State private var searchTask: Task<Void, Never>?
+    @State private var searchDebouncer = SearchDebouncer()
     @StateObject private var voicePlayback = VoicePlaybackController()
+    @StateObject private var videoPlayback = VideoPlaybackController()
 
     private var selectedConversation: ArchiveViewerConversation? {
         conversations.first { $0.id == selectedConversationID }
@@ -31,43 +34,40 @@ struct ArchiveViewerView: View {
             ArchiveCanvas()
             VStack(spacing: 0) {
             if viewer == nil {
-                VStack(alignment: .leading, spacing: 12) {
-                    ArchiveBrandHeader()
-                    Text("打开已有归档，随时离线回看你的聊天记录。")
-                        .font(.subheadline)
+                VStack(spacing: 18) {
+                    ArchiveBrandMark(size: 72)
+                    Text("微信聊天归档").font(.largeTitle.bold())
+                    Text("打开已有归档，随时离线回看自己的聊天记录。")
                         .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: 620, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.top, 22)
-                Form {
-                    Section("打开聊天归档") {
-                        HStack {
-                            Button("选择文件夹", action: chooseArchive)
-                            TextField("粘贴归档文件夹路径", text: $archivePath)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit(openArchive)
-                            Button("只读打开", action: openArchive)
-                        }
-                        Text(status)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        Button("开始完整导出") { workspace.section = .archiveImport }
+                    HStack(spacing: 12) {
+                        Button("打开归档", action: chooseArchive).buttonStyle(.borderedProminent)
+                        Button("创建完整归档") { workspace.section = .archiveImport }.buttonStyle(.bordered)
                     }
                     if !workspace.preferences.recentArchiveRoots.isEmpty {
-                        Section("最近归档") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("最近归档").font(.headline)
                             ForEach(workspace.preferences.recentArchiveRoots, id: \.path) { recent in
                                 Button(recent.lastPathComponent) {
-                                    archivePath = recent.path()
+                                    archivePath = recent.path(percentEncoded: false)
                                     openArchive()
                                 }
                             }
                         }
+                        .frame(maxWidth: 380, alignment: .leading)
                     }
+                    DisclosureGroup("手动输入路径") {
+                        HStack {
+                            TextField("WeChatArchive 文件夹路径", text: $archivePath)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(openArchive)
+                            Button("只读打开", action: openArchive)
+                        }
+                    }
+                    .frame(maxWidth: 460)
+                    Text(status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                 }
-                .formStyle(.grouped)
-                .frame(maxWidth: 660, maxHeight: 188)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(32)
             } else {
                 HStack {
                     Label(archivePath.isEmpty ? "已打开归档" : URL(fileURLWithPath: archivePath).lastPathComponent, systemImage: "archivebox")
@@ -80,8 +80,6 @@ struct ArchiveViewerView: View {
                 .padding(.vertical, 8)
                 .background(.regularMaterial)
                 Divider()
-            }
-
             HStack(spacing: 0) {
                 List(selection: $selectedConversationID) {
                     ForEach(conversations) { conversation in
@@ -119,6 +117,7 @@ struct ArchiveViewerView: View {
                         .background(.regularMaterial)
                         Divider()
                     }
+                    GeometryReader { geometry in
                     ScrollViewReader { proxy in
                     ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
@@ -131,21 +130,32 @@ struct ArchiveViewerView: View {
                                 message: message,
                                 showTimestamp: shouldShowTimestamp(at: index),
                                 viewer: viewer,
-                                expandedVideoID: $expandedVideoID,
+                                videoPlayback: videoPlayback,
                                 voicePlayback: voicePlayback,
-                                showSenderName: selectedConversation?.type == .group
+                                showSenderName: selectedConversation?.type == .group,
+                                bubbleMaxWidth: max(260, min(680, geometry.size.width * 0.66))
                             )
                         }
                         Color.clear.frame(height: 1).id("timeline-bottom")
                     }
                     .padding()
                     }
-                        .onChange(of: timelineScrollToken) { _, _ in
-                            DispatchQueue.main.async { proxy.scrollTo("timeline-bottom", anchor: .bottom) }
+                        .onChange(of: timelineScrollInstruction) { _, instruction in
+                            DispatchQueue.main.async {
+                                switch instruction {
+                                case .scrollToBottom:
+                                    proxy.scrollTo("timeline-bottom", anchor: .bottom)
+                                case let .preserveAnchor(id):
+                                    proxy.scrollTo(id, anchor: .top)
+                                case .none:
+                                    break
+                                }
+                            }
                         }
                         .onAppear {
                             DispatchQueue.main.async { proxy.scrollTo("timeline-bottom", anchor: .bottom) }
                         }
+                    }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: .windowBackgroundColor).opacity(0.52))
@@ -156,15 +166,19 @@ struct ArchiveViewerView: View {
             }
         }
         }
+        }
         .onChange(of: selectedConversationID) { _, id in
             if viewer != nil { workspace.preferences.lastSelectedConversationID = id }
             loadMessages()
         }
-        .onChange(of: searchText) { _, _ in loadConversations() }
+        .onChange(of: searchText) { _, _ in scheduleConversationSearch() }
         .navigationTitle("归档查看器")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button("切换归档", action: chooseArchive)
+                if selectedConversation != nil {
+                    Button("回到最新") { timelineScrollInstruction = .scrollToBottom }
+                }
                 if selectedConversation != nil {
                     Button("导出聊天记录…") { showingExport = true }
                 }
@@ -176,7 +190,12 @@ struct ArchiveViewerView: View {
             }
         }
         .onAppear(perform: restoreLastArchive)
-        .onDisappear { voicePlayback.stop() }
+        .onDisappear {
+            searchTask?.cancel()
+            searchDebouncer.cancelAll()
+            voicePlayback.stop()
+            videoPlayback.stop()
+        }
     }
 
     private func chooseArchive() {
@@ -186,7 +205,7 @@ struct ArchiveViewerView: View {
         panel.allowsMultipleSelection = false
         panel.message = "选择 WeChatArchive 文件夹"
         if panel.runModal() == .OK, let url = panel.url {
-            archivePath = url.path()
+            archivePath = url.path(percentEncoded: false)
             openArchive()
         }
     }
@@ -209,7 +228,8 @@ struct ArchiveViewerView: View {
             conversationHasMore = page.hasMore
             selectedConversationID = loadedConversations.first(where: { $0.id == restoredID })?.id ?? loadedConversations.first?.id
             messages = []
-            expandedVideoID = nil
+            timelinePaging = TimelinePagingState()
+            videoPlayback.stop()
             workspace.preferences.recordOpenedArchive(root)
             status = "归档已以只读方式打开。查看器仅使用此归档文件夹。"
             loadMessages()
@@ -220,6 +240,8 @@ struct ArchiveViewerView: View {
             conversationHasMore = false
             selectedConversationID = nil
             messages = []
+            timelinePaging = TimelinePagingState()
+            videoPlayback.stop()
             status = "无法打开有效的 WeChatArchive 文件夹。"
         }
     }
@@ -230,9 +252,10 @@ struct ArchiveViewerView: View {
             let page = try viewer.recentMessagePage(conversationID: conversationID, limit: 100)
             messages = page.items
             messageHasMore = page.hasMore
-            expandedVideoID = nil
+            let instruction = timelinePaging.replaceWithRecent(page.items.map(\.id), hasMore: page.hasMore)
+            videoPlayback.stop()
             voicePlayback.stop()
-            timelineScrollToken = UUID()
+            requestTimelineScroll(instruction)
         } catch {
             messages = []
             status = "无法读取所选归档会话时间线。"
@@ -243,8 +266,10 @@ struct ArchiveViewerView: View {
         guard let viewer, let conversationID = selectedConversationID else { return }
         do {
             let page = try viewer.recentMessagePage(conversationID: conversationID, offset: messages.count, limit: 100)
+            let instruction = timelinePaging.prependOlder(page.items.map(\.id), hasMore: page.hasMore)
             messages.insert(contentsOf: page.items, at: 0)
             messageHasMore = page.hasMore
+            requestTimelineScroll(instruction)
         } catch {
             status = "无法加载更多归档消息。"
         }
@@ -281,10 +306,27 @@ struct ArchiveViewerView: View {
         }
     }
 
+    private func scheduleConversationSearch() {
+        searchTask?.cancel()
+        let ticket = searchDebouncer.schedule()
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(280))
+            guard !Task.isCancelled, searchDebouncer.shouldRun(ticket: ticket) else { return }
+            loadConversations()
+        }
+    }
+
+    private func requestTimelineScroll(_ instruction: TimelineScrollInstruction) {
+        timelineScrollInstruction = .none
+        DispatchQueue.main.async {
+            timelineScrollInstruction = instruction
+        }
+    }
+
     private func restoreLastArchive() {
         guard viewer == nil, workspace.preferences.reopenLastArchiveOnLaunch else { return }
         guard let root = try? workspace.preferences.validLastOpenedArchive() else { return }
-        archivePath = root.path()
+        archivePath = root.path(percentEncoded: false)
         openArchive()
     }
 
@@ -312,7 +354,7 @@ private struct ConversationSidebarRow: View {
                     Text(conversation.title).lineLimit(1)
                     Spacer(minLength: 0)
                     if let timestamp = conversation.lastMessageTimestamp, timestamp > 0 {
-                        Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .omitted, time: .shortened))
+                        Text(ConversationTimestampFormatter.string(for: Date(timeIntervalSince1970: TimeInterval(timestamp))))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -331,9 +373,10 @@ private struct ArchiveTimelineMessageRow: View {
     let message: ArchiveViewerMessage
     let showTimestamp: Bool
     let viewer: WeChatArchiveViewerDatabase?
-    @Binding var expandedVideoID: String?
+    @ObservedObject var videoPlayback: VideoPlaybackController
     @ObservedObject var voicePlayback: VoicePlaybackController
     let showSenderName: Bool
+    let bubbleMaxWidth: CGFloat
     @State private var showsImagePreview = false
 
     var body: some View {
@@ -360,7 +403,7 @@ private struct ArchiveTimelineMessageRow: View {
                         }
                         content
                     }
-                    .frame(maxWidth: 620, alignment: .leading)
+                    .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
                     .padding(12)
                     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 12))
                     if message.direction == .outgoing {
@@ -425,11 +468,11 @@ private struct ArchiveTimelineMessageRow: View {
             Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 220, alignment: .leading)
         }
         if let video = preferredVideo, let viewer, let url = viewer.mediaURL(for: video, preferDecoded: false) {
-            Button(expandedVideoID == video.id ? "隐藏视频" : "播放视频 \(durationLabel(video.duration))") {
-                expandedVideoID = expandedVideoID == video.id ? nil : video.id
+            Button(videoPlayback.expandedID == video.id ? "隐藏视频" : "播放视频 \(durationLabel(video.duration))") {
+                videoPlayback.toggle(id: video.id, url: url)
             }
-            if expandedVideoID == video.id {
-                VideoPlayer(player: AVPlayer(url: url)).frame(maxWidth: 560, minHeight: 260, maxHeight: 360)
+            if videoPlayback.expandedID == video.id, let player = videoPlayback.player {
+                VideoPlayer(player: player).frame(maxWidth: 560, minHeight: 260, maxHeight: 360)
             }
         } else {
             Label("视频不可用，归档保留了可用媒体", systemImage: "video").foregroundStyle(.secondary)
@@ -585,5 +628,29 @@ private final class VoicePlaybackController: NSObject, ObservableObject, AVAudio
     }
 
     private func seconds(_ value: TimeInterval) -> String { "\(max(0, Int(value.rounded()))) 秒" }
+}
+
+@MainActor
+private final class VideoPlaybackController: ObservableObject {
+    @Published private(set) var expandedID: String?
+    private(set) var player: AVPlayer?
+
+    func toggle(id: String, url: URL) {
+        if expandedID == id {
+            stop()
+            return
+        }
+        stop()
+        let player = AVPlayer(url: url)
+        self.player = player
+        expandedID = id
+    }
+
+    func stop() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        expandedID = nil
+    }
 }
 #endif
