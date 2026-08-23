@@ -39,7 +39,16 @@ struct ArchiveImportView: View {
     }
 
     var body: some View {
-        Form {
+        ZStack {
+            ArchiveCanvas()
+            Form {
+            Section {
+                ArchiveSectionTitle(
+                    title: "完整归档",
+                    subtitle: "将自己的聊天记录整理为可长期离线查看的私人归档。",
+                    symbol: "archivebox.fill"
+                )
+            }
             Section("归档导出") {
                 directoryInput(
                     title: "普通 SQLite 导出目录",
@@ -171,7 +180,9 @@ struct ArchiveImportView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .padding()
+        }
         .navigationTitle("归档导出")
         .onAppear(perform: restoreWorkspace)
     }

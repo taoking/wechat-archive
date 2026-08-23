@@ -5,6 +5,10 @@ import WeChatArchiveCore
 
 @main
 struct WeChatArchiveApp: App {
+    init() {
+        ArchiveApplicationIcon.install()
+    }
+
     var body: some Scene {
         WindowGroup {
             ArchiveShellView()
@@ -60,6 +64,9 @@ private struct ArchiveShellView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $workspace.section) {
+                ArchiveBrandHeader(compact: true)
+                    .padding(.vertical, 6)
+                    .listRowBackground(Color.clear)
                 Section("主要功能") {
                     navigationRow(.archiveViewer)
                     navigationRow(.archiveImport)
@@ -72,6 +79,8 @@ private struct ArchiveShellView: View {
                     navigationRow(.settings)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(ArchiveCanvas())
             .navigationTitle("微信聊天归档")
         } detail: {
             switch workspace.section ?? .archiveViewer {
@@ -85,6 +94,7 @@ private struct ArchiveShellView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 560)
+        .tint(ArchivePalette.jade)
     }
 
     @ViewBuilder
@@ -95,11 +105,20 @@ private struct ArchiveShellView: View {
 
 private struct DashboardView: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text("微信聊天归档").font(.largeTitle.bold())
-                Text("在本机导出普通 SQLite、发现数据库结构，并一次性完整导出可离线查看的私人归档。")
-                    .foregroundStyle(.secondary)
+        ZStack {
+            ArchiveCanvas()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ArchiveBrandMark(size: 68)
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("把聊天记忆留在自己手里").font(.largeTitle.bold())
+                            Text("一次完整导出，之后无需微信也能离线查看、播放媒体并导出单个会话。")
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .archiveCard()
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
                     StatisticCard(value: "3C", label: "当前阶段", symbol: "square.and.arrow.down.on.square")
                     StatisticCard(value: "本机", label: "处理方式", symbol: "macbook")
@@ -114,8 +133,10 @@ private struct DashboardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
                 }
+                .archiveCard()
+                }
+                .padding(32)
             }
-            .padding(32)
         }
         .navigationTitle("归档概览")
     }
@@ -128,13 +149,13 @@ private struct StatisticCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(.tint)
+            Image(systemName: symbol).foregroundStyle(ArchivePalette.jade)
             Text(value).font(.title.bold())
             Text(label).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
         .padding()
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

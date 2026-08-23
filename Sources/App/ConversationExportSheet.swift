@@ -30,10 +30,16 @@ struct ConversationExportSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("导出聊天记录").font(.title2.bold())
-            Text(conversation.title).font(.headline).lineLimit(1)
-            Form {
+        ZStack {
+            ArchiveCanvas()
+            VStack(alignment: .leading, spacing: 18) {
+                ArchiveSectionTitle(
+                    title: "导出聊天记录",
+                    subtitle: "生成一个可独立保存与离线阅读的会话副本。",
+                    symbol: "square.and.arrow.up"
+                )
+                Text(conversation.title).font(.headline).lineLimit(1)
+                Form {
                 Picker("格式", selection: $format) {
                     Text("HTML（离线查看）").tag(ConversationExportFormat.html)
                     Text("JSON").tag(ConversationExportFormat.json)
@@ -56,7 +62,8 @@ struct ConversationExportSheet: View {
                     Text("导出会创建一个新的私有文件夹，不会修改当前归档。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-            }
+                }
+                .scrollContentBackground(.hidden)
             if let progress, isExporting {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: Double(progress.messagesExported), total: Double(max(progress.totalMessages, 1)))
@@ -65,7 +72,7 @@ struct ConversationExportSheet: View {
                 }
             }
             Text(status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
-            HStack {
+                HStack {
                 if let completed {
                     if format == .html {
                         Button("打开 HTML") { NSWorkspace.shared.open(completed.primaryFileURL) }
@@ -80,10 +87,11 @@ struct ConversationExportSheet: View {
                     Button("开始导出", action: export).disabled(destination == nil)
                         .keyboardShortcut(.defaultAction)
                 }
+                }
             }
+            .padding(24)
+            .frame(width: 560)
         }
-        .padding(24)
-        .frame(width: 560)
     }
 
     private func chooseDestination() {

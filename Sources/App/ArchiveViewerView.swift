@@ -27,10 +27,21 @@ struct ArchiveViewerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack {
+            ArchiveCanvas()
+            VStack(spacing: 0) {
             if viewer == nil {
+                VStack(alignment: .leading, spacing: 12) {
+                    ArchiveBrandHeader()
+                    Text("打开已有归档，随时离线回看你的聊天记录。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: 620, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
                 Form {
-                    Section("打开 WeChatArchive") {
+                    Section("打开聊天归档") {
                         HStack {
                             Button("选择文件夹", action: chooseArchive)
                             TextField("粘贴归档文件夹路径", text: $archivePath)
@@ -56,7 +67,7 @@ struct ArchiveViewerView: View {
                     }
                 }
                 .formStyle(.grouped)
-                .frame(maxHeight: 136)
+                .frame(maxWidth: 660, maxHeight: 188)
             } else {
                 HStack {
                     Label(archivePath.isEmpty ? "已打开归档" : URL(fileURLWithPath: archivePath).lastPathComponent, systemImage: "archivebox")
@@ -67,6 +78,7 @@ struct ArchiveViewerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
+                .background(.regularMaterial)
                 Divider()
             }
 
@@ -81,6 +93,8 @@ struct ArchiveViewerView: View {
                     }
                 }
                 .searchable(text: $searchText, placement: .sidebar, prompt: "搜索会话")
+                .scrollContentBackground(.hidden)
+                .background(.ultraThinMaterial)
                 .frame(minWidth: 180, idealWidth: 230, maxWidth: 280)
                 .overlay(alignment: .center) {
                     if viewer != nil && conversations.isEmpty { ContentUnavailableView("暂无会话", systemImage: "bubble.left") }
@@ -102,6 +116,7 @@ struct ArchiveViewerView: View {
                         }
                         .padding(.horizontal)
                         .padding(.vertical, 10)
+                        .background(.regularMaterial)
                         Divider()
                     }
                     ScrollViewReader { proxy in
@@ -133,11 +148,13 @@ struct ArchiveViewerView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .windowBackgroundColor).opacity(0.52))
                     .overlay(alignment: .center) {
                         if viewer != nil && selectedConversationID == nil { ContentUnavailableView("请选择会话", systemImage: "message") }
                     }
                 }
             }
+        }
         }
         .onChange(of: selectedConversationID) { _, id in
             if viewer != nil { workspace.preferences.lastSelectedConversationID = id }
@@ -306,6 +323,7 @@ private struct ConversationSidebarRow: View {
                     .lineLimit(1)
             }
         }
+        .padding(.vertical, 4)
     }
 }
 
@@ -342,7 +360,7 @@ private struct ArchiveTimelineMessageRow: View {
                         }
                         content
                     }
-                    .frame(maxWidth: 560, alignment: .leading)
+                    .frame(maxWidth: 620, alignment: .leading)
                     .padding(12)
                     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 12))
                     if message.direction == .outgoing {
@@ -357,7 +375,7 @@ private struct ArchiveTimelineMessageRow: View {
 
     private var bubbleColor: Color {
         switch message.direction {
-        case .outgoing: .green.opacity(0.20)
+        case .outgoing: ArchivePalette.jade.opacity(0.20)
         case .system: .gray.opacity(0.16)
         case .incoming, .unknown: .gray.opacity(0.12)
         }

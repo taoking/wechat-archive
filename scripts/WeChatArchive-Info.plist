@@ -9,7 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.taoking.wechatarchive</string>
     <key>CFBundleName</key>
-    <string>WeChat Archive</string>
+    <string>微信聊天归档</string>
+    <key>CFBundleDisplayName</key>
+    <string>微信聊天归档</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
