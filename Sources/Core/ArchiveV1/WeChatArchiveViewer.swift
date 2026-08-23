@@ -109,6 +109,27 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
     }
 
     public func conversationPage(offset: Int = 0, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerConversation> {
+        try conversationPage(filter: .all, offset: offset, limit: limit)
+    }
+
+    /// Searches only Archive conversation titles. It never searches source
+    /// SQLite values or message bodies.
+    public func searchConversationPage(query: String, offset: Int = 0, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerConversation> {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try conversationPage(filter: trimmed.isEmpty ? .all : .title(trimmed), offset: offset, limit: limit)
+    }
+
+    public func conversation(id: String) throws -> ArchiveViewerConversation? {
+        try conversationPage(filter: .identifier(id), offset: 0, limit: 1).items.first
+    }
+
+    private enum ConversationFilter {
+        case all
+        case title(String)
+        case identifier(String)
+    }
+
+    private func conversationPage(filter: ConversationFilter, offset: Int, limit: Int) throws -> ArchiveViewerPage<ArchiveViewerConversation> {
         let pageSize = clamped(limit)
         let avatarColumns = archiveSchemaVersion >= 4
             ? ", avatar.id, avatar.archive_path, avatar.width, avatar.height"
@@ -120,6 +141,12 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
               LEFT JOIN avatar_assets avatar ON avatar.id = avatar_link.avatar_asset_id AND avatar.archive_path IS NOT NULL
               """
             : ""
+        let searchClause: String
+        switch filter {
+        case .all: searchClause = ""
+        case .title: searchClause = "WHERE COALESCE(c.display_name, '') LIKE ? ESCAPE '\\'"
+        case .identifier: searchClause = "WHERE c.id = ?"
+        }
         let statement = try prepare("""
             SELECT c.id, c.display_name, c.conversation_type, MAX(m.timestamp), COUNT(m.id),
                    (SELECT normalized_type FROM messages latest WHERE latest.conversation_id = c.id ORDER BY timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC LIMIT 1),
@@ -129,13 +156,24 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
             \(avatarJoin)
+            \(searchClause)
             GROUP BY c.id, c.display_name, c.conversation_type, c.created_at
             ORDER BY COALESCE(MAX(m.timestamp), c.created_at, 0) DESC, c.id ASC
             LIMIT ? OFFSET ?
             """)
         defer { sqlite3_finalize(statement) }
-        try bind(Int64(pageSize + 1), at: 1, to: statement)
-        try bind(Int64(max(offset, 0)), at: 2, to: statement)
+        var bindIndex: Int32 = 1
+        switch filter {
+        case .all: break
+        case let .title(query):
+            try bind("%\(escapedLikePattern(query))%", at: bindIndex, to: statement)
+            bindIndex += 1
+        case let .identifier(id):
+            try bind(id, at: bindIndex, to: statement)
+            bindIndex += 1
+        }
+        try bind(Int64(pageSize + 1), at: bindIndex, to: statement)
+        try bind(Int64(max(offset, 0)), at: bindIndex + 1, to: statement)
         var conversations = [ArchiveViewerConversation]()
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let id = text(statement, 0) else { throw ArchiveError.invalidArchive }
@@ -329,6 +367,13 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         case .voice: return "[语音]"
         case .unknown: return "[其他消息]"
         }
+    }
+
+    private func escapedLikePattern(_ query: String) -> String {
+        query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     private func schemaVersion() throws -> Int {

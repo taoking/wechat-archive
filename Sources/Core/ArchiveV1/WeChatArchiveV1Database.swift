@@ -453,6 +453,10 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
                 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), source_database TEXT NOT NULL, source_table TEXT NOT NULL, source_sqlite_rowid INTEGER NOT NULL, source_local_id INTEGER, source_server_id INTEGER, timestamp INTEGER NOT NULL, sender_source_id TEXT, receiver_source_id TEXT, sender_contact_id TEXT REFERENCES contacts(id), sender_display_name TEXT, direction TEXT NOT NULL, raw_local_type INTEGER, normalized_type TEXT NOT NULL, text_content TEXT, reply_source_id TEXT, source_sequence INTEGER NOT NULL, imported_at REAL NOT NULL, UNIQUE(source_database, source_table, source_sqlite_rowid))
                 """)
             try execute("CREATE INDEX messages_reconstruction ON messages(timestamp, source_sequence, source_database, source_table, source_sqlite_rowid)")
+            // Viewer and portable conversation export both page a single
+            // conversation by its stable timeline order. This is an additive
+            // v4 index, so existing v4 archives remain readable as-is.
+            try execute("CREATE INDEX messages_conversation_timeline ON messages(conversation_id, timestamp, source_sequence, source_database, source_table, source_sqlite_rowid)")
             try execute("""
                 CREATE TABLE message_source_values (id INTEGER PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, column_name TEXT NOT NULL, sqlite_type TEXT NOT NULL, integer_value INTEGER, real_value REAL, text_value TEXT, blob_value BLOB, UNIQUE(message_id, column_name))
                 """)
