@@ -16,6 +16,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - name: Install test dependencies
+        run: brew bundle --file=Brewfile
       - name: Build
         run: swift build
       - name: Test
