@@ -1,82 +1,100 @@
-# WeChat Archive
+# 微信聊天归档（WeChat Archive）
 
-WeChat Archive 是一个 macOS 本地优先的个人微信聊天记录归档项目。它将用户本人有权访问的本地数据转换成长期可读的开放格式，而不是把 Word 或 PDF 当作唯一备份。
+WeChat Archive 是一个 macOS 本地优先的个人聊天记录归档工具。它把用户本人有权访问的微信本地数据转换为独立的 `WeChatArchive`：之后无需再打开微信、原始数据库或密钥，也能离线查看聊天记录和已归档媒体。
 
-## Why not only Word/PDF?
+> 所有处理都在本机进行。项目不上传聊天内容、媒体或密钥。
 
-Word、PDF 和 HTML 适合阅读或分享；它们不适合作为唯一数据源。长期归档格式将在后续阶段定义；当前阶段先把用户已有的加密数据库转换为可由标准 SQLite 工具读取的普通数据库。
+## 可以做什么
 
-## Archive Format
+- 将用户主动选择的微信 SQLCipher 数据库导出为普通 SQLite。
+- 一次性创建完整、私有的 `WeChatArchive`，保存全部消息源字段与 BLOB。
+- 在只读归档查看器中浏览私聊和群聊：文本、图片、视频、WAV 语音，以及未支持消息的安全占位。
+- 显示已恢复的联系人、群成员和头像；本地没有头像时使用占位图。
+- 为一个会话生成可独立保存的离线 HTML、JSON 或 Markdown，并复制可播放/可显示的媒体。
+- 记住非敏感的工作目录和最近打开的归档；不会保存数据库密钥、图片密钥或聊天正文到偏好设置。
 
-归档根目录包含 `manifest.json`、账户/联系人/会话 JSON、`messages/<conversation>/<year>.ndjson`、`media/`、`database/archive.sqlite` 和 `checksums/SHA256SUMS.txt`。完整规范见 [ARCHIVE_FORMAT.md](ARCHIVE_FORMAT.md)。
+## 快速开始
 
-## Privacy
+### 1. 准备环境
 
-所有导入、解密、索引、导出与校验都设计为在本机完成。项目没有服务器、遥测、Analytics 或 crash upload。数据库密钥不会写进归档、日志、普通文件或 Git。详见 [PRIVACY.md](PRIVACY.md) 与 [SECURITY.md](SECURITY.md)。
+需要 macOS 15、完整 Xcode 和 Homebrew SQLCipher：
 
-## Phase 1: Export Plain SQLite Databases
+```zsh
+brew bundle
+```
 
-第一阶段读取用户主动选择的微信 `db_storage` 目录和 wx-cli `all_keys.json`。应用递归扫描 `*.db`，以数据库相对路径（如 `contact/contact.db`）匹配 `enc_key`，逐个验证后将成功项导出成普通 SQLite 数据库。导出结果可直接由 `sqlite3` 或 SQLite GUI 打开；目录结构与原数据库根目录保持一致。
+若项目没有 Brewfile，可使用：
 
-每次操作都将原始数据库及其 `-wal` / `-shm` sidecar 复制到受限本地工作目录，并在复制前后检测源文件变化；原库不会被修改。该机制是受保护的、尽力保持稳定的文件快照，不是 transaction-consistent SQLite backup。为确保导出正确性，请在操作前完全退出微信。
+```zsh
+brew install sqlcipher
+```
 
-`all_keys.json` 和 key 仅在内存中使用，不写入导出目录、日志、命令行参数、普通文件或 Git。导出的根目录/子目录权限为 `0700`，数据库文件为 `0600`；同名文件默认跳过，不覆盖。首次运行前执行 `brew bundle`（或 `brew install sqlcipher`）安装本机 SQLCipher 运行库。详细步骤见 [USAGE.md](USAGE.md)。
+### 2. 启动应用
 
-## Phase 2: Plain SQLite Schema Discovery
+```zsh
+./scripts/run-app.sh
+```
 
-选择第一阶段生成的普通 SQLite 根目录后，**Schema Discovery** 会递归以只读方式打开 `*.db`，采集 SQLite 版本、页数、表/索引/视图/触发器数量、字段、主键、索引、外键和聚合行数。它只使用 `SQLITE_OPEN_READONLY`，不需要 `all_keys.json` 或数据库密钥，也不会读取聊天文本、联系人字段值、BLOB 或字符串样本。
+应用启动后默认显示“归档查看器”。没有已有归档时，选择“创建完整归档”。
 
-分析会根据路径、表名、字段名、索引和表结构，将数据库标记为 Detected、Likely 或 Unknown，并输出消息、联系人、会话、群聊、媒体等候选。报告写入所选导出根目录下的 `SchemaReports/`：包含 `schema-summary.json`、`schema-summary.md` 和每个数据库的 Markdown 报告。报告目录权限为 `0700`，报告文件为 `0600`；其中不包含绝对路径、数据库值、密钥或聊天内容。
+### 3. 创建一次性完整归档
 
-## Phase 3A: Limited Message & Media Link Discovery
+1. **完全退出微信**，避免尚未写入数据库的 WAL 数据遗漏。
+2. 在“高级工具 → 数据库导出”中选择自己的 `db_storage` 目录及 wx-cli 生成的 `all_keys.json`，扫描、验证并导出普通 SQLite。
+3. 在“完整导出”中选择普通 SQLite 根目录、自己的微信账号数据根目录和一个新的空归档目录。
+4. 完成后点击“打开归档”。
 
-**Message Discovery** 读取用户主动选择的普通 SQLite 根目录中的 `SchemaReports/schema-summary.json`，将其中的消息候选表供用户选择；再以 `SQLITE_OPEN_READONLY` 最多抽取 500 行，保留 SQLite 原始存储类型，推断字段、时间单位和原始 type 的样本分布。它不会进行完整消息导出或写入 Archive v1。
+归档会创建 `archive.sqlite`、manifest、媒体和聚合导入报告。目录权限为私有权限；源数据库和微信媒体只读访问，不会被修改。
 
-用户还必须显式选择本人原始微信数据根目录，才会开始本地媒体定位。对于含有结构性 MD5 的消息，应用先以参数绑定查询导出的 `hardlink/hardlink.db`，再只检查该映射缩小后的本地路径；它不会把数据库查询错误伪装为 unresolved。递归扫描器仅作为兜底：它以流式方式读取普通文件的有限头部、识别媒体 magic bytes（也可识别 JPEG/PNG/GIF 的单字节 XOR 文件头），并保留 20,000 个候选的上限及截断诊断。文件名本身永远不会被视作匹配证据；没有足够证据时结果保持 unresolved。
+### 4. 日常查看与导出会话
 
-一次运行最多验证一条或少量受限的消息—媒体链路。页面可在本机展示短预览以供用户确认，`.local-analysis/` 下的 `message-discovery.json` 与 `message-discovery.md` 只写入结构、字段映射、聚合 type 分布和解析结果；它们不包含消息文本、BLOB、媒体 ID、哈希、文件名或绝对路径。目录为 `0700`，文件为 `0600`，并已被 Git 忽略。
+以后重新打开应用会恢复最近一次有效归档。选择会话即可从最新消息开始浏览，并可加载更早消息。
 
-### Phase 3A.2: Bounded Image Attachment Recovery
+在会话右上角选择“导出聊天记录”：
 
-**Resolve Image** 只读取所选消息表中最多 100 条 raw type 3 记录。它通过
-`message_resource.db` 的 `ChatName2Id` 和 `MessageResourceInfo` 建立关系，
-从结构化 packed payload 中取得仅在内存中使用的 file base，然后仅检查该会话
-当前、前一和后一月份的 `msg/attach/.../Img` DAT 候选。它不会把任意 32 位十六
-进制字符串当作 MD5，不扫描全账户附件，也不计算全量 MD5。
+- **HTML**：浏览器离线打开，图片、视频和 WAV 语音使用相对本地路径。
+- **JSON**：稳定的 `WeChatConversationExport` v1 结构，默认隐藏源数据库和原始身份字段。
+- **Markdown**：适合长期保存或版本管理的可读文本。
 
-V2 DAT 仅根据本机已有 kvcomm 元数据派生少量候选密钥，并必须解出可识别的图片
-头才视为通过；密钥、file base、文件名、路径和图片字节都不会显示、记录或写入
-归档。`image-resolution.json` 与 `image-resolution.md` 只保存在已忽略的
-`.local-analysis/` 中，权限同样为目录 `0700`、文件 `0600`。详细设计与边界见
-[ADR-009](docs/decisions/ADR-009-bounded-image-attachment-resolution.md)。
+会话导出只读取 `WeChatArchive`；不需要重新选择微信目录、普通 SQLite、SQLCipher 或任何密钥。
 
-## Phase 3C: One-time Archive Export and Viewer
+## 当前范围
 
-**Archive Export** streams every `Msg_*` row into a private relational archive.
-It preserves all SQLite value types and uses the source database, table and
-SQLite `rowid` as physical identity, so duplicate `local_id` values cannot
-discard a row. It supports text, recovered image variants, boundedly located
-MP4 video variants, raw Silk voice bytes and unknown messages. The destination
-must be new or empty; this version intentionally does not merge or incrementally
-repair existing archives.
+支持并已按本机链路验证的主要体验：
 
-**Archive Viewer** opens only the resulting Archive folder in read-only mode.
-It pages conversations and message timelines, displays decoded images, plays
-archived MP4, and never falls back to a WeChat account root or plaintext source
-database. Raw Silk is retained and detected but awaits a license-reviewed
-Silk-to-WAV decoder before playback. See [USAGE.md](USAGE.md) and
-[ADR-011](docs/decisions/ADR-011-one-time-archive-export-and-read-only-viewer.md).
+- 文本、图片、视频、语音（Silk 保留原始数据并在可用的本机 decoder 下转为 WAV）
+- 联系人、群聊、群成员、消息方向、已归档头像
+- 独立归档查看与单会话导出
+- 未支持消息仍会以完整原始 SQLite 值保存到 Archive，不会因当前查看器无法解释而丢失
 
-## Not in the current scope
+当前版本有意不提供实时同步、增量合并、云端上传、写回微信、全文搜索或新的微信消息协议解析。
 
-当前仍不解析或转换完整消息、联系人或媒体，也不生成 Word、Excel、HTML 或可分享的聊天导出。Phase 3A 的受限验证只是下一阶段 Adapter 开发的证据，不是完整内容解析或归档结果。
+## 隐私与安全
 
-## Backup
+- 只处理用户本人明确选择的本地数据。
+- 原始微信数据库、媒体和普通 SQLite 均以只读方式使用。
+- `all_keys.json` 仅在执行扫描时读入内存；不会复制进 Archive、导出目录、日志、Git 或 UserDefaults。
+- Archive 与会话导出分别使用私有目录/文件权限。
+- HTML 导出会转义聊天文本，不会执行聊天内容中的 HTML 或脚本。
 
-建议使用 3-2-1：Mac 上的归档、外部磁盘或 NAS、以及一份离线副本。定期运行 archive verification，保存 `SHA256SUMS.txt` 随归档一起复制。
+详细边界见 [PRIVACY.md](PRIVACY.md)、[SECURITY.md](SECURITY.md) 与 `docs/decisions/`。
 
-## Development
+## 高级工具
 
-需要 macOS、Swift 6、SQLite 和 CryptoKit；UI 需要完整 Xcode（SwiftUI macro plugins 不随 Command Line Tools 提供）。核心库和零依赖测试的命令详见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+“数据库导出”“结构发现”“消息发现”和诊断页面用于首次导出或本地排查；它们不需要作为日常查看聊天记录的入口。
 
-项目架构与阶段计划分别见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [PLAN.md](PLAN.md)。
+## 开发与验证
+
+```zsh
+swift build
+swift test
+git diff --check
+```
+
+创建本地 Release 配置 App：
+
+```zsh
+./scripts/build-app.sh
+```
+
+产物位于 `dist/微信聊天归档.app`，采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)。
