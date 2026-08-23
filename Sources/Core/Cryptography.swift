@@ -19,7 +19,7 @@ extension Message {
         let input = [
             conversationID,
             sender.id,
-            ISO8601DateFormatter.archive.string(from: timestamp),
+            ISO8601DateFormatter.makeArchiveFormatter().string(from: timestamp),
             type.rawValue,
             ArchiveCryptography.sha256(Data((content ?? "").utf8)),
             mediaHashes
@@ -29,9 +29,9 @@ extension Message {
 }
 
 extension ISO8601DateFormatter {
-    static let archive: ISO8601DateFormatter = {
+    static func makeArchiveFormatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
-    }()
+    }
 }

@@ -1,4 +1,5 @@
 .build/
+dist/
 DerivedData/
 .swiftpm/
 *.xcworkspace/xcuserdata/
@@ -17,6 +18,10 @@ DerivedData/
 WeChatArchive/
 media/
 exports/
+SchemaReports/
+SchemaReports-Local/
+.local-analysis/
+*.private-report.*
 checksums/
 decrypted_*
 *.xcarchive

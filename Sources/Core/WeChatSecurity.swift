@@ -33,6 +33,13 @@ public struct WeChatDatabaseKey: Sendable {
     func withData<T>(_ work: (Data) throws -> T) rethrows -> T {
         try work(bytes)
     }
+
+    /// SQLCipher's documented raw-key syntax is a hexadecimal blob literal.
+    /// This value is derived transiently from in-memory bytes and is never
+    /// persisted, logged, sent to a subprocess, or exposed publicly.
+    func withSQLCipherHex<T>(_ work: (String) throws -> T) rethrows -> T {
+        try work(bytes.map { String(format: "%02x", $0) }.joined())
+    }
 }
 
 public protocol WeChatKeyProvider: Sendable {
@@ -125,10 +132,10 @@ public struct UnavailableSQLCipherDecryptor: WeChatDatabaseDecryptor {
     public init() {}
 
     public func validate(databaseURL: URL, key: WeChatDatabaseKey) throws {
-        throw ArchiveError.databaseDecryptionFailed
+        throw ArchiveError.decryptionRuntimeUnavailable
     }
 
     public func decrypt(databaseURL: URL, key: WeChatDatabaseKey, into workingDirectory: URL) throws -> URL {
-        throw ArchiveError.databaseDecryptionFailed
+        throw ArchiveError.decryptionRuntimeUnavailable
     }
 }

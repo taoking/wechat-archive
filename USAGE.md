@@ -1,0 +1,129 @@
+# 使用说明
+
+WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite GUI 打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现。Phase 3C 可将用户主动选择的普通 SQLite 与原始账号媒体一次性导出为独立 Archive，并在 App 中离线查看。
+
+## 准备环境
+
+1. 安装完整 Xcode（Command Line Tools 不足以运行 SwiftUI 应用）。
+2. 安装 Homebrew SQLCipher 运行库：
+
+   ```bash
+   brew bundle
+   ```
+
+   或者：
+
+   ```bash
+   brew install sqlcipher
+   ```
+
+3. 在项目目录运行：
+
+   ```bash
+   ./scripts/run-app.sh
+   ```
+
+   该脚本将 Swift 可执行文件放入本地 `.app` bundle 后启动，使 macOS 正确激活窗口和文件选择面板。不要用裸的 `swift run WeChatArchive` 进行交互式使用；它不是注册的 `.app` bundle，可能导致 Open 面板无法获得键盘焦点。
+
+   也可以用 Xcode 打开 `Package.swift`，选择 `WeChatArchive` executable 后运行。
+
+## 批量导出为普通 SQLite
+
+1. **完全退出微信。** 不要只关闭窗口；请从菜单退出并确认没有继续运行。这样能避免遗漏尚未 checkpoint 的 WAL 数据。
+2. 打开应用的 **Database Export** 页面。
+3. 点击 **Choose Folder**，选择微信 `db_storage` 根目录。若 macOS 文件选择器无法进入容器目录，可在同一行输入完整的绝对路径（支持 `~`），然后点击 **Use Path**；相对路径、普通文件和不存在的目录会被拒绝。确认目录后，应用会检测默认的 `~/.wx-cli/all_keys.json`，但不会读取其中的 key。
+4. 如果默认 key map 存在，界面会显示 **Ready to scan**，可直接继续；否则点击 **Use ~/.wx-cli/all_keys.json** 或 **Choose File** 选择 key map。
+5. 点击 **Scan**。应用递归查找 `*.db`，将例如 `contact/contact.db` 作为相对路径与 `all_keys.json` 匹配。不会仅按文件名匹配。
+6. 点击 **Validate All**。每个已匹配的数据库会依次验证；某一项失败不会阻止其他项继续。
+7. 点击 **Choose Export Folder** 选择输出目录，然后点击 **Export Databases**。
+8. 使用普通 SQLite 工具打开结果，例如：
+
+   ```bash
+   sqlite3 /path/to/Export/contact/contact.db '.tables'
+   ```
+
+`all_keys.json` 只会在内存中读取；不会复制到导出目录、写入日志、数据库、普通文件或 Git。密钥不会作为命令行参数传递。导出完成后，应用会丢弃会话中保存的匹配密钥；如需再次导出，请重新 Scan 和 Validate。
+
+## Schema Discovery（普通 SQLite 结构发现）
+
+1. 打开应用的 **Schema Discovery** 页面。
+2. 点击 **Choose Folder**，选择第一阶段导出的普通 SQLite 根目录；若文件选择器不便使用，也可粘贴完整绝对路径后点 **Use Path**。
+3. 点击 **Analyze Databases**。此阶段不读取 `all_keys.json`、不需要密钥，也不会触碰原 SQLCipher 数据库。
+4. 页面会逐库显示进度，并在完成后汇总数据库、表、Schema Group、消息/联系人/会话/媒体候选数。
+5. 点击 **Open Report Folder** 查看所选根目录下的 `SchemaReports/`：
+
+   ```text
+   SchemaReports/
+   ├── schema-summary.json
+   ├── schema-summary.md
+   └── databases/
+       └── …-<stable-id>.md
+   ```
+
+扫描器仅以 `SQLITE_OPEN_READONLY` 打开常规 `*.db` 文件，逐库/逐表执行 schema 查询和 `COUNT(*)`，不会一次加载数据库内容到内存。报告仅包含相对路径、表/字段/索引/外键名称、声明类型、约束、聚合行数、分类和 Schema fingerprint；不会包含聊天文本、联系人姓名、wxid、BLOB 数据、TEXT sample、密钥或用户主目录路径。FTS virtual table 与 shadow table 会标识为索引结构，不会被当成业务消息表。
+
+分类使用路径和结构启发式，因此 **Detected** 表示存在结构证据，**Likely** 表示主要是路径或较弱信号，**Unknown** 表示没有足够证据；它不是对数据库内容的确定性声明。重复结构的数据库按 schema fingerprint 分组，为下一阶段选择 Message/Contact/Conversation Adapter 提供起点。
+
+`SchemaReports/` 及其 `databases/` 子目录会设为 `0700`，报告文件为 `0600`。真实数据库和真实报告已被 `.gitignore` 排除；不要将它们提交到 Git。
+
+## Message Discovery（受限消息与媒体关联验证）
+
+1. 先完成 **Schema Discovery**，确认普通 SQLite 根目录下有 `SchemaReports/schema-summary.json`。
+2. 打开 **Message Discovery**。选择同一个普通 SQLite 根目录；应用只读取上述 Phase 2 报告来列出候选消息表。
+3. 选择一个候选消息表和 100、250 或 500 行上限。
+4. 选择你本人原始微信数据根目录。此输入是必需的：应用不会默认扫描整个磁盘或自动猜测微信目录。
+5. 点击 **Discover Message & Media**。它以 `SQLITE_OPEN_READONLY` 打开选中的普通数据库，最多读取所选行数；媒体扫描只读取文件头，并可通过 **Cancel** 停止。
+6. 在 **Limited Local Verification** 查看字段映射、时间单位、原始 type 分布、有限本机预览和媒体解析证据。预览只显示在当前窗口，不会写入报告或上传。
+7. 点击 **Open Local Analysis Report** 查看普通 SQLite 根目录下的 `.local-analysis/`：
+
+   ```text
+   .local-analysis/
+   ├── message-discovery.json
+   └── message-discovery.md
+   ```
+
+媒体仅在以下证据存在时才会标记为已解析：精确相对路径、唯一的 media ID 路径匹配、在已缩小候选集合内的精确 MD5，或由导出的 hardlink 映射表用精确 MD5 唯一定位到的本地文件。扫描器还能只读识别 JPEG/PNG/GIF 的单字节 XOR 文件头；必要时只在内存中恢复其字节以确认尺寸或精确 MD5，绝不修改原文件。仅文件名匹配会保持 **unresolved**。报告仅保留结构、字段名、样本数量、原始 type 统计、媒体格式/尺寸/大小和匹配置信度；不会保留消息正文、姓名、wxid、BLOB、媒体 ID、MD5、媒体文件名或绝对路径。目录权限是 `0700`，报告文件是 `0600`。
+
+## Archive Export 与 Archive Viewer
+
+1. 完成 Phase 1 普通 SQLite 导出后，打开 **Archive Export**。
+2. 选择 Plain SQLite Export Root 和你本人原始 WeChat Account Root；两者只读打开。
+3. 选择一个**新建或空目录**作为 Archive Destination。Full Export 不会合并、覆盖或修复已有 Archive；若目录非空，导出会拒绝开始。
+4. 点击 **Analyze Export** 查看消息数据库、表和估算消息数。正式入口默认 **All**；开发验证可选择 100 或 1,000。
+5. 点击 **Full Export**。进度会显示消息分类和已复制媒体大小；Cancel 后已完成事务仍是可校验的归档，但再次完整导出请使用新的空目录。
+6. 打开 **Archive Viewer**，选择生成的 Archive 文件夹。Viewer 只读打开其中的 `archive.sqlite`，不读取微信目录、普通 SQLite 源目录或密钥。
+
+Archive 包含 `archive.sqlite`、`archive-manifest.json`、`metadata/import-report.json` 和媒体目录。文本、已恢复图片、标准 MP4 视频和未知消息可离线查看；图片原始 DAT、视频原文件和语音原始 Silk 会同时保存。没有本地文件的图片/视频/语音仍保留其消息和 `missing` 媒体记录。macOS 可直接播放归档 MP4；当前会保存并识别 Silk 语音，但尚未包含 Silk→WAV 解码器，因此这类语音会显示为已归档、待播放转换。
+
+## 快照与临时明文数据
+
+验证和解密会使用新的本地工作目录：目录权限为 `0700`，快照与明文 SQLite 文件权限为 `0600`。快照复制前后会比较数据库及 `-wal` / `-shm` 的文件集合、大小和修改时间；如果发现变化，该数据库会标为验证/导出失败，并继续处理其余数据库。
+
+这是一项受保护的、尽力保持稳定的文件快照检查，**不是** SQLite transaction-consistent backup。因此必须在微信完全退出后进行真实导入。
+
+如果 `sqlcipher_export`、detach、明文 header 或普通 SQLite 查询验证失败，程序会删除临时明文数据库以及 `-wal`、`-shm`、`-journal` sidecar。成功时，明文数据库从受限暂存目录原子移动到输出目录；输出根目录和新建子目录权限为 `0700`，数据库文件权限为 `0600`。
+
+同名输出文件默认 **Skip**，不会静默覆盖；界面会显示 `Destination exists`。
+
+## 常见问题
+
+| 提示 | 处理方式 |
+| --- | --- |
+| `Key map is invalid.` | 确认选择的是 wx-cli `all_keys.json`，其中每个 `enc_key` 必须是 64 个十六进制字符。 |
+| `SQLCipher runtime unavailable. Install with: brew bundle` | 在项目目录运行 `brew bundle`，然后重新启动应用。Intel Mac 也支持 `/usr/local` 下的 Homebrew SQLCipher。 |
+| `Database is in use. Please quit WeChat and try again.` | 完全退出微信后重试；不要在同步、备份或写入时验证。 |
+| `Key missing` | `all_keys.json` 未包含该数据库的相对路径；检查是否选择了正确的 `db_storage` 根目录。 |
+| `Key invalid` | 匹配到了 key，但该 key 不能打开当前数据库；该项会被跳过。 |
+| `Destination exists` | 输出目录已有同一相对路径的文件。应用不会覆盖它。 |
+
+## 开发验证
+
+修改后执行：
+
+```bash
+swift build
+swift test
+git diff --check
+```
+
+测试仅使用随机密钥与合成 SQLCipher 数据库；不要将真实聊天记录、数据库、媒体或密钥加入项目。

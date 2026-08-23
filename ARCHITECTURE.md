@@ -6,7 +6,7 @@ The portable archive is the source of truth. SQLite is an indexed projection tha
 
 ```text
 Explicitly selected local source
-  → read-only snapshot (.db + -wal + -shm)
+  → protected best-effort file snapshot (.db + -wal + -shm; quit WeChat first)
   → local key provider / local decryptor
   → versioned adapter and parser
   → normalized Message / Contact / Conversation / MediaAsset
@@ -22,9 +22,14 @@ Explicitly selected local source
 - `SQLiteArchiveIndex.swift` owns migration, transactions, FTS and parameterized SQL only.
 - `Import.swift` defines source-neutral providers and batch coordinator.
 - `Export.swift` defines independent exporters; no exporter mutates the archive.
-- `WeChatSecurity.swift` contains scoped key providers and decryptor protocol.
+- `WeChatSecurity.swift` and `SQLCipherDatabaseDecryptor.swift` contain scoped key providers, SQLCipher raw-key handling and the local decryptor.
 - `WeChatDatabase.swift` contains snapshot and Adapter detection boundaries.
-- `Sources/App` is presentation-only; it does not run SQL or decrypt databases.
+- `SQLiteSchemaScanner.swift` owns Phase 2 plain-SQLite, read-only schema inspection, safe identifier quoting, FTS-internal-table recognition, structural classification and schema fingerprints. It never reads database values.
+- `SQLiteSchemaReportWriter.swift` writes Phase 2 JSON/Markdown reports with `0700` directories, `0600` files and report-path redaction; it never opens source databases.
+- `WeChatMessageDiscovery.swift` owns the Phase 3A bounded, read-only source-row reader, source-value type preservation, field/timestamp/type inference and structural XML/JSON payload inspection. Raw records stay in memory and are intentionally not Codable.
+- `WeChatMediaDiscovery.swift` owns selected-root streaming media discovery, file magic/dimension checks, safe single-byte XOR image-header recognition, exported hardlink-map lookup and evidence-ranked media resolution. It never copies, moves or bulk-hashes the media library; filename-only evidence remains unresolved.
+- `MessageDiscoveryReportWriter.swift` writes Phase 3A protected reports from a redacted DTO only. It excludes source values, BLOB bytes, media identifiers, hashes, filenames and absolute paths.
+- `Sources/App` orchestrates Core services only; it never executes SQL, handles raw SQLCipher APIs or parses database rows directly.
 
 ## Data and error contracts
 
@@ -34,7 +39,11 @@ Inputs at the file/provider boundary are treated as untrusted. They are decoded 
 
 ## Concurrency and safety
 
-The index opens with SQLite FULLMUTEX and each import batch is one transaction. Completed batches survive an interruption; a source can be re-imported safely. A snapshot includes WAL/SHM and compares source attributes before and after copying. A changed source fails with a close-WeChat-and-retry error rather than silently importing a partial database.
+The index opens with SQLite FULLMUTEX and each import batch is one transaction. Completed batches survive an interruption; a source can be re-imported safely. A snapshot uses SQLite's `-wal` and `-shm` sidecars, owns a `0700` working directory, sets copied files to `0600`, and compares the source file set plus attributes before and after copying. A changed source fails with a close-WeChat-and-retry error rather than silently importing a partial database. These checks are best effort, not proof of one SQLite transaction snapshot; the UI and documentation require WeChat to be fully quit before real imports.
+
+Phase 2 operates only after Phase 1 export. It discovers `.db` files below the user-selected export root, rejects symlinks and path escapes, and opens each file using `SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX`. It queries `sqlite_master`, PRAGMA metadata and aggregate `COUNT(*)`, using quoted identifiers from schema metadata. No stored database value is selected. Source-relative paths stay local to the UI; reports omit absolute paths and redact wxid-like path components.
+
+Phase 3A is an explicit, bounded exception to Phase 2's schema-only rule. The user selects one Phase 2 message-table candidate and a maximum 100/250/500-row sample; the core opens only that plain SQLite database with `SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX`. `SQLiteSourceValue` preserves NULL, INTEGER, REAL, TEXT and BLOB identity while raw values remain memory-only. Payload parsing disables XML external entity resolution and retains only allow-listed structural media metadata. A separately selected original media root is scanned without following symlinks; the scan is streaming, bounded, cancellable and reads only headers until a resolver has narrowed a specific candidate. JPEG/PNG/GIF headers wrapped by a single-byte XOR can be recognised and, for a small file, normalized in memory for ImageIO or MD5 verification without changing the source. Reports use a dedicated safe DTO, so no raw sample value can be serialized accidentally.
 
 ## Dependency decision
 

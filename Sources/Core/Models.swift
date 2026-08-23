@@ -320,6 +320,7 @@ public enum ArchiveError: LocalizedError, Equatable {
     case keyUnavailable
     case keyInvalid
     case databaseDecryptionFailed
+    case decryptionRuntimeUnavailable
     case unsupportedDatabaseVersion
     case databaseInUse
     case unsupportedImportFormat
@@ -333,6 +334,7 @@ public enum ArchiveError: LocalizedError, Equatable {
         case .keyUnavailable: return "Key unavailable"
         case .keyInvalid: return "Key invalid"
         case .databaseDecryptionFailed: return "Database decryption failed"
+        case .decryptionRuntimeUnavailable: return "SQLCipher runtime unavailable"
         case .unsupportedDatabaseVersion: return "Unsupported WeChat database version"
         case .databaseInUse: return "Database is in use; close WeChat and try again"
         case .unsupportedImportFormat: return "This import format needs an adapter"
