@@ -1,77 +1,50 @@
-# ADR-010: Preserve complete source rows in a private Archive v1
+# ADR-010：在私有 Archive v1 中保留完整来源行
 
-## Status
+## 状态
 
-Superseded by ADR-011
+已被 ADR-011 取代
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-Phase 3A.2 validated a deterministic Type 3 image relationship on local data,
-but discovery output is intentionally redacted and bounded. A durable archive
-must instead retain enough source information to rebuild a timeline after the
-original WeChat databases and media directories are no longer available. It
-also must not discard messages whose current type adapters do not understand.
+第三阶段 A.2 已在本地数据上验证确定性的 Type 3 图片关系，但发现输出有意脱敏且有上限。耐久归档必须保留足够来源信息，以便原始微信数据库和媒体目录不可用后仍能重建时间线；同时也不能丢弃当前类型 Adapter 尚不了解的消息。
 
-## Decision
+## 决策
 
-Archive v1 is a private, relational SQLite archive with a versioned manifest.
-It streams plaintext `Msg_*` rows in source order and writes every source
-column into a typed `message_source_values` table. SQLite NULL, integer, real,
-text, and BLOB values are retained separately; BLOB bytes are never converted
-through text.
+Archive v1 是带版本 manifest 的私有关系型 SQLite 归档。它按来源顺序流式读取普通 SQLite `Msg_*` 行，并把每个来源列写入有类型的 `message_source_values` 表。SQLite NULL、integer、real、text 与 BLOB 值分别保留；BLOB 字节绝不经过文本转换。
 
-Stable source identity is the unique tuple of source database relative path,
-source table, and source local-row identifier. This makes imports idempotent
-and permits later incremental imports. Conversations keep their stable source
-table identity rather than a generated identifier alone. Reconstruction sorts
-by source timestamp and source sequence.
+稳定来源身份是来源数据库相对路径、来源表和来源本地行标识符构成的唯一元组。这使导入幂等，并支持未来增量导入。会话保留稳定来源表身份，而非只保留生成标识符。重建按来源时间戳和来源序列排序。
 
-The first adapters normalize only text and the already-validated image type;
-all other rows are archived as `unknown` with their complete source row.
-Image import follows the Phase 3A.2 message-resource chain. Each main, HD, and
-thumbnail variant is recorded independently. Existing DAT files are copied
-into the private archive and SHA-256 checked even when a decoded rendition is
-available. Missing and unsupported variants remain recorded without dropping
-their message.
+首批 Adapter 只归一化文本和已验证图片类型；其余行作为 `unknown` 归档，并保留完整来源行。图片导入遵循第三阶段 A.2 的消息资源链。每个 main、HD 和 thumbnail 变体独立记录。即使有解码版本，现有 DAT 文件仍会复制进入私有归档并执行 SHA-256 校验。缺失和不支持变体仍会记录，不会丢弃消息。
 
-The archive root and directories use mode 0700. SQLite, manifest, reports,
-and media files use mode 0600. Source databases and original media are opened
-read-only. Aggregate import reports and normal UI state contain no text,
-identifiers, filenames, paths, or keys.
+归档根目录和目录使用 `0700`；SQLite、manifest、报告和媒体文件使用 `0600`。源数据库和原始媒体只读打开。聚合导入报告和普通 UI 状态不包含文本、标识符、文件名、路径或密钥。
 
-## Alternatives Considered
+## 考虑过的替代方案
 
-### Save only normalized messages
+### 只保存归一化消息
 
-- Pros: smaller archive and simpler schema.
-- Cons: unknown types and parser mistakes become irreversible data loss.
-- Rejected: future adapters need the original SQLite values and BLOBs.
+- 优点：归档更小、schema 更简单。
+- 缺点：未知类型和解析错误会成为不可逆数据丢失。
+- 拒绝原因：未来 Adapter 需要原始 SQLite 值和 BLOB。
 
-### Continue using discovery reports as import input
+### 继续将发现报告作为导入输入
 
-- Pros: avoids a second database reader.
-- Cons: reports are deliberately redacted, bounded, and unsuitable as a
-  source of truth.
-- Rejected: the importer reads only plaintext SQLite directly.
+- 优点：避免第二个数据库读取器。
+- 缺点：报告有意脱敏、有上限，不适合作为事实来源。
+- 拒绝原因：导入器只直接读取普通 SQLite。
 
-### Copy the complete account directory
+### 复制完整账号目录
 
-- Pros: preserves every local file without schema work.
-- Cons: needlessly copies unrelated private data and makes a focused archive
-  difficult to validate or migrate.
-- Rejected: Archive v1 preserves only supported message data and linked image
-  variants, while retaining source rows for future parsing.
+- 优点：无需 schema 工作即可保留每个本地文件。
+- 缺点：不必要复制无关私有数据，且会使聚焦归档难以验证和迁移。
+- 拒绝原因：Archive v1 只保留受支持的消息数据及链接图片变体，同时为未来解析保留来源行。
 
-## Consequences
+## 后果
 
-- Re-importing the same source rows produces no duplicate messages.
-- A cancelled import retains only fully committed message transactions and is
-  marked cancelled in `import_runs`.
-- Archive validation checks SQLite integrity, foreign keys, manifest counts,
-  and SHA-256 of every referenced raw or decoded media file.
-- Video, voice, generic files, stickers, contacts, UI rendering, and search
-  remain outside Archive v1.
+- 再次导入相同来源行不会产生重复消息。
+- 被取消的导入只保留完全提交的消息事务，并在 `import_runs` 标为已取消。
+- 归档验证会检查 SQLite 完整性、外键、manifest 计数，以及每个被引用原始或解码媒体文件的 SHA-256。
+- 视频、语音、通用文件、表情、联系人、UI 渲染和搜索不在 Archive v1 范围内。

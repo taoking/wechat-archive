@@ -1,23 +1,23 @@
-# ADR-003: Decrypt local SQLCipher snapshots with user-provided raw keys
+# ADR-003：使用用户提供的原始密钥解密本地 SQLCipher 快照
 
-## Status
+## 状态
 
-Accepted — 2026-08-16
+已接受 — 2026-08-16
 
-## Context
+## 背景
 
-The archive needs to process a user’s own encrypted local database without uploading the database or key. A shell-based workflow risks exposing a key in process arguments or saved scripts; opening the original database read-write risks modifying an active WeChat file.
+归档需要处理用户自己的加密本地数据库，且不能上传数据库或密钥。基于 shell 的流程可能通过进程参数或保存的脚本暴露密钥；以读写方式打开原数据库则可能改动正在被微信使用的文件。
 
-## Decision
+## 决策
 
-Use a locally installed SQLCipher dylib through a narrow dynamic C API. Validate a `64`-hex-character raw key with SQLCipher’s documented `x'…'` representation, without logging or exposing it. Validate only a read-only protected file snapshot. The snapshotter copies the database with canonical `-wal` / `-shm` sidecars into a new `0700` directory, sets copied files to `0600`, and rejects changes detected before versus after copying. For export, make a second encrypted snapshot inside a `0700` working directory, open only that snapshot read-write, and create a new `0600` plaintext output using `sqlcipher_export`.
+通过窄范围的动态 C API 使用本地安装的 SQLCipher dylib。使用 SQLCipher 已记录的 `x'…'` 表示法验证 `64` 个十六进制字符的原始密钥，不记录或暴露它。只验证受保护、只读的文件快照。快照器将数据库及规范的 `-wal`／`-shm` sidecar 复制到新建 `0700` 目录，将副本设为 `0600`，并拒绝复制前后检测到的变化。导出时，在 `0700` 工作目录中创建第二份加密快照，仅以读写方式打开该快照，并使用 `sqlcipher_export` 创建新的 `0600` 普通 SQLite 输出。
 
-## Alternatives considered
+## 考虑过的替代方案
 
-- SQLCipher command line: easy to invoke, but increases risk of key leakage through arguments or scripts.
-- Opening the original database read-write: could modify a database currently used by WeChat.
-- Bundling a SQLCipher binary in Git: increases repository size, update burden and supply-chain responsibility.
+- SQLCipher 命令行：易于调用，但会增加通过参数或脚本泄露密钥的风险。
+- 以读写方式打开原数据库：可能改动微信正在使用的数据库。
+- 在 Git 中打包 SQLCipher 二进制：会增加仓库体积、更新负担和供应链责任。
 
-## Consequences
+## 后果
 
-Users install SQLCipher with Homebrew or package it through a controlled release pipeline. The source database is never written. The app must remove temporary plaintext output and `-wal` / `-shm` / `-journal` sidecars after parsing unless the user explicitly opts to retain it. Attribute checks are not a transaction-consistency guarantee, so users must fully quit WeChat before validating or importing a real database. Adapter detection remains independent of decryption and rejects unknown WeChat schemas.
+用户使用 Homebrew 安装 SQLCipher，或通过受控 Release 管线打包它。源数据库绝不写入。除非用户明确选择保留，应用必须在解析后移除临时普通 SQLite 输出及 `-wal`／`-shm`／`-journal` sidecar。属性检查不保证事务一致性，因此验证或导入真实数据库前用户必须完全退出微信。Adapter 检测独立于解密，并拒绝未知微信 schema。

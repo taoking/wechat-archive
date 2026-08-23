@@ -1,23 +1,23 @@
-# Privacy
+# 隐私说明
 
-## Local first by design
+## 本地优先设计
 
-WeChat Archive has no application server. It does not upload messages, media, databases, keys, archive checksums, telemetry, analytics or crash reports. No network integration is required for normal operation.
+WeChat Archive 没有应用服务器。它不会上传消息、媒体、数据库、密钥、归档校验和、遥测、分析数据或崩溃报告。正常使用不需要任何网络集成。
 
-## Scope of use
+## 使用范围
 
-Only import data that the current macOS user owns or is authorized to archive. This project must never be used to discover remote accounts, collect other people’s databases or keys, or operate background scans.
+只能导入当前 macOS 用户拥有或获授权归档的数据。本项目绝不得用于发现远程账号、收集他人的数据库或密钥，或执行后台扫描。
 
-## Key handling
+## 密钥处理
 
-Manual keys default to in-memory, one-use `ManualKeyProvider` values. The import screen starts with “Do not persist key” enabled and clears the field after validation. Key providers never return a printable key value and app errors never include key material.
+手动密钥默认使用仅一次的内存 `ManualKeyProvider` 值。导入界面初始启用“不要持久化密钥”，并会在验证后清空输入框。密钥提供器绝不返回可打印的密钥值，应用错误也绝不包含密钥材料。
 
-If a user explicitly enables a future “Remember key” action, it must use macOS Keychain. It must not use UserDefaults, plist, JSON, SQLite, project files or regular logs.
+若用户明确启用未来的“记住密钥”操作，必须使用 macOS Keychain；不得使用 UserDefaults、plist、JSON、SQLite、项目文件或普通日志。
 
-## Data locations
+## 数据位置
 
-The user chooses source and archive locations. The original database is read-only. Decrypted work is temporary and should be deleted at import completion unless the user makes a separate, explicit, privacy-noticed choice to retain it. Archive data itself is private material and should be encrypted at rest through macOS account/disk protections and backed up deliberately.
+用户选择来源和归档位置。原始数据库只读访问。解密工作数据是临时数据，除非用户做出单独、明确并已提示隐私影响的保留选择，否则应在导入完成时删除。归档数据本身是私有材料，应借助 macOS 账号／磁盘保护进行静态加密，并有意识地进行备份。
 
-## Future network features
+## 未来网络功能
 
-Any future network feature requires a new privacy review, a separate user opt-in and a disabled-by-default state. It must not be introduced as part of import, search or error reporting.
+任何未来网络功能都需要新的隐私审查、单独的用户同意和默认禁用状态；不得将其作为导入、搜索或错误报告的一部分引入。

@@ -1,32 +1,32 @@
-# Security
+# 安全说明
 
-## Threat model
+## 威胁模型
 
-Assets include private messages, media, local database files and database keys. Trust boundaries are file selection, imported JSON/NDJSON, database schema inspection and locally supplied key material. The application has no remote service boundary by design.
+资产包括私密消息、媒体、本地数据库文件和数据库密钥。信任边界是文件选择、导入的 JSON/NDJSON、数据库 schema 检查和本地提供的密钥材料。应用按设计没有远程服务边界。
 
-## Controls implemented
+## 已实现的控制措施
 
-- User-provided filenames never determine archive directory identifiers.
-- Media is content-addressed by SHA-256 rather than filename.
-- SQLite values are prepared and bound; search text is never concatenated into SQL.
-- HTML export escapes text and attributes; it does not inject message content into raw markup.
-- Verification reports paths and failure classes, not message bodies, keys or full source paths.
-- Key providers are explicit and local. `ManualKeyProvider` consumes its in-memory value after retrieval.
-- Snapshotting uses SQLite's canonical `database-wal` / `database-shm` names, creates its own `0700` directory, marks copied files `0600`, and fails if the source file set, size or modification time changes while copying.
-- `.gitignore` excludes databases, keys, archives, media, decrypted files and local environment files.
+- 用户提供的文件名绝不决定归档目录标识符。
+- 媒体按 SHA-256 内容寻址，而不是按文件名寻址。
+- SQLite 值会被 prepare 并 bind；搜索文本绝不拼接进 SQL。
+- HTML 导出会转义文本和属性；不会把消息内容注入原始标记。
+- 验证报告记录路径和失败类别，而不是消息正文、密钥或完整来源路径。
+- 密钥提供器是显式且本地的。`ManualKeyProvider` 在读取后消耗其内存值。
+- 快照使用 SQLite 规范的 `database-wal`／`database-shm` 名称，创建自身的 `0700` 目录，将复制文件标为 `0600`，并在复制期间源文件集合、大小或修改时间发生变化时失败。
+- `.gitignore` 排除数据库、密钥、归档、媒体、解密文件和本地环境文件。
 
-## Key limitations
+## 关键限制
 
-Swift `Data` is not a guaranteed secure-memory primitive. Providers minimize lifetime and copies; the raw-key literal is generated only in-process for SQLCipher and is never passed to a subprocess, file, log, crash report or diagnostics. Do not log keys or pass them to diagnostics.
+Swift `Data` 不是可保证安全内存的原语。提供器会尽量缩短生命周期和复制次数；SQLCipher 原始密钥字面量仅在进程内生成，绝不会传递给子进程、文件、日志、崩溃报告或诊断。不得记录密钥或将其传给诊断。
 
-`SQLCipherDatabaseDecryptor` dynamically loads a locally installed SQLCipher runtime, validates a source snapshot read-only, then creates an encrypted snapshot in a `0700` work directory for export. The temporary plaintext database and any SQLite sidecars are `0600`; a failed export, detach or validation removes `database`, `database-wal`, `database-shm` and `database-journal`. Source files are not opened for writing and are never passed to cleanup. End-to-end tests use random key material and a generated synthetic database only. Never add a shell-out path that places a key in arguments or writes it to disk.
+`SQLCipherDatabaseDecryptor` 动态加载本地安装的 SQLCipher runtime，以只读方式验证来源快照，然后在 `0700` 工作目录中创建加密快照以供导出。临时普通 SQLite 数据库及所有 SQLite sidecar 均为 `0600`；导出、detach 或验证失败时，会移除 `database`、`database-wal`、`database-shm` 和 `database-journal`。源文件不会以写入方式打开，也绝不会被传给清理流程。端到端测试只使用随机密钥材料和生成的合成数据库。绝不可添加将密钥置于参数中或写入磁盘的 shell-out 路径。
 
-File copying plus before/after attribute checks can detect a changing source but cannot prove a transaction-consistent SQLite snapshot. Users must completely quit WeChat before validating or importing a real database.
+文件复制加复制前后属性检查可发现变化的来源，但不能证明是事务一致的 SQLite 快照。用户必须在验证或导入真实数据库前完全退出微信。
 
-## Secure development requirements
+## 安全开发要求
 
-- Do not add network calls to Core without explicit authorization and a privacy review.
-- Validate source file size/type and decoded shape at each import provider boundary.
-- Keep source databases read-only and process copies only in a dedicated temporary directory.
-- Keep all normal errors generic. Never include a raw SQL error that could embed private input.
-- Do not commit realistic chat data, media, database snapshots, test accounts or secrets.
+- 未经明确授权和隐私审查，不得向 Core 添加网络调用。
+- 在每个导入提供器边界验证来源文件大小／类型和解码后的形状。
+- 保持源数据库只读，并且只在专用临时目录中处理副本。
+- 所有普通错误都应保持通用；绝不得包含可能嵌入私有输入的原始 SQL 错误。
+- 不得提交真实聊天数据、媒体、数据库快照、测试账号或机密。

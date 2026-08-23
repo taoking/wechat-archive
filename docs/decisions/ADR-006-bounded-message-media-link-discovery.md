@@ -1,30 +1,30 @@
-# ADR-006: Verify one local message-to-media link before building an adapter
+# ADR-006：在构建 Adapter 前验证一条本地消息到媒体的链接
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-Phase 2 identifies likely message and media schemas without selecting any stored values. Before an Archive v1 adapter can claim that a real WeChat message type has a usable media association, the project needs a small, reproducible local validation path. The data involved can contain chat text, names, wxid identifiers, media identifiers, encrypted payload material and private filesystem paths.
+第二阶段在不选择任何存储值的前提下识别可能的消息和媒体 schema。Archive v1 Adapter 在声称真实微信消息类型拥有可用媒体关联前，项目需要一条小范围、可复现的本地验证路径。涉及的数据可能包含聊天文本、姓名、wxid 标识符、媒体标识符、加密 payload 材料和私有文件系统路径。
 
-## Decision
+## 决策
 
-Phase 3A accepts only user-selected inputs: a Phase 1 plain SQLite root, a message-table candidate from its Phase 2 report, a sample limit of 100, 250 or 500 rows, and a separately selected original WeChat data root for media discovery. The source reader rejects symlinks and path escapes, opens the selected SQLite file using `SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX`, and keeps the sample in memory only. `SQLiteSourceValue` distinguishes NULL, INTEGER, REAL, TEXT and BLOB; BLOBs retain length and SHA-256 metadata, with an in-memory size bound.
+第三阶段 A 只接受用户选择的输入：第一阶段普通 SQLite 根目录、其第二阶段报告中的消息表候选项、100／250／500 行的样本上限，以及用于媒体发现的单独选择的原始微信数据根目录。源读取器拒绝符号链接和路径逃逸，以 `SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX` 打开所选 SQLite 文件，并且仅在内存中保存样本。`SQLiteSourceValue` 区分 NULL、INTEGER、REAL、TEXT 和 BLOB；BLOB 保留长度和 SHA-256 元数据，并受内存大小上限约束。
 
-Field mapping and timestamp inference are evidence-based. Raw message type values are reported as observations, not treated as globally stable mappings. XML parsing disables external entity resolution and records only allow-listed structural media metadata. Arbitrary XML attributes, content text and potential key-like attributes are excluded from reports.
+字段映射和时间戳推断基于证据。原始消息类型值作为观察结果报告，而不是视为全局稳定映射。XML 解析禁用外部实体解析，只记录允许列表中的结构化媒体元数据。任意 XML 属性、内容文本和潜在密钥样属性均从报告中排除。
 
-The media scanner works only below the separately selected root, rejects symlinks, uses streaming enumeration, can be cancelled and detects standard file magic bytes. It may recognise JPEG/PNG/GIF headers wrapped by a single uniform XOR byte; when an already narrowed candidate is small enough, normalization happens only in memory for ImageIO or MD5 verification. It does not copy, rename, mutate or bulk-hash the media library. The resolver may confirm only an exact relative path, unique media-ID path evidence, a MD5 value after candidate narrowing, or a unique local file backed by an exact MD5 lookup in the exported hardlink mapping database. A filename alone is never sufficient; uncertainty is represented as unresolved.
+媒体扫描器只在单独选择的根目录下工作，拒绝符号链接，使用流式枚举，可被取消，并检测标准文件 magic 字节。它可以识别由单一统一 XOR 字节包装的 JPEG/PNG/GIF 文件头；当已缩小的候选项足够小时，只在内存中规范化，供 ImageIO 或 MD5 验证。它不复制、重命名、改动或批量哈希媒体库。解析器只能确认精确相对路径、唯一媒体 ID 路径证据、在候选缩小后的 MD5 值，或由已导出 hardlink 映射数据库精确 MD5 查询支持的唯一文件。仅文件名绝不充分；不确定性表示为 unresolved。
 
-`MessageDiscoveryReportWriter` creates `.local-analysis/message-discovery.json` and `.md` with directory permission `0700` and file permission `0600`. Its report DTO has no raw source-value property and omits message content, names, wxid, BLOB bytes, media IDs, MD5 values, media filenames and absolute paths. Phase 3A does not write Archive v1, copy media or perform full message export.
+`MessageDiscoveryReportWriter` 会创建 `.local-analysis/message-discovery.json` 和 `.md`，目录权限为 `0700`、文件权限为 `0600`。其报告 DTO 没有原始源值属性，且省略消息内容、姓名、wxid、BLOB 字节、媒体 ID、MD5 值、媒体文件名和绝对路径。第三阶段 A 不写 Archive v1、不复制媒体，也不进行全量消息导出。
 
-## Consequences
+## 后果
 
-- A single verified message/image chain provides concrete evidence for a later, fixture-backed adapter while keeping the privacy surface small.
-- Matching intentionally favours false negatives: an unresolved reference remains unresolved rather than guessing from a filename.
-- Large source tables and media trees remain bounded by the selected message sample and scanner result cap, but real media scans can still take time; the UI reports progress and provides cancellation.
-- Phase 3B must convert only confirmed evidence into an explicit versioned adapter and add tests before producing portable archive records.
+- 单条已验证消息／图片链在保持较小隐私面前提下，为后续基于 fixture 的 Adapter 提供具体证据。
+- 匹配有意偏向假阴性：未解析引用仍是未解析，不会依据文件名猜测。
+- 大型源表和媒体树仍受所选消息样本和扫描器结果上限约束，但真实媒体扫描仍可能耗时；UI 会报告进度并支持取消。
+- 第三阶段 B 必须只把已确认的证据转换为显式、带版本的 Adapter，并在产出可移植归档记录前加入测试。

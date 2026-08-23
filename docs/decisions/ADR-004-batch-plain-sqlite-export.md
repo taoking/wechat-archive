@@ -1,48 +1,26 @@
-# ADR-004: Batch-export matched SQLCipher databases as plain SQLite
+# ADR-004：批量将匹配的 SQLCipher 数据库导出为普通 SQLite
 
-## Status
+## 状态
 
-Accepted — 2026-08-17
+已接受 — 2026-08-17
 
-## Context
+## 背景
 
-The first useful archival milestone is to make a user's already-authorized local
-databases inspectable with standard SQLite tools. wx-cli writes an
-`all_keys.json` map keyed by database-relative paths, while a database tree can
-contain identically named files in different directories. The workflow must not
-expose keys, alter source databases, overwrite an existing plaintext export, or
-leave plaintext temporary files behind.
+第一个有用的归档里程碑，是让用户已获授权的本地数据库可由标准 SQLite 工具检查。wx-cli 会写入以数据库相对路径为键的 `all_keys.json` 映射，而数据库树可能在不同目录含有同名文件。流程不得暴露密钥、改动源数据库、覆盖已有普通 SQLite 导出，也不得遗留普通 SQLite 临时文件。
 
-## Decision
+## 决策
 
-Read `all_keys.json` only into memory and accept only 64-hex-character values.
-Normalize and match each key by its relative path below the explicit database
-root; never match by filename alone. Scan regular `.db` files only and ignore
-symlinks. Validate matching databases one at a time so an invalid key or active
-source does not stop the rest of the batch.
+仅在内存中读取 `all_keys.json`，且只接受 64 个十六进制字符的值。按显式数据库根目录下的相对路径规范化并匹配每个密钥；绝不只按文件名匹配。仅扫描普通 `.db` 文件并忽略符号链接。逐个验证匹配数据库，使无效密钥或活动来源不会停止批次中其余项目。
 
-For a validated database, create the protected SQLCipher snapshot and plaintext
-staging database under a new `0700` directory inside the selected export root.
-Verify both the SQLite header and a normal read-only SQLite query, then rename
-the plaintext database atomically to its corresponding relative output path.
-Export roots and created subdirectories use `0700`, files use `0600`, and any
-pre-existing destination is skipped. The export result discards its in-memory
-key before returning to the UI.
+对于已验证数据库，在所选导出根目录内新建的 `0700` 目录中创建受保护 SQLCipher 快照和普通 SQLite 暂存数据库。验证 SQLite 文件头和普通只读 SQLite 查询后，再将普通 SQLite 数据库原子重命名到对应的相对输出路径。导出根目录和新建子目录使用 `0700`，文件使用 `0600`，任何已存在的目标均跳过。导出结果返回 UI 前会丢弃内存中的密钥。
 
-## Alternatives considered
+## 考虑过的替代方案
 
-- Match only by database filename: unsafe because different relative paths can
-  share a filename and receive the wrong key.
-- Decrypt directly into the final destination: exposes partially written output
-  after a failed validation and cannot guarantee an atomic handoff.
-- Stage in the system temporary directory: a final move to an external volume
-  could become a non-atomic copy.
-- Write keys to Keychain or an export manifest: outside this phase and creates
-  persistence that is unnecessary for a single export session.
+- 只按数据库文件名匹配：不安全，因为不同相对路径可能共享文件名并得到错误密钥。
+- 直接解密到最终目标：验证失败后会暴露部分写入输出，且不能保证原子交接。
+- 在系统临时目录暂存：最终移动到外部卷时可能变为非原子复制。
+- 将密钥写入 Keychain 或导出 manifest：不在本阶段范围内，且会为一次导出会话创建不必要的持久化。
 
-## Consequences
+## 后果
 
-Users must fully quit WeChat before scanning and validating. Re-exporting after
-a completed batch requires another scan and validation because keys are not
-retained. This phase intentionally exports only plain SQLite databases; it does
-not parse messages, contacts, media, or schemas.
+用户必须在扫描和验证前完全退出微信。完成批量导出后再次导出需要重新扫描和验证，因为密钥不会保留。本阶段有意只导出普通 SQLite 数据库；不解析消息、联系人、媒体或 schema。

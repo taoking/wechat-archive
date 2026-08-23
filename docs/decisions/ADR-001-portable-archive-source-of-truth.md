@@ -1,23 +1,23 @@
-# ADR-001: Make portable files the archive source of truth
+# ADR-001：将可移植文件作为归档的事实来源
 
-## Status
+## 状态
 
-Accepted — 2026-08-16
+已接受 — 2026-08-16
 
-## Context
+## 背景
 
-Personal chat records need to survive application, database-library and UI changes over decades. A database-only archive risks requiring a particular engine or schema to remain usable; Word/PDF-only exports lose structure and searchability.
+个人聊天记录需要在数十年间经受应用、数据库库和 UI 的变化。仅含数据库的归档可能要求特定引擎或 schema 长期可用；仅导出 Word/PDF 则会丢失结构和可搜索性。
 
-## Decision
+## 决策
 
-Archive v1 uses UTF-8 JSON metadata, conversation/year NDJSON message partitions, ordinary media files and SHA-256 checksums. SQLite is a local, versioned index that may be rebuilt from these files.
+Archive v1 使用 UTF-8 JSON 元数据、按会话／年份划分的 NDJSON 消息分区、普通媒体文件和 SHA-256 校验和。SQLite 是可由这些文件重建的本地、带版本索引。
 
-## Alternatives considered
+## 考虑过的替代方案
 
-- SQLite only: excellent query performance but weaker independent portability.
-- A single `messages.json`: simple at small size but poor for very large archives and incremental work.
-- Word/PDF only: good reading output, unsuitable for lossless structured preservation.
+- 仅 SQLite：查询性能优异，但独立可移植性较弱。
+- 单个 `messages.json`：小规模时简单，但不适合超大归档和增量工作。
+- 仅 Word/PDF：阅读输出良好，但不适合无损结构化保存。
 
-## Consequences
+## 后果
 
-Every importer must preserve enough normalized data to write portable files, and every schema change needs a documented archive migration. Search/index data can be optimized without changing the durable format.
+每个导入器都必须保留足够的归一化数据以写入可移植文件，每次 schema 变化都需要有文档的归档迁移。搜索／索引数据可被优化，而不改变持久格式。

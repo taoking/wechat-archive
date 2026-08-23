@@ -1,25 +1,25 @@
-# Import Formats
+# 导入格式
 
-`ChatImportProvider` exposes two operations: `preview(at:)` and `messages(at:)`. Providers parse an explicit local URL into normalized `Message` values; persistence belongs to `ImportCoordinator` and `SQLiteArchiveIndex`.
+`ChatImportProvider` 提供两个操作：`preview(at:)` 和 `messages(at:)`。提供器将显式本地 URL 解析为归一化 `Message` 值；持久化属于 `ImportCoordinator` 和 `SQLiteArchiveIndex` 的职责。
 
 ## JSON
 
-The current JSON provider accepts an array of Archive v1 Message JSON objects. It uses the Archive v1 date and snake-case field definitions.
+当前 JSON 提供器接受 Archive v1 Message JSON 对象数组，并使用 Archive v1 的日期和 snake-case 字段定义。
 
 ## NDJSON
 
-The current NDJSON provider accepts one Archive v1 Message object per non-empty UTF-8 line. It streams conceptually by lines and does not require one giant `messages.json` file.
+当前 NDJSON 提供器接受每个非空 UTF-8 行一个 Archive v1 Message 对象。它按行进行概念上的流式处理，不需要一个巨大的 `messages.json` 文件。
 
-## Planned source adapters
+## 计划中的来源适配器
 
-- CSV requires an explicit column-mapping screen. Minimum fields are timestamp, conversation, sender, type, content and media path.
-- TXT/HTML imports must preserve available source metadata and label unrepresentable data `unknown`; they must not fabricate contacts, media or times.
-- WeChat database import is an adapter pipeline after snapshot/decrypt/detect; see [WECHAT_DATABASE.md](WECHAT_DATABASE.md).
+- CSV 需要显式的列映射界面。最少字段为时间戳、会话、发送者、类型、内容和媒体路径。
+- TXT/HTML 导入必须保留可用来源元数据，并将无法表达的数据标为 `unknown`；不得虚构联系人、媒体或时间。
+- 微信数据库导入是在快照／解密／检测之后的 Adapter 管线；参见 [WECHAT_DATABASE.md](WECHAT_DATABASE.md)。
 
-## Incremental import
+## 增量导入
 
-`source_message_id` is used first when available. Without it, the fallback fingerprint combines conversation ID, sender ID, timestamp, type, content SHA-256 and sorted media hashes. This prevents most duplicated reimports but can treat two truly identical, id-less messages as duplicates. The import session records read, inserted and skipped counts so users can audit the result.
+可用时优先使用 `source_message_id`。否则，后备指纹组合会话 ID、发送者 ID、时间戳、类型、内容 SHA-256 和排序后的媒体哈希。这能防止大多数重复导入，但可能将两条真正相同且没有 ID 的消息视为重复。导入会话会记录读取、插入和跳过数量，供用户审计结果。
 
-## Crash safety
+## 崩溃安全
 
-Imports are written in bounded batches (default 1,000 messages) and each index batch is a transaction. A crash leaves completed batches consistent, and rerunning the import does not generate duplicates under the documented strategy.
+导入按有上限的批次写入（默认每批 1,000 条消息），每个索引批次都是一个事务。崩溃后已完成的批次仍保持一致，按已记录策略重新运行导入不会生成重复项。

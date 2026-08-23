@@ -1,87 +1,61 @@
-# ADR-009: Resolve image attachments through message resources and bounded DAT recovery
+# ADR-009：通过消息资源和受限 DAT 恢复解析图片附件
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-The first Phase 3A investigation showed that generic 32-character hexadecimal
-values embedded in Type 3 payloads did not hit the exported hardlink index.
-They therefore could not be assumed to be image MD5 values. The macOS local
-data layout also contains a separate `message_resource` relationship and
-versioned image DAT files. We need evidence for one image association without
-exporting chats, scanning every attachment, calculating bulk hashes, or
-persisting sensitive values.
+最初的第三阶段 A 调查显示，嵌在 Type 3 payload 中的通用 32 位十六进制值无法命中已导出 hardlink 索引，因此不能假定为图片 MD5。macOS 本地数据布局还包含独立的 `message_resource` 关系和带版本的图片 DAT 文件。我们需要在不导出聊天、扫描每个附件、批量计算哈希或持久化敏感值的前提下，为一条图片关联获得证据。
 
-## Decision
+## 决策
 
-For a bounded sample of at most 100 Type 3 messages, use the following
-evidence chain:
+对最多 100 条 Type 3 消息的受限样本，使用以下证据链：
 
-1. validate that the selected `Msg_<32-hex>` table maps to a `ChatName2Id`
-   entry by local MD5 comparison in memory;
-2. parameter-bind the message IDs, type (including low-32-bit compatibility),
-   and creation time against `MessageResourceInfo`;
-3. parse a 32-character hexadecimal *file base* from the documented packed
-   payload marker, with a bounded whole-blob fallback;
-4. inspect only current, previous, and next month under that single chat's
-   `msg/attach/.../Img` directory for main, HD, and thumbnail DAT variants;
-5. detect DAT version before decoding; and
-6. for V2, derive candidate keys only from existing macOS kvcomm
-   `key_<number>_*.statistic` filenames and raw/normalized account directory
-   identifiers, then accept a candidate only after it produces a recognized
-   image header.
+1. 在内存中通过本地 MD5 比较，验证所选 `Msg_<32-hex>` 表映射到 `ChatName2Id` 条目；
+2. 将消息 ID、类型（包含 low-32-bit 兼容性）及创建时间参数绑定到 `MessageResourceInfo`；
+3. 从已记录的 packed payload marker 提取 32 位十六进制 *file base*，并提供有上限的整 BLOB 后备；
+4. 只在该单个聊天的 `msg/attach/.../Img` 目录下检查当前、前一个和后一个月份中的 main、HD、thumbnail DAT 变体；
+5. 解码前检测 DAT 版本；以及
+6. 对 V2，只从现有 macOS kvcomm `key_<number>_*.statistic` 文件名和原始／规范化账号目录标识符派生候选密钥；只有生成已识别图片文件头时才接受候选项。
 
-The V1 fixed-key and V2 AES-ECB/PKCS#7 plus XOR-tail formats are implemented
-as a clean-room Swift decoder using CommonCrypto. Decoded bytes and key
-material stay in memory. The only persisted Phase 3A.2 artifact is a
-privacy-safe local status report beneath ignored `.local-analysis/`, with a
-0700 directory and 0600 files.
+V1 固定密钥与 V2 AES-ECB/PKCS#7 加 XOR-tail 格式，均以使用 CommonCrypto 的 clean-room Swift 解码器实现。解码字节和密钥材料只保留在内存。第三阶段 A.2 唯一持久化工件是位于被忽略 `.local-analysis/` 下的隐私安全本地状态报告，目录为 `0700`、文件为 `0600`。
 
-Publicly available `wx-cli` behaviour was used as an Apache-2.0 reference for
-interoperability. No third-party source code was copied. GPL-licensed projects
-were not used as implementation sources.
+公开可用的 `wx-cli` 行为仅作为 Apache-2.0 互操作参考；未复制第三方源代码，也未使用 GPL 许可项目作为实现来源。
 
-## Alternatives Considered
+## 考虑过的替代方案
 
-### Treat generic payload hex as hardlink MD5
+### 将通用 payload 十六进制值当作 hardlink MD5
 
-- Pros: a short implementation path.
-- Cons: the observed zero-hit evidence contradicts this semantic assumption.
-- Rejected: a shape match alone is not a media relationship.
+- 优点：实现路径短。
+- 缺点：已观察到的零命中证据否定该语义假设。
+- 拒绝原因：仅形状匹配不是媒体关系。
 
-### Recursively scan and hash all attachments
+### 递归扫描并哈希所有附件
 
-- Pros: can eventually find byte-level matches.
-- Cons: broad private-data access, high cost, and no proof that a message value
-  names the found file.
-- Rejected: the resource relationship supplies a narrower, auditable chain.
+- 优点：最终可能找到字节级匹配。
+- 缺点：会广泛访问私有数据、成本高，也无法证明消息值命名了该文件。
+- 拒绝原因：资源关系提供了更狭窄、可审计的链路。
 
-### Brute-force image keys
+### 暴力尝试图片密钥
 
-- Pros: may recover a file in some cases.
-- Cons: uncontrolled computation and an unjustified security boundary.
-- Rejected: only key codes present in local kvcomm metadata may be tried.
+- 优点：在某些情况下可能恢复文件。
+- 缺点：计算无控制，且越过无正当性的安全边界。
+- 拒绝原因：只能尝试本地 kvcomm 元数据中存在的密钥代码。
 
-### Persist decoded images or identifiers for inspection
+### 持久化已解码图片或标识符供检查
 
-- Pros: convenient manual debugging.
-- Cons: creates a new sensitive dataset outside the user's source data.
-- Rejected: output stays structural and decoded data stays in memory.
+- 优点：便于手工调试。
+- 缺点：会在用户来源数据之外创建新的敏感数据集。
+- 拒绝原因：输出保持结构化，解码数据只留在内存中。
 
-## Consequences
+## 后果
 
-- A verified image requires both the message-resource relation and an actual
-  recognized decoded image; Type 3 is not classified as image solely by raw
-  type.
-- UI and reports expose only diagnostics and structural status, never file
-  bases, filenames, paths, IDs, keys, or decoded media.
-- The resolver stops after the first verified image and does not become a
-  full-archive or bulk-media-export workflow.
-- Missing resource rows, packed data, deterministic paths, DAT format, key
-  candidates, rejected keys, and decode failures remain separately diagnosable.
+- 已验证图片同时需要消息资源关系和真实、可识别的解码图片；不会仅凭原始 Type 3 将其分类为图片。
+- UI 和报告仅公开诊断与结构状态，绝不公开 file base、文件名、路径、ID、密钥或解码媒体。
+- 解析器在验证第一张图片后停止，不会变成全量归档或批量媒体导出流程。
+- 缺失资源行、packed data、确定性路径、DAT 格式、密钥候选项、被拒绝密钥和解码失败均保持可单独诊断。

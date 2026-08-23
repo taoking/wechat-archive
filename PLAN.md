@@ -1,45 +1,45 @@
-# WeChat Archive Development Plan
+# WeChat Archive 开发计划
 
-## Phase 1 — Archive foundation (implemented)
+## 第一阶段 — 归档基础（已实现）
 
-- Stable Archive v1 model and JSON/NDJSON serialization.
-- Conversation/year NDJSON partitions, SHA-256 media content addressing, manifest and checksums.
-- Versioned SQLite schema, parameterized writes, FTS5 search, import history and deterministic incremental deduplication.
-- Offline HTML/CSV/JSON/NDJSON exports and archive verification.
-- SwiftUI navigation shell and local-only import/key UX.
+- 稳定的 Archive v1 模型及 JSON/NDJSON 序列化。
+- 会话／年份 NDJSON 分区、SHA-256 媒体内容寻址、manifest 与校验和。
+- 带版本 SQLite schema、参数化写入、FTS5 搜索、导入历史和确定性的增量去重。
+- 离线 HTML/CSV/JSON/NDJSON 导出及归档验证。
+- SwiftUI 导航壳和纯本地导入／密钥体验。
 
-## Phase 2 — Plain SQLite schema discovery (implemented)
+## 第二阶段 — 普通 SQLite Schema 发现（已实现）
 
-- Recursively discover Phase 1 plain SQLite exports, inspect schemas read-only and produce protected JSON/Markdown reports.
-- Classify likely message, contact, conversation, group, media, index and configuration databases from structural signals; group identical schemas by a structure-only SHA-256 fingerprint.
-- Do not read database values, parse messages or export chat content.
+- 递归发现第一阶段普通 SQLite 导出，以只读方式检查 schema 并生成受保护的 JSON/Markdown 报告。
+- 根据结构信号分类可能的消息、联系人、会话、群聊、媒体、索引和配置数据库；按仅结构 SHA-256 指纹将相同 schema 分组。
+- 不读取数据库值、不解析消息、不导出聊天内容。
 
-## Phase 3A — Message & media link discovery (implemented)
+## 第三阶段 A — 消息与媒体链接发现（已实现）
 
-- Load Phase 2's structural report and let the user select a real message-table candidate.
-- Read at most 500 rows from one selected plain SQLite table, preserve source SQLite storage classes and infer field mapping, timestamp unit and raw type distributions.
-- Extract only structural XML/JSON/BLOB evidence, scan a separately selected local media root in a bounded/cancellable way, and verify media links only when evidence is sufficient.
-- Write redacted local analysis reports; do not create or modify Archive v1 data.
+- 读取第二阶段结构报告，并让用户选择真实消息表候选项。
+- 从所选普通 SQLite 表最多读取 500 行，保留源 SQLite 存储类型，并推断字段映射、时间单位和原始类型分布。
+- 仅提取结构化 XML/JSON/BLOB 证据，以有上限、可取消的方式扫描另行选择的本地媒体根目录；只有证据充分时才验证媒体链接。
+- 写入脱敏的本地分析报告；不创建或修改 Archive v1 数据。
 
-## Phase 3B — First real message adapter
+## 第三阶段 B — 首个真实消息 Adapter
 
-- Select a confirmed message schema group and implement a minimal, fixture-backed adapter for normalized messages.
-- Add JSON/NDJSON archive import UI with preview, progress, cancellation and resumable source copies.
-- Add CSV/TXT/HTML adapters with explicit field mapping rather than heuristic loss of data.
+- 选择已确认的消息 schema 组，并为归一化消息实现最小化、基于 fixture 的 Adapter。
+- 增加带预览、进度、取消和可恢复来源复制的 JSON/NDJSON 归档导入 UI。
+- 增加带显式字段映射的 CSV/TXT/HTML Adapter，而不是启发式地丢失数据。
 
-## Phase 3 — Archive browser
+## 第三阶段 — 归档浏览器
 
-- Read conversations and contacts from the index with 100–500 item pagination.
-- Add chat timeline, jump-to-message, date navigation, media gallery, Quick Look, AVKit and voice decoder interfaces.
-- Implement actual dashboard statistics and health UI.
+- 从索引以每页 100–500 项读取会话和联系人。
+- 增加聊天时间线、跳转到消息、日期导航、媒体图库、Quick Look、AVKit 和语音解码器接口。
+- 实现真实的仪表盘统计与健康状态 UI。
 
-## Phase 4 — Export and lifecycle
+## 第四阶段 — 导出与生命周期
 
-- Add media-copy option to HTML export and deterministic export folders.
-- Add OpenXML DOCX exporter and year-split PDF exporter.
-- Add Archive v1→v2 migration runner, index rebuild tool and backup reminders.
+- 为 HTML 导出增加媒体复制选项和确定性的导出文件夹。
+- 增加 OpenXML DOCX 导出器和按年份分割的 PDF 导出器。
+- 增加 Archive v1→v2 迁移运行器、索引重建工具和备份提醒。
 
-## Non-goals
+## 非目标
 
-- No server-side import, remote key discovery, account access, cloud sync or analytics.
-- No parsing of data the local macOS user is not authorized to access.
+- 不提供服务端导入、远程密钥发现、账号访问、云同步或分析。
+- 不解析当前 macOS 用户无权访问的数据。

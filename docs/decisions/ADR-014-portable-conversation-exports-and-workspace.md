@@ -1,71 +1,41 @@
-# ADR-014: Portable Conversation Exports and Persisted Workspace
+# ADR-014：可移植会话导出与持久化工作区
 
-- Status: Accepted
-- Date: 2026-08-23
+- 状态：已接受
+- 日期：2026-08-23
 
-## Context
+## 背景
 
-An archive is useful for long-term personal viewing, but a person also needs a
-small, shareable, offline representation of one selected conversation. The
-export must continue to work after the original WeChat directories, plaintext
-SQLite databases, and decryption material are unavailable.
+归档适合长期个人查看，但用户也需要一个小型、可分享、离线的单个会话表示。即使原始微信目录、普通 SQLite 数据库和解密材料都不可用，导出仍必须可用。
 
-The app should also make routine archive viewing practical without retaining
-any encryption keys or message content in application preferences.
+应用还应让日常查看归档变得实际可行，同时不能在应用偏好设置中保留任何加密密钥或消息内容。
 
-## Decision
+## 决策
 
-1. Conversation export opens only a `WeChatArchive` root and one archive
-   conversation identifier. Its public API has no source-root, SQLCipher, or
-   key parameters.
-2. HTML, JSON, and Markdown exports are derived data. Each starts in a private
-   staging directory and is atomically renamed only after it is complete.
-   Cancelling or failing removes the staging directory.
-3. HTML has embedded CSS and only relative local media references. It uses no
-   remote CSS, JavaScript, CDN, avatar download, or network dependency.
-4. Exports include only viewer-friendly decoded images, playable video, WAV
-   voice, and locally archived avatars. Raw DAT and Silk stay in the private
-   archive rather than becoming normal sharing output.
-5. Default output omits source database paths, tables, row identifiers, source
-   identities, file-base values, and raw types. An explicit technical option
-   may expose only the raw type for diagnostics; it does not expose source
-   identities.
-6. Archive-relative media is resolved through the viewer's safe resolver and
-   copied only after a regular-file, non-symlink check. The export destination
-   cannot be inside the archive. Output directories use `0700`; files use
-   `0600`.
-7. Exporting streams paged archive messages and incrementally writes output;
-   it does not build a conversation-wide message array.
-8. UserDefaults stores only selected folder locations, recent archive roots,
-   the last export format, and the selected conversation. It never stores
-   source keys, AES material, passwords, or message content. On launch, only
-   a previously valid archive may be reopened automatically; export remains a
-   user action.
+1. 会话导出只打开一个 `WeChatArchive` 根目录和一个归档会话标识符。其公开 API 不含来源根目录、SQLCipher 或密钥参数。
+2. HTML、JSON 和 Markdown 导出是派生数据。每次均从私有暂存目录开始，且只在完成后原子重命名。取消或失败会移除暂存目录。
+3. HTML 内嵌 CSS，并只使用相对本地媒体引用；不使用远程 CSS、JavaScript、CDN、头像下载或网络依赖。
+4. 导出只包含适合查看器的已解码图片、可播放视频、WAV 语音和本地已归档头像。原始 DAT 和 Silk 保留在私有归档，而不会成为普通共享输出。
+5. 默认输出省略来源数据库路径、表、行标识符、来源身份、file-base 值和原始类型。显式技术选项可仅为诊断公开原始类型；不公开来源身份。
+6. 归档相对媒体经由查看器的安全解析器解析，且只有通过普通文件、非符号链接检查后才复制。导出目标不得位于归档内部。输出目录使用 `0700`，文件使用 `0600`。
+7. 导出流式读取分页归档消息并增量写入输出；不会构建整个会话范围的消息数组。
+8. UserDefaults 只保存选择的文件夹位置、最近归档根目录、上次导出格式和所选会话。它绝不保存来源密钥、AES 材料、密码或消息内容。启动时只有之前有效的归档可被自动重新打开；导出仍需用户操作。
 
-## Alternatives considered
+## 考虑过的替代方案
 
-### Re-read WeChat during each conversation export
+### 每次会话导出时重新读取微信
 
-Rejected because it would make exports depend on source data, decryption keys,
-and the original application installation. It would also weaken the archive's
-independence guarantee.
+拒绝原因：这会使导出依赖来源数据、解密密钥和原始应用安装，也会削弱归档独立性保证。
 
-### Export one self-contained HTML document with base64 media
+### 导出一个以 Base64 内嵌媒体的自包含 HTML 文档
 
-Rejected because large videos and images create huge memory use and browser
-files that are difficult to inspect. A small HTML file plus relative media is
-portable while remaining streamable.
+拒绝原因：大视频和图片会造成巨大内存占用及难以检查的浏览器文件。小 HTML 加相对媒体既可移植又可流式处理。
 
-### Persist every recent source and key setting
+### 持久化每个最近来源和密钥设置
 
-Rejected because keys are unnecessary for viewing an archive and retaining
-them would violate the application's privacy boundary.
+拒绝原因：查看归档并不需要密钥，保留它们会违反应用隐私边界。
 
-## Consequences
+## 后果
 
-- The same read-only paged viewer database supports both the viewer and the
-  exporter, including deterministic time-line ordering and media selection.
-- New v4 archives include a conversation timeline index. Older v4 archives
-  remain readable without modification.
-- Sharing remains a user decision: generated exports contain private content
-  and are protected locally by default permissions.
+- 同一个只读、分页查看器数据库同时支持查看器和导出器，包括确定性的时间线排序和媒体选择。
+- 新 v4 归档包含会话时间线索引；旧 v4 归档无需修改仍可读取。
+- 分享仍是用户的决定：生成的导出含有私有内容，默认使用本地受保护权限。

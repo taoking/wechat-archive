@@ -1,23 +1,13 @@
-# Third-Party Notices
+# 第三方声明
 
-## Bundled SQLCipher runtime
+## 随 App 打包的 SQLCipher runtime
 
-The macOS release App bundles the SQLCipher runtime required for local database
-export. SQLCipher is distributed under the BSD 3-Clause License. The exact
-license text for the bundled binary is included in the App at
-`Contents/Resources/ThirdPartyNotices/SQLCipher-LICENSE.txt`.
+macOS Release App 内置了本地数据库导出所需的 SQLCipher runtime。SQLCipher 以 BSD 3-Clause License 发布。随包二进制的完整许可证文本位于 App 内：`Contents/Resources/ThirdPartyNotices/SQLCipher-LICENSE.txt`。
 
-The release App also bundles the corresponding OpenSSL `libcrypto` runtime,
-licensed under Apache License 2.0. Its exact license text is included alongside
-the SQLCipher notice in the App bundle.
+Release App 同时内置对应的 OpenSSL `libcrypto` runtime，采用 Apache License 2.0。完整许可证文本与 SQLCipher 声明一同放在 App bundle 内。
 
-## Optional Silk decoder
+## 可选 Silk 解码器
 
-Voice conversion can use the separately installed `silk_v3_decoder` executable
-from [kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder). That
-project is MIT licensed. Its SDK-derived Silk source files carry the upstream
-Skype BSD-style redistribution notice, including its patent disclaimer.
+语音转换可使用单独安装的 [kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder) 项目的 `silk_v3_decoder` 可执行文件。该项目采用 MIT 许可证；其 SDK 衍生的 Silk 源文件带有上游 Skype BSD 风格再分发声明，其中包含专利免责声明。
 
-This repository does not include, compile, or redistribute that decoder's
-source or binary. When an operator installs the optional decoder, they are
-responsible for retaining the upstream notices and complying with its license.
+本仓库不包含、编译或再分发该解码器的源代码或二进制文件。操作者安装可选解码器后，应自行保留上游声明并遵守其许可证。

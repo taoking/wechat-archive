@@ -1,76 +1,55 @@
-# ADR-008: Keep media identifiers as candidates until independently confirmed
+# ADR-008：在独立确认前将媒体标识符保留为候选项
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-Some Type 3 message payloads contain 32-character hexadecimal strings and
-fixed-length binary blocks. A shape match alone does not establish that a value
-is an image MD5: it may instead be a server identifier, content reference, or
-unrelated opaque value. Treating every shape match as an MD5 sends the resolver
-to the wrong hardlink record and can make an unsupported chain look like a
-missing file.
+一些 Type 3 消息 payload 含有 32 位十六进制字符串和固定长度二进制块。形状匹配本身不能证明值是图片 MD5：它也可能是服务器标识符、内容引用或无关的不透明值。将每个形状匹配都当作 MD5，会把解析器导向错误 hardlink 记录，并让不支持链路看起来像缺失文件。
 
-The discovery flow must remain local-only and bounded. It must also be able to
-record useful structural evidence without serializing message content,
-identifiers, paths, filenames, or BLOB bytes.
+发现流程必须保持纯本地且有上限，还必须能够记录有用的结构证据，而不序列化消息内容、标识符、路径、文件名或 BLOB 字节。
 
-## Decision
+## 决策
 
-Represent extracted values as `CandidateMediaIdentifier` and retain the value
-only in memory. Unkeyed 32-character hexadecimal text is named
-`hex32Candidate`, not `MD5`.
+将提取值表示为 `CandidateMediaIdentifier`，并且只在内存中保留该值。没有键名的 32 位十六进制文本命名为 `hex32Candidate`，而不是 `MD5`。
 
-Upgrade a candidate to `confirmedMD5` only when at least one independent source
-of evidence exists:
+仅在至少存在一个独立证据来源时，才将候选项升级为 `confirmedMD5`：
 
-- an explicit structured `md5` field name;
-- a decoded XML or JSON `md5` key;
-- a documented structural field meaning;
-- an exact hardlink `md5` text-column hit; or
-- a verified equality with the bytes of the resolved local media file.
+- 明确的结构化 `md5` 字段名；
+- 已解码 XML 或 JSON 中的 `md5` 键；
+- 已记录的结构字段语义；
+- 精确命中 hardlink `md5` 文本列；或
+- 与已解析本地媒体文件字节的已验证相等性。
 
-The bounded Type 3 workflow reports aggregate storage, compression, protobuf
-wire structure, candidate counts, hardlink hit counts, and optional timestamp
-range overlap. These are diagnostic evidence only; timestamp overlap is never a
-media association decision. Safe local reports exclude candidate values and all
-source payload values.
+受限 Type 3 流程报告聚合存储、压缩、protobuf wire 结构、候选项数量、hardlink 命中数量和可选的时间戳范围重叠。这些只是诊断证据；时间戳重叠绝不作为媒体关联决策。安全本地报告排除候选值和所有来源 payload 值。
 
-## Alternatives Considered
+## 考虑过的替代方案
 
-### Treat every 32-character hexadecimal string as an MD5
+### 将每个 32 位十六进制字符串都视为 MD5
 
-- Pros: minimal implementation.
-- Cons: conflates representation with meaning and makes false negative hardlink
-  lookups misleading.
-- Rejected: the representation does not provide sufficient evidence.
+- 优点：实现路径最短。
+- 缺点：混淆表示与语义，并使 hardlink 假阴性查询具有误导性。
+- 拒绝原因：表示形式不能提供充分证据。
 
-### Compute MD5 for every local media file
+### 为每个本地媒体文件计算 MD5
 
-- Pros: may eventually find a matching byte sequence.
-- Cons: unbounded read cost, unnecessary access to unrelated private files, and
-  no proof that the message candidate has MD5 semantics.
-- Rejected: conflicts with the local, bounded reverse-engineering phase.
+- 优点：最终可能找到匹配字节序列。
+- 缺点：读取成本无上限、会不必要访问无关私有文件，也不能证明消息候选项具有 MD5 语义。
+- 拒绝原因：与纯本地、有界逆向阶段冲突。
 
-### Persist all extracted values for later analysis
+### 持久化所有提取值以供日后分析
 
-- Pros: convenient comparison across runs.
-- Cons: creates a new privacy-sensitive dataset.
-- Rejected: values stay in memory; only aggregates are written beneath the
-  ignored local-analysis directory.
+- 优点：便于跨运行比较。
+- 缺点：会创建新的隐私敏感数据集。
+- 拒绝原因：值只保留在内存中；仅聚合信息写入被忽略的本地分析目录。
 
-## Consequences
+## 后果
 
-- Existing consumers can distinguish an unconfirmed candidate from a confirmed
-  MD5 instead of silently treating both as the same value.
-- Hardlink queries use the `md5` text column only. The integer `md5_hash` index
-  is recorded as schema evidence and is not cast to text for matching.
-- A zero-hit batch triggers bounded schema inspection for an intermediate media
-  metadata table instead of speculative path guessing or whole-directory hash
-  calculation.
+- 现有使用方可区分未确认候选项和已确认 MD5，而不是静默将两者视为同一值。
+- hardlink 查询只使用 `md5` 文本列。整数 `md5_hash` 索引被记录为 schema 证据，且不会转为文本匹配。
+- 零命中批次会触发对中间媒体元数据表的有上限 schema 检查，而不是推测路径或计算整个目录哈希。

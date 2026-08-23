@@ -1,40 +1,34 @@
 # WeChat Archive v0.1.0
 
-First usable local-first release of WeChat Archive for macOS.
+WeChat Archive 面向 macOS 的首个可用、本地优先版本。
 
-## Highlights
+## 亮点
 
-- Creates a one-time, local-first `WeChatArchive` from owner-authorized WeChat data.
-- Reads the resulting archive without reopening WeChat, source databases, or keys.
-- Reconstructs supported text, image, video, and voice timeline entries; raw source rows remain preserved for unsupported messages.
-- Shows contact and group identities when locally available, with private avatar placeholders when no local asset was recovered.
-- Exports an individual conversation to offline HTML, JSON, or Markdown with viewer-friendly media.
-- Remembers non-sensitive workspace locations and the most recently opened archive.
-- Cancels large-media conversation exports without waiting for a whole file copy.
+- 从所有者已授权的微信数据创建一次性、本地优先的 `WeChatArchive`。
+- 无需重新打开微信、源数据库或密钥，即可读取生成的归档。
+- 重建受支持的文本、图片、视频和语音时间线条目；未支持消息仍保留原始来源行。
+- 在本地可用时显示联系人和群聊身份；没有恢复本地头像时使用私有占位图。
+- 将单个会话导出为离线 HTML、JSON 或 Markdown，并携带适合查看器的媒体。
+- 记住非敏感工作区位置和最近打开的归档。
+- 取消包含大媒体的会话导出时，无需等待整个文件复制完成。
 
-## Privacy
+## 隐私
 
-- All processing is local.
-- No chat data or keys are uploaded.
-- Key-map locations may be remembered, but key-map contents and decryption material are never persisted in preferences or archives.
+- 所有处理均在本机完成。
+- 不上传聊天数据或密钥。
+- 可以记住 key map 的位置，但绝不将 key map 内容或解密材料持久化到偏好设置或归档中。
 
-## Current Scope
+## 当前范围
 
-v0.1.0 supports one-time Full Export. It does not provide live
-synchronization, incremental backup, or cloud sync. Less common WeChat message
-types remain preserved losslessly as unsupported messages.
+v0.1.0 支持一次性完整导出；不提供实时同步、增量备份或云同步。较少见的微信消息类型会作为未支持消息无损保留。
 
-## Voice Decoder
+## 语音解码器
 
-Raw Silk voice is preserved during archive export. Silk → WAV requires a
-compatible locally installed decoder. Existing archived WAV voice messages
-remain playable without the WeChat source data.
+归档导出时会保留原始 Silk 语音。Silk → WAV 需要兼容的本地已安装解码器。已归档的 WAV 语音消息无需微信来源数据即可播放。
 
-## Distribution
+## 分发
 
-- The macOS Apple Silicon App bundles SQLCipher and its required OpenSSL
-  runtime. Its third-party licenses are included inside the App bundle.
-- Signing: AD-HOC.
-- Notarization: NOT DONE.
-- Because the build is not notarized, macOS may show a security warning on
-  first launch.
+- macOS Apple Silicon App 内置 SQLCipher 和所需的 OpenSSL runtime，第三方许可证位于 App bundle 内。
+- 签名：AD-HOC。
+- Notarization：尚未完成。
+- 由于构建尚未 notarize，macOS 首次启动时可能显示安全警告。

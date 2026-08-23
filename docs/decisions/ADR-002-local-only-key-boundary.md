@@ -1,23 +1,23 @@
-# ADR-002: Keep database keys local, explicit and short-lived
+# ADR-002：保持数据库密钥仅限本地、显式且短生命周期
 
-## Status
+## 状态
 
-Accepted — 2026-08-16
+已接受 — 2026-08-16
 
-## Context
+## 背景
 
-Database keys and messages are highly sensitive. The application is for a user’s own local data, not remote collection or background discovery.
+数据库密钥和消息高度敏感。应用面向用户自己的本地数据，而非远程收集或后台发现。
 
-## Decision
+## 决策
 
-Keys enter through explicit local providers only. Manual entry is one-use and non-persistent by default. Any future persistent key choice uses macOS Keychain only after separate opt-in. The decryptor interface receives the key only for local validation/decryption and has no network path.
+密钥仅能经由显式本地提供器进入。手动输入默认一次性且不持久化。任何未来持久化密钥的选择，都只能在单独选择加入后使用 macOS Keychain。解密器接口仅为本地验证／解密接收密钥，且没有网络路径。
 
-## Alternatives considered
+## 考虑过的替代方案
 
-- Saving a key in UserDefaults/JSON: easy to implement but unnecessarily exposes a sensitive secret.
-- Implicit background key discovery: violates user intent and makes data access opaque.
-- Remote decryption service: violates the local-first requirement.
+- 将密钥存入 UserDefaults/JSON：容易实现，但会不必要地暴露敏感秘密。
+- 隐式后台发现密钥：违背用户意图，并使数据访问不透明。
+- 远程解密服务：违背本地优先要求。
 
-## Consequences
+## 后果
 
-SQLCipher integration must be injected locally and audited. Error and logging policies remain deliberately generic, and tests use artificial keys only when a provider’s format must be tested.
+SQLCipher 集成必须在本地注入并可审计。错误和日志策略有意保持通用；只有在必须测试提供器格式时，测试才使用人工密钥。

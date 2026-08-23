@@ -1,68 +1,36 @@
-# ADR-013: Avatar Recovery and Core Chat Reconstruction
+# ADR-013：头像恢复与核心聊天重建
 
-- Status: Accepted
-- Date: 2026-08-23
+- 状态：已接受
+- 日期：2026-08-23
 
-## Context
+## 背景
 
-The archive is a private, one-time, self-contained export. The viewer must
-continue to show names, messages, media, and avatars after the original
-WeChat data root and plaintext SQLite export are unavailable. Core chat
-readability takes priority over expanding parsers for unsupported message
-types.
+归档是私有、一次性、自包含的导出。在原始微信数据根目录和普通 SQLite 导出不可用后，查看器仍必须显示名称、消息、媒体和头像。核心聊天可读性优先于扩展未支持消息类型的解析器。
 
-## Research and evidence
+## 调研与证据
 
-The following public repositories were selected as schema and product-design
-leads: `r266-tech/wechat-cli`, `jackwener/wx-cli` (and its public fork),
-`kclx/WeChatDecrypted`, and `ILoveBingLu/CipherTalk`. During this decision the
-remote GitHub endpoints were unavailable, so no remote source or dependency
-was used and no third-party code was copied. Local, non-committed research
-notes record that limitation.
+以下公开仓库被选为 schema 和产品设计线索：`r266-tech/wechat-cli`、`jackwener/wx-cli`（及其公开 fork）、`kclx/WeChatDecrypted` 与 `ILoveBingLu/CipherTalk`。作出此决策时，远程 GitHub endpoint 不可用，因此未使用远程来源或依赖，也未复制第三方代码。本地、未提交的调研记录保留该限制。
 
-The locally validated macOS WeChat 4.x plaintext schema provides a direct,
-bounded mapping between contact identities and local avatar image buffers:
+经本机验证的 macOS WeChat 4.x 普通 SQLite schema，为联系人身份和本地头像图片 buffer 提供直接且有上限的映射：
 
 ```
 contact.username -> head_image.username -> head_image.image_buffer
 ```
 
-The contact table also exposes small and large avatar URL metadata. URLs are
-not proof of a local file and are not fetched by export or by the viewer.
+联系人表还公开小／大头像 URL 元数据。URL 不能证明本地文件存在，导出和查看器均不会获取它们。
 
-## Decision
+## 决策
 
-1. Archive schema v4 adds `avatar_assets` and `avatar_owner_links`.
-   `contacts` preserves optional small and large avatar URL metadata for a
-   future user-initiated download feature, but viewer rendering is local-only.
-2. The exporter accepts a local avatar only when an exact contact identity
-   joins to the observed `head_image` cache. It accepts only bounded JPEG,
-   PNG, GIF, or WebP buffers, rejects symlinked cache databases, and never
-   guesses from filenames, hashes, or URL fragments.
-3. Avatar files are private archive media under owner-specific directories,
-   named by archive IDs rather than source identities. Their dimensions and
-   SHA-256 values are recorded and validated.
-4. A contact avatar can be linked to a private conversation, group
-   conversation, group member, and account as appropriate. Missing evidence
-   produces a neutral placeholder; no incorrect avatar is substituted.
-5. The archive viewer remains read-only and accepts only an archive root. It
-   uses paged conversations, newest-first message loading with older-history
-   pagination, local avatar caching, message summaries, image preview, and
-   WAV voice playback.
-6. Media copying distinguishes raw-copy failure from decoded-copy failure.
-   When raw media is successfully written but decoded output cannot be
-   written, the raw archive path and hash remain indexed with
-   `decodedCopyFailed` status. Silk decoding has a bounded timeout and
-   cooperative cancellation.
+1. Archive schema v4 增加 `avatar_assets` 和 `avatar_owner_links`。`contacts` 为未来由用户主动发起的下载功能保留可选小／大头像 URL 元数据，但查看器仍只在本地渲染。
+2. 仅当精确联系人身份 join 到观察到的 `head_image` 缓存时，导出器才接受本地头像。它只接受有上限的 JPEG、PNG、GIF 或 WebP buffer，拒绝符号链接缓存数据库，绝不从文件名、哈希或 URL 片段猜测。
+3. 头像文件作为私有归档媒体存于按所有者划分的目录，使用归档 ID 而非来源身份命名；其尺寸和 SHA-256 会被记录和验证。
+4. 联系人头像可按需要链接到私聊会话、群聊会话、群成员和账号。缺少证据时生成中性占位图；绝不替换为错误头像。
+5. 归档查看器保持只读且只接受归档根目录。它使用分页会话、最新优先消息加载及更早历史分页、本地头像缓存、消息摘要、图片预览和 WAV 语音播放。
+6. 媒体复制区分原始复制失败和解码复制失败。当原始媒体已成功写入但无法写入解码输出时，原始归档路径和哈希仍以 `decodedCopyFailed` 状态索引。Silk 解码具有有上限的超时和协作式取消。
 
-## Consequences
+## 后果
 
-- A new full export creates a v4 archive. Earlier archives remain readable
-  without avatar support.
-- The validator checks SQLite integrity, foreign keys, all media and avatar
-  hashes, and rejects unreferenced regular files or symlinks beneath `media/`.
-- If no trustworthy local avatar cache exists, the archive retains private URL
-  metadata when available but renders a placeholder. It does not access the
-  network.
-- File attachments and low-priority message parsers remain intentionally
-  deferred; unknown messages remain losslessly preserved.
+- 新完整导出会创建 v4 归档；早期归档仍可在没有头像支持的条件下读取。
+- 验证器检查 SQLite 完整性、外键、所有媒体和头像哈希，并拒绝 `media/` 下未被引用的普通文件或符号链接。
+- 没有可信本地头像缓存时，归档会在可用时保留私有 URL 元数据，但渲染占位图，不访问网络。
+- 文件附件和低优先级消息解析器仍有意延后；未知消息继续无损保留。

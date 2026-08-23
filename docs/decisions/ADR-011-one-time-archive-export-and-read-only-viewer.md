@@ -1,78 +1,50 @@
-# ADR-011: Use one-time Archive v2 exports with a read-only viewer
+# ADR-011：使用一次性 Archive v2 导出和只读查看器
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-The product scope is a one-time, complete local export that remains usable
-after WeChat and its plaintext SQLite export are unavailable. The previous
-Archive v1 plan described incremental import semantics and used `local_id` as
-the physical source identity. A real SQLite table can contain more than one
-row with the same local ID, so that identity can discard history during a
-single export. Incremental merge and media repair are explicitly outside this
-version's scope.
+产品范围是一次性、完整的本地导出；即使微信和其普通 SQLite 导出不可用，结果仍可使用。此前 Archive v1 方案描述增量导入语义，并使用 `local_id` 作为物理来源身份。真实 SQLite 表可含有多条相同本地 ID 的行，因此该身份可能在一次导出中丢失历史记录。本版本明确不包含增量合并和媒体修复。
 
-Bounded local validation confirmed the Type 43 video relationship through the
-message resource index and deterministic monthly video path, and the Type 34
-voice relationship through `VoiceInfo` and its raw voice BLOB. macOS can play
-archived MP4 directly, but it does not natively play the observed Silk data.
+受限本地验证确认 Type 43 视频通过消息资源索引和确定性月度视频路径关联，Type 34 语音通过 `VoiceInfo` 和其原始语音 BLOB 关联。macOS 可直接播放已归档 MP4，但不能原生播放观察到的 Silk 数据。
 
-## Decision
+## 决策
 
-Archive schema version 2 uses the tuple `(source_database, source_table,
-source_sqlite_rowid)` as physical message identity. `local_id` and `server_id`
-remain preserved source metadata, not a uniqueness constraint.
+Archive schema version 2 使用元组 `(source_database, source_table, source_sqlite_rowid)` 作为物理消息身份。`local_id` 与 `server_id` 保留为来源元数据，而不是唯一性约束。
 
-Each Full Export requires a new or empty destination. Existing archives are
-not merged, repaired, or incrementally updated. Every supported and unknown
-message retains its complete typed source row. The unified `media_assets`
-table stores image, video, and voice variants with independent hashes and
-paths. Videos are copied unchanged as play/raw/thumbnail assets; no transcoder
-is introduced. Voice data is copied byte-for-byte and marked Silk only after
-its bounded header detector confirms that format. No unreviewed Silk decoder
-is bundled, so raw Silk remains viewable as archived-but-not-playable until a
-compatible, license-reviewed decoder is selected.
+每次完整导出均要求新的或空的目标目录。现有归档不合并、不修复、不增量更新。每条受支持和未知消息均保留完整有类型来源行。统一的 `media_assets` 表保存图片、视频和语音变体，并含独立哈希和路径。视频作为 play/raw/thumbnail 资产原样复制；不引入转码器。语音数据逐字节复制，且只在受限文件头检测器确认 Silk 格式后标为 Silk。不打包未经审查的 Silk 解码器，因此原始 Silk 在选出兼容、已审查解码器前保持“已归档但不可播放”。
 
-The Archive Viewer opens only `archive.sqlite` in SQLite read-only/query-only
-mode and resolves media only below the selected archive folder. Conversation
-and timeline queries are paged and join media metadata in the same query,
-avoiding source-directory access and N+1 media lookups.
+Archive Viewer 仅以 SQLite 只读／query-only 模式打开 `archive.sqlite`，且只解析所选归档目录下的媒体。会话和时间线查询分页，并在同一查询中 join 媒体元数据，避免访问来源目录和 N+1 媒体查询。
 
-## Alternatives Considered
+## 考虑过的替代方案
 
-### Keep `local_id` as the message key
+### 继续使用 `local_id` 作为消息键
 
-- Pros: familiar field and a smaller key.
-- Cons: duplicate local IDs can lose source rows in a full export.
-- Rejected: SQLite `rowid` is the physical identity of the exported table.
+- 优点：熟悉字段且键更小。
+- 缺点：重复本地 ID 会丢失来源行。
+- 拒绝原因：SQLite `rowid` 是导出表的物理身份。
 
-### Merge into an existing destination
+### 合并到已有目标目录
 
-- Pros: apparent convenience for repeated export.
-- Cons: requires complete sync, media repair, conflict and cancellation
-  semantics that are not in this product version.
-- Rejected: a new empty destination makes one-time export deterministic.
+- 优点：重复导出看似方便。
+- 缺点：需要完整的同步、媒体修复、冲突和取消语义，这些不在本产品版本内。
+- 拒绝原因：新的空目录让一次性导出具有确定性。
 
-### Transcode video or bundle an unreviewed Silk decoder
+### 转码视频或打包未经审查的 Silk 解码器
 
-- Pros: uniform playback formats.
-- Cons: transcode changes source bytes; an unreviewed decoder introduces
-  licensing and maintenance risk.
-- Rejected: preserve original assets first; MP4 plays directly and raw Silk is
-  retained for a later audited playback implementation.
+- 优点：播放格式统一。
+- 缺点：转码会改变来源字节；未经审查的解码器会引入许可证和维护风险。
+- 拒绝原因：先保留原始资产；MP4 可直接播放，原始 Silk 留给后续已审计的播放实现。
 
-## Consequences
+## 后果
 
-- A full export cannot silently omit duplicate-local-ID rows.
-- Archive v2 is self-contained for text, images, archived MP4, and archived
-  voice bytes; the Viewer does not need a WeChat root or a plaintext export.
-- Image and video media missing on the local device remain explicit `missing`
-  assets without dropping their message.
-- Raw Silk voice preservation is complete, while Silk playback is intentionally
-  pending a compatible decoder.
+- 完整导出不会静默遗漏重复本地 ID 行。
+- Archive v2 对文本、图片、已归档 MP4 和已归档语音字节是自包含的；查看器不需要微信根目录或普通 SQLite 导出。
+- 本机设备缺失的图片和视频媒体保持显式 `missing` 资产，不会丢弃消息。
+- 原始 Silk 语音保留完整，Silk 播放有意等待兼容解码器。

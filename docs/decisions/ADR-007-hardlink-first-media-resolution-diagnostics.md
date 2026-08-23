@@ -1,28 +1,28 @@
-# ADR-007: Prefer exact hardlink lookup and preserve media-resolution diagnostics
+# ADR-007：优先精确 hardlink 查询并保留媒体解析诊断
 
-## Status
+## 状态
 
-Accepted
+已接受
 
-## Date
+## 日期
 
 2026-08-17
 
-## Context
+## 背景
 
-Phase 3A can extract a structural MD5 from a bounded message sample and has an exported plain `hardlink/hardlink.db`. A recursive account-root scan is comparatively broad: the account's `msg` hierarchy can contain many opaque files, and path classification alone may reach its bounded result cap before a relevant candidate is observed. Treating mapping failures, unsupported schemas and missing files as one generic unresolved result makes local validation impossible to audit.
+第三阶段 A 可以从受限消息样本提取结构化 MD5，并拥有已导出的普通 `hardlink/hardlink.db`。递归扫描账号根目录范围较广：账号的 `msg` 层级可能有许多不透明文件，而仅按路径分类可能在观察到相关候选项前达到结果上限。将映射失败、不支持 schema 和缺失文件统一表示为通用未解析结果，使本地验证无法审计。
 
-## Decision
+## 决策
 
-For references with a structural 32-hex MD5, Phase 3A first opens the exported hardlink database read-only, discovers compatible mapping tables from their actual schema, and performs a parameter-bound exact lookup. A unique mapping is tested against a small set of account-root-relative path patterns (`<mapping>`, `msg/<mapping>`, `resource/<mapping>`, `cache/<mapping>`). The resulting file is inspected directly without a media-tree scan or a bulk hash.
+对于具有结构化 32 位十六进制 MD5 的引用，第三阶段 A 首先以只读方式打开已导出的 hardlink 数据库，从实际 schema 中发现兼容映射表，并执行参数绑定的精确查询。唯一映射会针对一小组账号根目录相对路径模式（`<mapping>`、`msg/<mapping>`、`resource/<mapping>`、`cache/<mapping>`）进行测试。所得文件直接检查，无需扫描媒体树或批量哈希。
 
-The diagnostic result is privacy-safe and explicit: missing database, unsupported schema, query failure, no mapping, multiple mappings, missing/ambiguous mapped file, bounded fallback scan, unsupported media decode, or resolved. Reports and UI may show only these labels and structural format metadata; they never write mapping values, MD5 values, filenames or absolute paths.
+诊断结果必须明确且隐私安全：数据库缺失、不支持 schema、查询失败、无映射、多个映射、映射文件缺失／不明确、受限后备扫描、不支持媒体解码或已解析。报告和 UI 只能显示这些标签及结构化格式元数据；绝不写入映射值、MD5 值、文件名或绝对路径。
 
-The existing bounded recursive scanner remains a fallback for unresolved references. Its `20,000` candidate bound is retained, and a reached bound is recorded as `mediaScanTruncated` rather than hidden.
+现有有上限的递归扫描器保留为未解析引用的后备。其 `20,000` 候选上限保持不变，达到上限时记录为 `mediaScanTruncated`，而不是隐藏。
 
-## Consequences
+## 后果
 
-- Exact hardlink evidence takes precedence over path-name guessing and avoids a full-account MD5 pass.
-- A local failure identifies the precise evidence-chain step that needs investigation.
-- An unrecognized mapped image stays unresolved with `mediaDecodeUnsupported`; Phase 3A does not invent an image decoder or modify the source file.
-- The fixed-prefix path rules are intentionally narrow. A future verified storage layout requires a new rule and fixture coverage, not a broad recursive fallback promoted to proof.
+- 精确 hardlink 证据优先于路径名猜测，并避免对全账号执行 MD5。
+- 本地失败能指出需要调查的具体证据链步骤。
+- 无法识别的映射图片以 `mediaDecodeUnsupported` 保持未解析；第三阶段 A 不会虚构图片解码器或改动来源文件。
+- 固定前缀路径规则有意保持狭窄。未来已验证的存储布局需要新规则和 fixture 覆盖，而不是把宽泛递归后备提升为证明。
