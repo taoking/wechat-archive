@@ -16,7 +16,7 @@ struct WeChatArchiveApp: App {
     }
 }
 
-private enum AppSection: String, CaseIterable, Hashable, Identifiable {
+enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case archive = "归档概览"
     case databaseExport = "数据库导出"
     case schemaDiscovery = "结构发现"
@@ -39,27 +39,57 @@ private enum AppSection: String, CaseIterable, Hashable, Identifiable {
     }
 }
 
+@MainActor
+final class ArchiveWorkspace: ObservableObject {
+    let preferences: WorkspacePreferences
+    @Published var section: AppSection? = .archiveViewer
+
+    init(preferences: WorkspacePreferences = .init()) {
+        self.preferences = preferences
+    }
+
+    func openArchive(_ url: URL) {
+        preferences.recordOpenedArchive(url)
+        section = .archiveViewer
+    }
+}
+
 private struct ArchiveShellView: View {
-    @State private var section: AppSection? = .archive
+    @StateObject private var workspace = ArchiveWorkspace()
 
     var body: some View {
         NavigationSplitView {
-            List(AppSection.allCases, selection: $section) { item in
-                Label(item.rawValue, systemImage: item.symbol).tag(item)
+            List(selection: $workspace.section) {
+                Section("主要功能") {
+                    navigationRow(.archiveViewer)
+                    navigationRow(.archiveImport)
+                }
+                Section("高级工具") {
+                    navigationRow(.databaseExport)
+                    navigationRow(.schemaDiscovery)
+                    navigationRow(.messageDiscovery)
+                    navigationRow(.archive)
+                    navigationRow(.settings)
+                }
             }
             .navigationTitle("微信聊天归档")
         } detail: {
-            switch section ?? .archive {
+            switch workspace.section ?? .archiveViewer {
             case .archive: DashboardView()
             case .databaseExport: DatabaseExportView()
             case .schemaDiscovery: SchemaDiscoveryView()
             case .messageDiscovery: MessageDiscoveryView()
-            case .archiveImport: ArchiveImportView()
-            case .archiveViewer: ArchiveViewerView()
+            case .archiveImport: ArchiveImportView(workspace: workspace)
+            case .archiveViewer: ArchiveViewerView(workspace: workspace)
             case .settings: SettingsView()
             }
         }
         .frame(minWidth: 860, minHeight: 560)
+    }
+
+    @ViewBuilder
+    private func navigationRow(_ item: AppSection) -> some View {
+        Label(item.rawValue, systemImage: item.symbol).tag(item)
     }
 }
 

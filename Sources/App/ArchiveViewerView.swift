@@ -6,14 +6,19 @@ import SwiftUI
 import WeChatArchiveCore
 
 struct ArchiveViewerView: View {
+    let workspace: ArchiveWorkspace
     @State private var archivePath = ""
     @State private var viewer: WeChatArchiveViewerDatabase?
     @State private var conversations = [ArchiveViewerConversation]()
+    @State private var conversationLoadedOffset = 0
     @State private var conversationHasMore = false
     @State private var selectedConversationID: String?
     @State private var messages = [ArchiveViewerMessage]()
     @State private var messageHasMore = false
     @State private var status = "请选择 WeChatArchive 文件夹。查看器仅以只读方式打开 archive.sqlite。"
+    @State private var searchText = ""
+    @State private var showingExport = false
+    @State private var timelineScrollToken = UUID()
     @State private var expandedVideoID: String?
     @StateObject private var voicePlayback = VoicePlaybackController()
 
@@ -23,51 +28,59 @@ struct ArchiveViewerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section("WeChatArchive 文件夹") {
-                    HStack {
-                        Button("选择文件夹", action: chooseArchive)
-                        TextField("粘贴归档文件夹路径", text: $archivePath)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(openArchive)
-                        Button("只读打开", action: openArchive)
+            if viewer == nil {
+                Form {
+                    Section("打开 WeChatArchive") {
+                        HStack {
+                            Button("选择文件夹", action: chooseArchive)
+                            TextField("粘贴归档文件夹路径", text: $archivePath)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(openArchive)
+                            Button("只读打开", action: openArchive)
+                        }
+                        Text(status)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("开始完整导出") { workspace.section = .archiveImport }
                     }
-                    Text(status)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    if !workspace.preferences.recentArchiveRoots.isEmpty {
+                        Section("最近归档") {
+                            ForEach(workspace.preferences.recentArchiveRoots, id: \.path) { recent in
+                                Button(recent.lastPathComponent) {
+                                    archivePath = recent.path()
+                                    openArchive()
+                                }
+                            }
+                        }
+                    }
                 }
+                .formStyle(.grouped)
+                .frame(maxHeight: 136)
+            } else {
+                HStack {
+                    Label(archivePath.isEmpty ? "已打开归档" : URL(fileURLWithPath: archivePath).lastPathComponent, systemImage: "archivebox")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                Divider()
             }
-            .formStyle(.grouped)
-            .frame(maxHeight: 136)
 
             HStack(spacing: 0) {
                 List(selection: $selectedConversationID) {
                     ForEach(conversations) { conversation in
-                        HStack(alignment: .center, spacing: 10) {
-                            ArchiveAvatarView(viewer: viewer, avatar: conversation.avatar, size: 42)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(conversation.title).lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    if let timestamp = conversation.lastMessageTimestamp, timestamp > 0 {
-                                        Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .omitted, time: .shortened))
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                Text(conversation.lastMessagePreview ?? "")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .tag(conversation.id)
+                        ConversationSidebarRow(conversation: conversation, viewer: viewer)
+                            .tag(conversation.id)
                     }
                     if conversationHasMore {
                         Button("加载更多会话", action: loadMoreConversations)
                     }
                 }
+                .searchable(text: $searchText, placement: .sidebar, prompt: "搜索会话")
                 .frame(minWidth: 180, idealWidth: 230, maxWidth: 280)
                 .overlay(alignment: .center) {
                     if viewer != nil && conversations.isEmpty { ContentUnavailableView("暂无会话", systemImage: "bubble.left") }
@@ -91,6 +104,7 @@ struct ArchiveViewerView: View {
                         .padding(.vertical, 10)
                         Divider()
                     }
+                    ScrollViewReader { proxy in
                     ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if selectedConversationID != nil, messageHasMore {
@@ -107,8 +121,16 @@ struct ArchiveViewerView: View {
                                 showSenderName: selectedConversation?.type == .group
                             )
                         }
+                        Color.clear.frame(height: 1).id("timeline-bottom")
                     }
                     .padding()
+                    }
+                        .onChange(of: timelineScrollToken) { _, _ in
+                            DispatchQueue.main.async { proxy.scrollTo("timeline-bottom", anchor: .bottom) }
+                        }
+                        .onAppear {
+                            DispatchQueue.main.async { proxy.scrollTo("timeline-bottom", anchor: .bottom) }
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(alignment: .center) {
@@ -117,8 +139,26 @@ struct ArchiveViewerView: View {
                 }
             }
         }
-        .onChange(of: selectedConversationID) { _, _ in loadMessages() }
+        .onChange(of: selectedConversationID) { _, id in
+            if viewer != nil { workspace.preferences.lastSelectedConversationID = id }
+            loadMessages()
+        }
+        .onChange(of: searchText) { _, _ in loadConversations() }
         .navigationTitle("归档查看器")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button("切换归档", action: chooseArchive)
+                if selectedConversation != nil {
+                    Button("导出聊天记录…") { showingExport = true }
+                }
+            }
+        }
+        .sheet(isPresented: $showingExport) {
+            if let viewer, let conversation = selectedConversation {
+                ConversationExportSheet(viewer: viewer, conversation: conversation, workspace: workspace)
+            }
+        }
+        .onAppear(perform: restoreLastArchive)
         .onDisappear { voicePlayback.stop() }
     }
 
@@ -139,18 +179,27 @@ struct ArchiveViewerView: View {
             let root = try LocalDatabaseDirectoryPath.resolve(archivePath)
             let database = try WeChatArchiveViewerDatabase(archiveRoot: root)
             let page = try database.conversationPage()
-            let loadedConversations = page.items
+            var loadedConversations = page.items
             viewer = database
+            let restoredID = workspace.preferences.lastSelectedConversationID
+            if let restoredID,
+               let restoredConversation = try database.conversation(id: restoredID),
+               !loadedConversations.contains(where: { $0.id == restoredID }) {
+                loadedConversations.insert(restoredConversation, at: 0)
+            }
             conversations = loadedConversations
+            conversationLoadedOffset = page.items.count
             conversationHasMore = page.hasMore
-            selectedConversationID = loadedConversations.first?.id
+            selectedConversationID = loadedConversations.first(where: { $0.id == restoredID })?.id ?? loadedConversations.first?.id
             messages = []
             expandedVideoID = nil
+            workspace.preferences.recordOpenedArchive(root)
             status = "归档已以只读方式打开。查看器仅使用此归档文件夹。"
             loadMessages()
         } catch {
             viewer = nil
             conversations = []
+            conversationLoadedOffset = 0
             conversationHasMore = false
             selectedConversationID = nil
             messages = []
@@ -166,6 +215,7 @@ struct ArchiveViewerView: View {
             messageHasMore = page.hasMore
             expandedVideoID = nil
             voicePlayback.stop()
+            timelineScrollToken = UUID()
         } catch {
             messages = []
             status = "无法读取所选归档会话时间线。"
@@ -186,12 +236,39 @@ struct ArchiveViewerView: View {
     private func loadMoreConversations() {
         guard let viewer else { return }
         do {
-            let page = try viewer.conversationPage(offset: conversations.count, limit: 100)
+            let page = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? try viewer.conversationPage(offset: conversationLoadedOffset, limit: 100)
+                : try viewer.searchConversationPage(query: searchText, offset: conversationLoadedOffset, limit: 100)
             conversations.append(contentsOf: page.items)
+            conversationLoadedOffset += page.items.count
             conversationHasMore = page.hasMore
         } catch {
             status = "无法加载更多归档会话。"
         }
+    }
+
+    private func loadConversations() {
+        guard let viewer else { return }
+        do {
+            let page = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? try viewer.conversationPage()
+                : try viewer.searchConversationPage(query: searchText)
+            conversations = page.items
+            conversationLoadedOffset = page.items.count
+            conversationHasMore = page.hasMore
+            if let selectedConversationID, !conversations.contains(where: { $0.id == selectedConversationID }) {
+                self.selectedConversationID = conversations.first?.id
+            }
+        } catch {
+            status = "无法搜索归档会话。"
+        }
+    }
+
+    private func restoreLastArchive() {
+        guard viewer == nil, workspace.preferences.reopenLastArchiveOnLaunch else { return }
+        guard let root = try? workspace.preferences.validLastOpenedArchive() else { return }
+        archivePath = root.path()
+        openArchive()
     }
 
     private func shouldShowTimestamp(at index: Int) -> Bool {
@@ -203,6 +280,32 @@ struct ArchiveViewerView: View {
             Date(timeIntervalSince1970: TimeInterval(previous)),
             inSameDayAs: Date(timeIntervalSince1970: TimeInterval(current))
         )
+    }
+}
+
+private struct ConversationSidebarRow: View {
+    let conversation: ArchiveViewerConversation
+    let viewer: WeChatArchiveViewerDatabase?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ArchiveAvatarView(viewer: viewer, avatar: conversation.avatar, size: 42)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(conversation.title).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if let timestamp = conversation.lastMessageTimestamp, timestamp > 0 {
+                        Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .omitted, time: .shortened))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(conversation.lastMessagePreview ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
     }
 }
 
@@ -338,16 +441,7 @@ private struct ArchiveTimelineMessageRow: View {
         return Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .abbreviated, time: .shortened)
     }
 
-    private var preferredImage: ArchiveViewerMedia? {
-        let ranks: [ArchiveV1MediaVariant: Int] = [.main: 3, .hd: 2, .thumbnail: 1]
-        return message.media.filter { $0.mediaType == .image && $0.decodedRelativePath != nil }.sorted { lhs, rhs in
-            let lhsArea = (lhs.width ?? 0) * (lhs.height ?? 0)
-            let rhsArea = (rhs.width ?? 0) * (rhs.height ?? 0)
-            if lhsArea != rhsArea { return lhsArea > rhsArea }
-            if lhs.decodedSize != rhs.decodedSize { return (lhs.decodedSize ?? 0) > (rhs.decodedSize ?? 0) }
-            return (ranks[lhs.variant] ?? 0) > (ranks[rhs.variant] ?? 0)
-        }.first
-    }
+    private var preferredImage: ArchiveViewerMedia? { ArchiveViewerMediaSelector.preferredImage(in: message.media) }
 
     private var preferredVideo: ArchiveViewerMedia? { firstMedia(type: .video, variants: [.play, .raw], preferDecoded: false) }
     private var preferredVideoThumbnail: ArchiveViewerMedia? { firstMedia(type: .video, variants: [.thumbnail], preferDecoded: false) }

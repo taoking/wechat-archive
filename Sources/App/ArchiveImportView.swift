@@ -4,6 +4,7 @@ import SwiftUI
 import WeChatArchiveCore
 
 struct ArchiveImportView: View {
+    let workspace: ArchiveWorkspace
     @State private var plainSQLiteRoot: URL?
     @State private var plainSQLitePath = ""
     @State private var accountRoot: URL?
@@ -16,6 +17,7 @@ struct ArchiveImportView: View {
     @State private var isWorking = false
     @State private var limit: ArchiveImportLimit = .all
     @State private var cancellation: ArchiveImportCancellation?
+    @State private var restoredWorkspace = false
     @State private var status = "请选择普通 SQLite 导出目录、原始微信账号根目录，以及新的或空的归档目标目录。"
 
     private var canAnalyze: Bool {
@@ -158,6 +160,9 @@ struct ArchiveImportView: View {
                     Text("每条已导入消息都会保留完整的原始 SQLite 行。未知类型将以未知消息归档，不会被丢弃。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let archiveRoot, summary.status == .completed {
+                        Button("打开归档") { workspace.openArchive(archiveRoot) }
+                    }
                 }
             }
 
@@ -168,6 +173,7 @@ struct ArchiveImportView: View {
         .formStyle(.grouped)
         .padding()
         .navigationTitle("归档导出")
+        .onAppear(perform: restoreWorkspace)
     }
 
     @ViewBuilder
@@ -235,18 +241,21 @@ struct ArchiveImportView: View {
     private func setPlainSQLiteRoot(_ url: URL) {
         plainSQLiteRoot = url.standardizedFileURL
         plainSQLitePath = plainSQLiteRoot?.path() ?? ""
+        workspace.preferences.lastPlainSQLiteRoot = plainSQLiteRoot
         resetAnalysis()
     }
 
     private func setAccountRoot(_ url: URL) {
         accountRoot = url.standardizedFileURL
         accountRootPath = accountRoot?.path() ?? ""
+        workspace.preferences.lastAccountRoot = accountRoot
         resetAnalysis()
     }
 
     private func setArchiveRoot(_ url: URL) {
         archiveRoot = url.standardizedFileURL
         archiveRootPath = archiveRoot?.path() ?? ""
+        workspace.preferences.lastArchiveParentDirectory = archiveRoot?.deletingLastPathComponent()
         resetAnalysis()
         if !archiveDestinationIsEmpty {
             status = "归档已存在或目标目录不为空。请为完整导出选择新的空目录。"
@@ -258,6 +267,30 @@ struct ArchiveImportView: View {
         summary = nil
         progress = nil
         status = "路径已选择。请先点击“分析导出”，再执行完整导出。"
+    }
+
+    private func restoreWorkspace() {
+        guard !restoredWorkspace else { return }
+        restoredWorkspace = true
+        if let plain = workspace.preferences.lastPlainSQLiteRoot,
+           FileManager.default.fileExists(atPath: plain.path()) {
+            plainSQLiteRoot = plain
+            plainSQLitePath = plain.path()
+        }
+        if let account = workspace.preferences.lastAccountRoot,
+           FileManager.default.fileExists(atPath: account.path()) {
+            accountRoot = account
+            accountRootPath = account.path()
+        }
+        if let parent = workspace.preferences.lastArchiveParentDirectory,
+           FileManager.default.fileExists(atPath: parent.path()) {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyyMMdd-HHmm"
+            let suggested = parent.appending(path: "WeChatArchive-\(formatter.string(from: Date()))")
+            archiveRoot = suggested
+            archiveRootPath = suggested.path()
+        }
     }
 
     private func analyzeImport() {
