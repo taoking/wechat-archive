@@ -1,6 +1,34 @@
 import Darwin
 import Foundation
 
+/// Resolves an explicitly bundled SQLCipher runtime before development-only
+/// Homebrew locations. The app bundle is the release trust boundary; no
+/// network fetch or user-specific location is considered here.
+enum SQLCipherRuntimeLocator {
+    static func defaultLibraryURL() throws -> URL {
+        guard let match = firstReadableLibraryURL(
+            bundledLibraryURL: Bundle.main.privateFrameworksURL?.appendingPathComponent("libsqlcipher.dylib"),
+            fallbackURLs: homebrewFallbackURLs
+        ) else {
+            throw ArchiveError.decryptionRuntimeUnavailable
+        }
+        return match
+    }
+
+    static func firstReadableLibraryURL(bundledLibraryURL: URL?, fallbackURLs: [URL]) -> URL? {
+        ([bundledLibraryURL].compactMap { $0 } + fallbackURLs).first {
+            FileManager.default.isReadableFile(atPath: $0.path(percentEncoded: false))
+        }
+    }
+
+    private static let homebrewFallbackURLs = [
+        "/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib",
+        "/usr/local/opt/sqlcipher/lib/libsqlcipher.dylib",
+        "/opt/homebrew/lib/libsqlcipher.dylib",
+        "/usr/local/lib/libsqlcipher.dylib"
+    ].map(URL.init(fileURLWithPath:))
+}
+
 /// Typed SQLCipher settings applied after the key and before the first page is
 /// read. Defaults are SQLCipher's own defaults; callers may opt into a known
 /// source layout without accepting arbitrary SQL text.
@@ -296,16 +324,7 @@ private final class SQLCipherAPI: @unchecked Sendable {
     deinit { dlclose(handle) }
 
     private static func defaultLibraryURL() throws -> URL {
-        let candidates = [
-            "/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib",
-            "/usr/local/opt/sqlcipher/lib/libsqlcipher.dylib",
-            "/opt/homebrew/lib/libsqlcipher.dylib",
-            "/usr/local/lib/libsqlcipher.dylib"
-        ].map(URL.init(fileURLWithPath:))
-        guard let match = candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path()) }) else {
-            throw ArchiveError.decryptionRuntimeUnavailable
-        }
-        return match
+        try SQLCipherRuntimeLocator.defaultLibraryURL()
     }
 
     private static func load<T>(_ symbol: String, from handle: UnsafeMutableRawPointer, as type: T.Type) throws -> T {

@@ -17,7 +17,7 @@ WeChat Archive 是一个 macOS 本地优先的个人聊天记录归档工具。�
 
 ### 1. 准备环境
 
-需要 macOS 15、完整 Xcode 和 Homebrew SQLCipher：
+从源码运行需要 macOS 15、完整 Xcode 和 Homebrew SQLCipher：
 
 ```zsh
 brew bundle
@@ -97,4 +97,4 @@ git diff --check
 ./scripts/build-app.sh
 ```
 
-产物位于 `dist/微信聊天归档.app`，采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)。
+产物位于 `dist/WeChat Archive.app`，会内置 SQLCipher 与所需 OpenSSL runtime，因而不依赖目标机器上的 Homebrew。Silk → WAV 仍需要一个兼容的本机 `silk_v3_decoder`；已经归档的 WAV 语音无需该工具即可播放。该 App 采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)。

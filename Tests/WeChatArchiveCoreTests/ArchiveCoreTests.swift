@@ -978,6 +978,25 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testSQLCipherRuntimeLocatorPrefersBundledRuntimeOverFallbacks() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bundled = directory.appending(path: "Frameworks/libsqlcipher.dylib")
+        let fallback = directory.appending(path: "Homebrew/libsqlcipher.dylib")
+        try FileManager.default.createDirectory(at: bundled.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fallback.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("bundled fixture".utf8).write(to: bundled, options: .atomic)
+        try Data("fallback fixture".utf8).write(to: fallback, options: .atomic)
+
+        try expectEqual(
+            SQLCipherRuntimeLocator.firstReadableLibraryURL(
+                bundledLibraryURL: bundled,
+                fallbackURLs: [fallback]
+            ),
+            bundled
+        )
+    }
+
     func testSQLCipherDecryptorExportsPlaintextToProtectedWorkingDirectoryWithoutChangingSource() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
