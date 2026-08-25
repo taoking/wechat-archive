@@ -451,7 +451,7 @@ final class ConversationExportTests: XCTestCase {
             XCTAssertFalse(text.contains("md5"))
         }
 
-        let indexURL = try XCTUnwrap(search.indexURL)
+        let indexURL = search.indexURL
         var handle: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(indexURL.path, &handle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
         defer { sqlite3_close(handle) }
@@ -478,7 +478,7 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertEqual(try search.search(query: "Hello", offset: 0, limit: 50).items.count, 20)
 
         XCTAssertEqual(try search.prepareIndex().state, .reused)
-        let databaseURL = try XCTUnwrap(search.indexURL)
+        let databaseURL = search.indexURL
         XCTAssertEqual(try permissionBits(at: databaseURL), 0o600)
         XCTAssertEqual(try permissionBits(at: cacheRoot), 0o700)
 
@@ -503,7 +503,7 @@ final class ConversationExportTests: XCTestCase {
             XCTAssertEqual(error as? ArchiveSearchIndexError, .cancelled)
         }
         XCTAssertGreaterThanOrEqual(indexed, 250)
-        let target = try XCTUnwrap(search.indexURL)
+        let target = search.indexURL
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
 
@@ -512,7 +512,7 @@ final class ConversationExportTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
         let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
         _ = try search.prepareIndex()
-        let indexURL = try XCTUnwrap(search.indexURL)
+        let indexURL = search.indexURL
 
         var handle: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(indexURL.path, &handle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
@@ -534,10 +534,17 @@ final class ConversationExportTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
         let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
         _ = try search.prepareIndex()
-        let indexURL = try XCTUnwrap(search.indexURL)
+        let indexURL = search.indexURL
         try FileManager.default.removeItem(at: indexURL)
         try writePrivate(Data("not a sqlite database".utf8), to: indexURL)
 
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
+
+        // prepareIndex() must also recover on its own: a corrupt cached index
+        // should be detected and rebuilt, not left in place to keep failing
+        // every subsequent launch.
+        let rebuilt = try search.prepareIndex()
+        XCTAssertEqual(rebuilt.state, .built)
         XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
     }
 

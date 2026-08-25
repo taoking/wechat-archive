@@ -131,6 +131,7 @@ struct ArchiveViewerView: View {
                         ConversationSidebarRow(
                             conversation: conversation,
                             viewer: viewer,
+                            onOpen: { selectedConversationID = conversation.id },
                             onExport: {
                                 selectedConversationID = conversation.id
                                 showingExport = true
@@ -400,10 +401,9 @@ struct ArchiveViewerView: View {
     private func jumpToMessage(_ messageID: String, in conversationID: String) {
         guard let viewer else { return }
         do {
-            guard try viewer.messageOffset(conversationID: conversationID, messageID: messageID) != nil else {
-                status = "未找到该消息，归档内容可能已发生变化。"
-                return
-            }
+            // messageWindow already throws .invalidInput when the message
+            // doesn't exist (via its own cheap indexed lookup), so there is
+            // no need for a separate, much more expensive existence check.
             let window = try viewer.messageWindow(conversationID: conversationID, aroundMessageID: messageID, before: 50, after: 50)
             messages = window.items
             messageHasMore = window.hasOlder
@@ -418,6 +418,8 @@ struct ArchiveViewerView: View {
                 try? await Task.sleep(for: .seconds(2))
                 if highlightedMessageID == messageID { highlightedMessageID = nil }
             }
+        } catch ArchiveError.invalidInput {
+            status = "未找到该消息，归档内容可能已发生变化。"
         } catch {
             status = "无法定位到该消息。"
         }
@@ -565,6 +567,7 @@ struct ArchiveViewerView: View {
 private struct ConversationSidebarRow: View {
     let conversation: ArchiveViewerConversation
     let viewer: WeChatArchiveViewerDatabase?
+    let onOpen: () -> Void
     let onExport: () -> Void
 
     var body: some View {
@@ -588,7 +591,7 @@ private struct ConversationSidebarRow: View {
         }
         .padding(.vertical, 4)
         .contextMenu {
-            Button("打开") { }
+            Button("打开", action: onOpen)
             Button("导出聊天记录…", action: onExport)
             Divider()
             Button("复制会话名称") {
@@ -763,7 +766,7 @@ private struct ArchiveTimelineMessageRow: View {
         if message.normalizedType == .text {
             Button("复制") { copy(ArchiveViewerMessageCopyFormatter.text(message)) }
             Button("复制文字和时间") { copy(ArchiveViewerMessageCopyFormatter.textWithTimestamp(message)) }
-            if showSenderName {
+            if showSenderName, message.direction != .outgoing {
                 Button("复制文字、发送者和时间") { copy(ArchiveViewerMessageCopyFormatter.textWithSenderAndTimestamp(message)) }
             }
         }
@@ -1000,6 +1003,7 @@ private struct MessageSearchSheet: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var debouncer = SearchDebouncer()
     @State private var hasMore = false
+    @State private var avatarsByConversationID: [String: ArchiveViewerAvatar?] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1074,9 +1078,12 @@ private struct MessageSearchSheet: View {
             let page = try (searchService?.search(query: query, offset: offset, limit: 50)
                 ?? viewer.searchMessagePage(query: query, offset: offset, limit: 50))
             if appending {
-                results.append(contentsOf: page.items.filter { candidate in !results.contains(where: { $0.id == candidate.id }) })
+                let newItems = page.items.filter { candidate in !results.contains(where: { $0.id == candidate.id }) }
+                results.append(contentsOf: newItems)
+                resolveAvatars(for: newItems)
             } else {
                 results = page.items
+                resolveAvatars(for: results)
             }
             hasMore = page.hasMore
             status = results.isEmpty ? "未找到匹配的文本消息。" : "已显示 \(results.count) 条匹配消息\(page.hasMore ? "，可继续加载。" : "。")"
@@ -1097,9 +1104,19 @@ private struct MessageSearchSheet: View {
             + Text(String(snippet[range.upperBound...]))
     }
 
+    /// Resolves each distinct conversation at most once per result set and
+    /// caches the outcome (including "no avatar") so `avatar(for:)` stays a
+    /// pure dictionary lookup instead of a database query on every render.
+    private func resolveAvatars(for items: [ArchiveViewerMessageSearchResult]) {
+        let missingIDs = Set(items.map(\.conversationID)).subtracting(avatarsByConversationID.keys)
+        guard !missingIDs.isEmpty else { return }
+        for id in missingIDs {
+            avatarsByConversationID[id] = (try? viewer.conversation(id: id))?.avatar
+        }
+    }
+
     private func avatar(for result: ArchiveViewerMessageSearchResult) -> ArchiveViewerAvatar? {
-        guard let conversation = try? viewer.conversation(id: result.conversationID) else { return nil }
-        return conversation.avatar
+        avatarsByConversationID[result.conversationID] ?? nil
     }
 }
 

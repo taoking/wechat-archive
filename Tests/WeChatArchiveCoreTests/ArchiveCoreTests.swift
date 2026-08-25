@@ -518,6 +518,15 @@ final class ArchiveCoreTests: XCTestCase {
         let plainPresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: plainQuote)
         XCTAssertEqual(plainPresentation?.quotedSummary, "Fixture quoted text")
         XCTAssertEqual(plainPresentation?.replyText, "Fixture reply body")
+
+        // The reply body itself may contain the same closing-tag substring as
+        // the quoted XML's root element (e.g. a technical discussion). The
+        // document boundary must end at the FIRST matching close tag, not the
+        // last, or the reply gets truncated at its own embedded substring.
+        let replyContainingCloseTagQuote = "引用「Fixture Sender」：<msg><img aeskey=\"fixture\"/></msg>\ncheck out this </msg> tag"
+        let replyContainingCloseTagPresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: replyContainingCloseTagQuote)
+        XCTAssertEqual(replyContainingCloseTagPresentation?.quotedSummary, "[图片]")
+        XCTAssertEqual(replyContainingCloseTagPresentation?.replyText, "check out this </msg> tag")
     }
 
     func testQuotedMessageSummaryRecognizesReferenceTypesAndSafeXMLFallbacks() {

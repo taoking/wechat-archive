@@ -153,18 +153,15 @@ private enum XMLBoundary {
     /// intentionally hides malformed XML instead of exposing attributes.
     static func endIndex(in text: String) -> String.Index? {
         let roots = ["msg", "sysmsg", "appmsg"]
-        guard let root = roots
+        guard let rootMatch = roots
             .compactMap({ name in text.range(of: "<\(name)", options: [.caseInsensitive]).map { (name, $0) } })
-            .min(by: { $0.1.lowerBound < $1.1.lowerBound })?.0 else {
+            .min(by: { $0.1.lowerBound < $1.1.lowerBound }) else {
             return nil
         }
-        let closeTag = "</\(root)>"
-        var searchStart = text.startIndex
-        var boundary: String.Index?
-        while let range = text.range(of: closeTag, options: [.caseInsensitive], range: searchStart..<text.endIndex) {
-            boundary = range.upperBound
-            searchStart = range.upperBound
-        }
-        return boundary
+        let closeTag = "</\(rootMatch.0)>"
+        // The first closing tag after the opening tag ends the document.
+        // Anything after it — including a reply that happens to contain this
+        // same substring — is free-form text, not part of the XML payload.
+        return text.range(of: closeTag, options: [.caseInsensitive], range: rootMatch.1.upperBound..<text.endIndex)?.upperBound
     }
 }

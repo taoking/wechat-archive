@@ -31,11 +31,22 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
     private static let presentationVersion = "2"
     public let archiveRoot: URL
     public let indexRoot: URL
-    public private(set) var indexURL: URL?
 
     public init(archiveRoot: URL, indexRoot: URL? = nil) {
         self.archiveRoot = archiveRoot.resolvingSymlinksInPath().standardizedFileURL
         self.indexRoot = indexRoot ?? Self.defaultIndexRoot()
+    }
+
+    /// The private FTS cache location for this archive. Derived purely from
+    /// `archiveRoot`/`indexRoot` — a stable hash of the archive path, never
+    /// mutable shared state — so it is safe to read from any thread without
+    /// requiring `prepareIndex()` to have run first.
+    public var indexURL: URL {
+        indexRoot.appendingPathComponent("\(archiveCacheKey).sqlite", isDirectory: false)
+    }
+
+    private var archiveCacheKey: String {
+        ArchiveCryptography.sha256(Data(archiveRoot.path.utf8))
     }
 
     /// Builds or reuses the private FTS cache. The progress callback contains
@@ -47,20 +58,23 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         let sourceURL = try validatedArchiveDatabaseURL()
         let fingerprint = try sourceFingerprint(databaseURL: sourceURL)
         try prepareIndexDirectory()
-        let target = indexRoot.appendingPathComponent("\(fingerprint.cacheKey).sqlite", isDirectory: false)
-        indexURL = target
+        let target = indexURL
 
-        if let reusable = try existingPreparation(at: target, fingerprint: fingerprint.value) {
+        // A corrupt or unreadable cached index (disk corruption, a truncated
+        // write) must not permanently block search: treat any failure to
+        // read it the same as "no reusable index" and rebuild below, instead
+        // of letting the error escape before the corrupt file is removed.
+        if let reusable = try? existingPreparation(at: target, fingerprint: fingerprint) {
             return reusable
         }
         try removeExistingIndex(at: target)
 
-        let staging = indexRoot.appendingPathComponent(".\(fingerprint.cacheKey)-\(UUID().uuidString).staging.sqlite", isDirectory: false)
+        let staging = indexRoot.appendingPathComponent(".\(archiveCacheKey)-\(UUID().uuidString).staging.sqlite", isDirectory: false)
         defer { try? removeExistingIndex(at: staging) }
         let preparation = try buildIndex(
             sourceURL: sourceURL,
             targetURL: staging,
-            fingerprint: fingerprint.value,
+            fingerprint: fingerprint,
             shouldCancel: shouldCancel,
             progress: progress
         )
@@ -76,14 +90,12 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .init(items: [], hasMore: false) }
         let pageSize = min(max(limit, 1), 500)
-        guard let indexURL else {
-            return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
-        }
+        let target = indexURL
         let preparation: ArchiveSearchIndexPreparation
         do {
             guard let existing = try existingPreparation(
-                at: indexURL,
-                fingerprint: try sourceFingerprint(databaseURL: validatedArchiveDatabaseURL()).value
+                at: target,
+                fingerprint: try sourceFingerprint(databaseURL: validatedArchiveDatabaseURL())
             ) else {
                 return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
             }
@@ -96,9 +108,9 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
             // SQLite's trigram tokenizer does not index one- or two-character
             // terms. LIKE preserves practical Chinese searches such as “深圳”.
             if preparation.tokenizer != .trigram || trimmed.unicodeScalars.count < 3 {
-                return try indexedLikeSearch(indexURL: indexURL, query: trimmed, offset: offset, limit: pageSize)
+                return try indexedLikeSearch(indexURL: target, query: trimmed, offset: offset, limit: pageSize)
             }
-            return try ftsSearch(indexURL: indexURL, query: trimmed, offset: offset, limit: pageSize)
+            return try ftsSearch(indexURL: target, query: trimmed, offset: offset, limit: pageSize)
         } catch {
             return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
         }
@@ -199,7 +211,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
                 conversationTitle: title,
                 timestamp: sqlite3_column_int64(statement, 3),
                 normalizedType: .text,
-                snippet: Self.snippet(for: content, query: snippetQuery)
+                snippet: ArchiveTextSnippetBuilder.snippet(for: content, query: snippetQuery)
             ))
         }
         let hasMore = results.count > limit
@@ -253,7 +265,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         return databaseURL
     }
 
-    private func sourceFingerprint(databaseURL: URL) throws -> (cacheKey: String, value: String) {
+    private func sourceFingerprint(databaseURL: URL) throws -> String {
         let attributes = try FileManager.default.attributesOfItem(atPath: databaseURL.path)
         let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         let modificationDate = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -261,8 +273,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         defer { sqlite3_close(database) }
         let messageCount = try scalarInt(database, "SELECT COUNT(*) FROM messages")
         let schemaVersion = try scalarInt(database, "PRAGMA user_version")
-        let archiveIdentity = ArchiveCryptography.sha256(Data(archiveRoot.path.utf8))
-        return (archiveIdentity, "\(archiveIdentity)|\(size)|\(modificationDate)|\(messageCount)|\(schemaVersion)")
+        return "\(archiveCacheKey)|\(size)|\(modificationDate)|\(messageCount)|\(schemaVersion)"
     }
 
     private func createFTS(in database: OpaquePointer) throws -> ArchiveSearchTokenizer {
@@ -342,18 +353,6 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
-    }
-
-    private static func snippet(for content: String, query: String) -> String {
-        guard let range = content.range(of: query, options: [.caseInsensitive]) else {
-            return content.count > 60 ? String(content.prefix(60)) + "…" : content
-        }
-        let lower = content.index(range.lowerBound, offsetBy: -24, limitedBy: content.startIndex) ?? content.startIndex
-        let upper = content.index(range.upperBound, offsetBy: 24, limitedBy: content.endIndex) ?? content.endIndex
-        var result = String(content[lower..<upper])
-        if lower != content.startIndex { result = "…" + result }
-        if upper != content.endIndex { result += "…" }
-        return result
     }
 
     private static func defaultIndexRoot() -> URL {
