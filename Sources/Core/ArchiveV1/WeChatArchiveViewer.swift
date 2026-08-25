@@ -58,6 +58,39 @@ public struct ArchiveViewerMessage: Identifiable, Equatable, Sendable {
     public var media: [ArchiveViewerMedia]
 }
 
+/// One text-content search hit. It carries only a display snippet, never the
+/// full message body or any source database identifier.
+public struct ArchiveViewerMessageSearchResult: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let conversationID: String
+    public let conversationTitle: String
+    public let timestamp: Int64
+    public let normalizedType: ArchiveV1NormalizedType
+    public let snippet: String
+}
+
+public struct ArchiveViewerTypeCoverage: Identifiable, Equatable, Sendable {
+    public var id: String { normalizedType.rawValue }
+    public let normalizedType: ArchiveV1NormalizedType
+    public let messageCount: Int
+}
+
+public struct ArchiveViewerMediaCoverage: Identifiable, Equatable, Sendable {
+    public var id: String { "\(mediaType.rawValue)-\(status.rawValue)" }
+    public let mediaType: ArchiveV1MediaType
+    public let status: ArchiveV1MediaStatus
+    public let count: Int
+}
+
+/// A read-only summary of how much of the archive Core could normalize into
+/// a displayable type. It never includes message text or media bytes.
+public struct ArchiveViewerCoverageSummary: Equatable, Sendable {
+    public let totalMessages: Int
+    public let totalConversations: Int
+    public let byType: [ArchiveViewerTypeCoverage]
+    public let mediaByStatus: [ArchiveViewerMediaCoverage]
+}
+
 /// A read-only, paged view over a self-contained archive. This type never
 /// accepts or opens a WeChat source directory, key map, or source database.
 public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
@@ -313,6 +346,121 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
             if newestFirst { messages.removeFirst() } else { messages.removeLast() }
         }
         return .init(items: messages, hasMore: hasMore)
+    }
+
+    /// Finds the zero-based ascending timeline position of a message inside
+    /// its conversation, using the same ordering as `messagePage`. Returns
+    /// nil when the id is not present (e.g. a stale search result).
+    public func messageOffset(conversationID: String, messageID: String) throws -> Int? {
+        let statement = try prepare("""
+            WITH ordered AS (
+                SELECT id, ROW_NUMBER() OVER (
+                    ORDER BY timestamp ASC, source_sequence ASC, source_database ASC, source_table ASC, \(sourceRowIDColumn) ASC
+                ) AS position
+                FROM messages
+                WHERE conversation_id = ?
+            )
+            SELECT position FROM ordered WHERE id = ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(conversationID, at: 1, to: statement)
+        try bind(messageID, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Int(sqlite3_column_int64(statement, 0)) - 1
+    }
+
+    /// Searches `messages.text_content` across every conversation in the
+    /// archive. It never searches media, sender identifiers, or source
+    /// database values, and only text messages are matched.
+    public func searchMessagePage(query: String, offset: Int = 0, limit: Int = 50) throws -> ArchiveViewerPage<ArchiveViewerMessageSearchResult> {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .init(items: [], hasMore: false) }
+        let pageSize = clamped(limit)
+        let statement = try prepare("""
+            SELECT m.id, m.conversation_id, c.display_name, c.conversation_type, m.timestamp, m.normalized_type, m.text_content
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.text_content LIKE ? ESCAPE '\\'
+            ORDER BY m.timestamp DESC, m.source_sequence DESC, m.source_database DESC, m.source_table DESC, m.\(sourceRowIDColumn) DESC
+            LIMIT ? OFFSET ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind("%\(escapedLikePattern(trimmed))%", at: 1, to: statement)
+        try bind(Int64(pageSize + 1), at: 2, to: statement)
+        try bind(Int64(max(offset, 0)), at: 3, to: statement)
+        var results = [ArchiveViewerMessageSearchResult]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = text(statement, 0), let conversationID = text(statement, 1),
+                  let typeValue = text(statement, 5), let normalizedType = ArchiveV1NormalizedType(rawValue: typeValue) else { continue }
+            let conversationType = text(statement, 3).flatMap(ArchiveV1ConversationType.init(rawValue:)) ?? .unknown
+            let fallbackTitle = conversationType == .group ? "群聊" : "会话"
+            let title = text(statement, 2).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackTitle
+            let content = text(statement, 6) ?? ""
+            results.append(.init(
+                id: id,
+                conversationID: conversationID,
+                conversationTitle: title,
+                timestamp: sqlite3_column_int64(statement, 4),
+                normalizedType: normalizedType,
+                snippet: Self.snippet(for: content, query: trimmed)
+            ))
+        }
+        let hasMore = results.count > pageSize
+        if hasMore { results.removeLast() }
+        return .init(items: results, hasMore: hasMore)
+    }
+
+    /// Aggregates message and media counts by normalized type and archive
+    /// status only. It never reads message text or media bytes.
+    public func coverageSummary() throws -> ArchiveViewerCoverageSummary {
+        .init(
+            totalMessages: try scalarInt("SELECT COUNT(*) FROM messages"),
+            totalConversations: try scalarInt("SELECT COUNT(*) FROM conversations"),
+            byType: try typeCoverage(),
+            mediaByStatus: try mediaCoverage()
+        )
+    }
+
+    private func scalarInt(_ sql: String) throws -> Int {
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw ArchiveError.databaseFailure }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func typeCoverage() throws -> [ArchiveViewerTypeCoverage] {
+        let statement = try prepare("SELECT normalized_type, COUNT(*) FROM messages GROUP BY normalized_type")
+        defer { sqlite3_finalize(statement) }
+        var results = [ArchiveViewerTypeCoverage]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = text(statement, 0), let type = ArchiveV1NormalizedType(rawValue: value) else { continue }
+            results.append(.init(normalizedType: type, messageCount: Int(sqlite3_column_int64(statement, 1))))
+        }
+        return results.sorted { $0.messageCount > $1.messageCount }
+    }
+
+    private func mediaCoverage() throws -> [ArchiveViewerMediaCoverage] {
+        let statement = try prepare("SELECT media_type, status, COUNT(*) FROM media_assets GROUP BY media_type, status")
+        defer { sqlite3_finalize(statement) }
+        var results = [ArchiveViewerMediaCoverage]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let typeValue = text(statement, 0), let mediaType = ArchiveV1MediaType(rawValue: typeValue),
+                  let statusValue = text(statement, 1), let status = ArchiveV1MediaStatus(rawValue: statusValue) else { continue }
+            results.append(.init(mediaType: mediaType, status: status, count: Int(sqlite3_column_int64(statement, 2))))
+        }
+        return results.sorted { $0.count > $1.count }
+    }
+
+    private static func snippet(for content: String, query: String, contextLength: Int = 24) -> String {
+        guard let range = content.range(of: query, options: [.caseInsensitive]) else {
+            return content.count > 60 ? String(content.prefix(60)) + "…" : content
+        }
+        let lowerBound = content.index(range.lowerBound, offsetBy: -contextLength, limitedBy: content.startIndex) ?? content.startIndex
+        let upperBound = content.index(range.upperBound, offsetBy: contextLength, limitedBy: content.endIndex) ?? content.endIndex
+        var snippet = String(content[lowerBound..<upperBound])
+        if lowerBound != content.startIndex { snippet = "…" + snippet }
+        if upperBound != content.endIndex { snippet += "…" }
+        return snippet
     }
 
     public func mediaURL(for media: ArchiveViewerMedia, preferDecoded: Bool) -> URL? {

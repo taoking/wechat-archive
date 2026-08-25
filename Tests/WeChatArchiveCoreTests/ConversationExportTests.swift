@@ -344,6 +344,55 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertTrue(try hasTimelineIndex(in: fixture.root.appending(path: "archive.sqlite")))
     }
 
+    func testCoverageSummaryCountsMessagesByTypeAndMediaByStatus() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+
+        let summary = try viewer.coverageSummary()
+
+        XCTAssertEqual(summary.totalConversations, 1)
+        XCTAssertEqual(summary.totalMessages, 5)
+        XCTAssertEqual(summary.byType.reduce(0) { $0 + $1.messageCount }, 5)
+        XCTAssertEqual(summary.byType.first(where: { $0.normalizedType == .unknown })?.messageCount, 1)
+        XCTAssertTrue(summary.mediaByStatus.contains { $0.mediaType == .image && $0.status == .decoded && $0.count == 1 })
+        XCTAssertTrue(summary.mediaByStatus.contains { $0.mediaType == .video && $0.status == .rawArchived && $0.count == 1 })
+    }
+
+    func testSearchMessagePageFindsTextAcrossConversationsAndComputesSnippet() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+
+        let page = try viewer.searchMessagePage(query: "emoji")
+
+        XCTAssertEqual(page.items.count, 1)
+        XCTAssertEqual(page.items.first?.conversationID, fixture.conversationID)
+        XCTAssertEqual(page.items.first?.normalizedType, .text)
+        XCTAssertTrue(page.items.first?.snippet.contains("emoji") ?? false)
+
+        let empty = try viewer.searchMessagePage(query: "no-such-fragment-xyz")
+        XCTAssertTrue(empty.items.isEmpty)
+
+        // A raw LIKE wildcard in the query must be treated literally, not as a pattern.
+        let escaped = try viewer.searchMessagePage(query: "100%")
+        XCTAssertTrue(escaped.items.isEmpty)
+    }
+
+    func testMessageOffsetMatchesAscendingTimelinePosition() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        let ordered = try viewer.messagePage(conversationID: fixture.conversationID, limit: 100).items
+
+        for (index, message) in ordered.enumerated() {
+            let offset = try viewer.messageOffset(conversationID: fixture.conversationID, messageID: message.id)
+            XCTAssertEqual(offset, index)
+        }
+
+        XCTAssertNil(try viewer.messageOffset(conversationID: fixture.conversationID, messageID: "missing-message-id"))
+    }
+
     /// Opt-in local acceptance coverage. It deliberately emits no private
     /// archive values and is skipped in normal CI.
     func testOptionalExistingArchiveExportsFromArchiveOnly() throws {

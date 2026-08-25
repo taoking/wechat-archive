@@ -187,6 +187,7 @@ public enum TimelineScrollInstruction: Equatable, Sendable {
     case none
     case scrollToBottom
     case preserveAnchor(String)
+    case jumpTo(String)
 }
 
 public struct TimelinePagingState: Equatable, Sendable {
@@ -208,6 +209,17 @@ public struct TimelinePagingState: Equatable, Sendable {
         messageIDs.insert(contentsOf: ids, at: 0)
         self.hasMore = hasMore
         return anchor.map(TimelineScrollInstruction.preserveAnchor) ?? .none
+    }
+
+    /// Replaces the loaded window with a page centered on a jump target (e.g.
+    /// a search result). `hasMore` always reads false afterward: the window's
+    /// offset is no longer tail-anchored, so the existing "load older" paging
+    /// cannot resume until the caller reloads the recent tail.
+    @discardableResult
+    public mutating func replaceCentered(_ ids: [String], focus: String) -> TimelineScrollInstruction {
+        messageIDs = ids
+        hasMore = false
+        return .jumpTo(focus)
     }
 }
 
