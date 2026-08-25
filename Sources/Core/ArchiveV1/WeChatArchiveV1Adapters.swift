@@ -20,6 +20,260 @@ public func rawTypeLow32(_ value: Int64?) -> UInt64? {
     value.map { UInt64(bitPattern: $0) & 0xffff_ffff }
 }
 
+/// The high 32 bits carry the app-message subtype for `local_type` low32 ==
+/// 49 (link share, mini program, red packet, transfer, quote-reply, ...).
+public func rawTypeHigh32(_ value: Int64?) -> UInt64? {
+    value.map { UInt64(bitPattern: $0) >> 32 }
+}
+
+/// Synthesizes readable `.text` content for message categories WeChat
+/// stores as a zstd-compressed XML/plain-text `message_content` BLOB rather
+/// than a TEXT column — observed on WeChat's newer WCDB-based local schema.
+/// It only recognizes shapes verified against a real local archive
+/// (`docs/decisions/` follow-up); anything it cannot confidently parse is
+/// left as `.unknown` exactly as before, so this can only add coverage,
+/// never mislabel a message. It never resolves external XML entities.
+struct WeChatCompressedTextMessageAdapter: Sendable {
+    private let maximumXMLBytes = 512 * 1_024
+
+    func textContent(from values: [String: ArchivedSQLiteValue], rawType: Int64?) -> String? {
+        guard let payload = WeChatMessagePayloadDecoder.decodedPayload(from: values) else { return nil }
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let low32 = rawTypeLow32(rawType)
+        guard trimmed.hasPrefix("<") else {
+            // A group-chat plain-text message whose content WeChat stored as
+            // a compressed blob instead of a TEXT column.
+            return low32 == 1 ? trimmed : nil
+        }
+        guard trimmed.utf8.count <= maximumXMLBytes, let document = WeChatMessageXMLDocument(xml: trimmed) else { return nil }
+        switch low32 {
+        case 10_000: return systemMessageText(document)
+        case 48: return locationMessageText(document)
+        case 49: return appMessageText(document, subtype: rawTypeHigh32(rawType))
+        default: return nil
+        }
+    }
+
+    /// Verified against real `<sysmsg type="revokemsg">` payloads: only the
+    /// revoke-notice subtype is recognized so far. Other `sysmsg` subtypes
+    /// (group notices, pats, ...) fall through to `.unknown` unchanged.
+    private func systemMessageText(_ document: WeChatMessageXMLDocument) -> String? {
+        guard let content = document.text(atPath: ["sysmsg", "revokemsg", "content"]), !content.isEmpty else { return nil }
+        return content
+    }
+
+    private func locationMessageText(_ document: WeChatMessageXMLDocument) -> String? {
+        guard let attributes = document.attributes(atPath: ["msg", "location"]) else { return nil }
+        let name = [attributes["poiname"], attributes["label"]].compactMap { $0 }.first { !$0.isEmpty }
+        guard let name else { return nil }
+        return "[位置] \(name)"
+    }
+
+    /// Covers every `local_type` low32 == 49 subtype generically via the
+    /// `appmsg/title` and `appmsg/refermsg` elements common to WeChat's app
+    /// message schema regardless of subtype (link share, mini program, red
+    /// packet, transfer, quote-reply, ...). Only the quote-reply subtype's
+    /// full tree and the label mapping below were verified against a real
+    /// archive; unverified subtypes still degrade to a generic "[分享]"
+    /// label rather than guessing subtype-specific fields.
+    private func appMessageText(_ document: WeChatMessageXMLDocument, subtype: UInt64?) -> String? {
+        guard let title = document.text(atPath: ["msg", "appmsg", "title"]), !title.isEmpty else { return nil }
+        if let quotedFrom = document.text(atPath: ["msg", "appmsg", "refermsg", "displayname"]), !quotedFrom.isEmpty,
+           let quotedContent = document.text(atPath: ["msg", "appmsg", "refermsg", "content"]), !quotedContent.isEmpty {
+            return "引用「\(quotedFrom)」：\(quotedContent)\n\(title)"
+        }
+        return "[\(appMessageLabel(subtype: subtype))] \(title)"
+    }
+
+    private func appMessageLabel(subtype: UInt64?) -> String {
+        switch subtype {
+        case 5: "链接"
+        case 6: "文件"
+        case 8: "表情"
+        case 19: "聊天记录"
+        case 33, 36: "小程序"
+        case 51, 62, 63: "视频号"
+        case 2000: "红包"
+        case 2001: "转账"
+        default: "分享"
+        }
+    }
+}
+
+/// Decodes `message_content`/`compress_content` when the local exporter
+/// stored it as a zstd-compressed BLOB instead of a TEXT column, and strips
+/// the `"{senderWxid}:\n"` prefix WeChat prepends to group-chat payloads
+/// before compression.
+enum WeChatMessagePayloadDecoder {
+    static func decodedPayload(from values: [String: ArchivedSQLiteValue]) -> String? {
+        for column in ["message_content", "compress_content"] {
+            guard let blob = values.blob(named: [column]),
+                  let decompressed = ZstdPayloadDecompressor.decompress(blob),
+                  var text = String(data: decompressed, encoding: .utf8) else { continue }
+            if let newline = text.firstIndex(of: "\n") {
+                let prefix = text[text.startIndex..<newline]
+                if prefix.hasSuffix(":"), prefix.count <= 64, !prefix.dropLast().contains(where: { $0.isWhitespace }) {
+                    text = String(text[text.index(after: newline)...])
+                }
+            }
+            return text
+        }
+        return nil
+    }
+}
+
+/// Decompresses WeChat's zstd-compressed message payloads via the local
+/// `zstd` CLI (installed by this project's `Brewfile`, matching the same
+/// external-tool boundary already established by `SilkProcessVoiceDecoder`
+/// for Silk voice). Apple's system `Compression` framework does **not**
+/// support Zstandard (verified against the macOS SDK's `compression.h`:
+/// only LZ4/ZLIB/LZMA/LZFSE/LZBITMAP/BROTLI are defined), so unlike Silk
+/// decoding this is not yet bundled into the Release `.app` by
+/// `build-app.sh` — see DEVELOPMENT.md. When the CLI is unavailable,
+/// `decompress` returns nil and the caller leaves the message `.unknown`
+/// exactly as it already does today; this can only add coverage, never
+/// regress it.
+enum ZstdPayloadDecompressor {
+    private static let magic: [UInt8] = [0x28, 0xB5, 0x2F, 0xFD]
+    private static let maximumCompressedBytes = 4 * 1_024 * 1_024
+    private static let maximumDecodedBytes = 8 * 1_024 * 1_024
+    private static let timeout: TimeInterval = 5
+
+    static func decompress(_ data: Data) -> Data? {
+        guard data.count >= magic.count, data.count <= maximumCompressedBytes, data.starts(with: magic) else { return nil }
+        guard let executableURL = defaultExecutableURL() else { return nil }
+        let directory = FileManager.default.temporaryDirectory.appending(path: "WeChatArchive-Zstd-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let inputURL = directory.appending(path: "payload.zst")
+            let outputURL = directory.appending(path: "payload.out")
+            guard FileManager.default.createFile(atPath: inputURL.path(), contents: data, attributes: [.posixPermissions: 0o600]) else { return nil }
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = ["-d", "-q", "-f", "-o", outputURL.path(), inputURL.path()]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning {
+                if Date() >= deadline {
+                    process.terminate()
+                    return nil
+                }
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            guard process.terminationStatus == 0 else { return nil }
+            let metadata = try outputURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard metadata.isRegularFile == true, metadata.isSymbolicLink != true,
+                  let size = metadata.fileSize, size > 0, size <= maximumDecodedBytes else { return nil }
+            return try Data(contentsOf: outputURL, options: .mappedIfSafe)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func defaultExecutableURL() -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        let candidates: [String?] = [
+            environment["WECHAT_ARCHIVE_ZSTD_DECODER"],
+            "/opt/homebrew/bin/zstd",
+            "/usr/local/bin/zstd"
+        ]
+        return candidates.compactMap { $0 }.map(URL.init(fileURLWithPath:)).first(where: isSafeExecutable)
+    }
+
+    // Unlike the media-path validators elsewhere in Core, this only ever
+    // resolves a fixed candidate string or an operator-supplied environment
+    // variable — never an untrusted relative path — so following the
+    // symlink here (needed since Homebrew's official formulas, including
+    // zstd, always install as a Cellar symlink) carries no traversal risk.
+    private static func isSafeExecutable(_ url: URL) -> Bool {
+        let resolved = url.resolvingSymlinksInPath()
+        guard let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey]), values.isRegularFile == true else { return false }
+        return FileManager.default.isExecutableFile(atPath: resolved.path())
+    }
+}
+
+/// A minimal, path-addressed XML reader for message payloads. It disables
+/// external entity and DTD resolution and retains only element text and
+/// attributes, matching the discovery pipeline's structured-payload policy
+/// of never resolving external entities.
+final class WeChatMessageXMLDocument: NSObject, XMLParserDelegate {
+    private struct Node {
+        var text = ""
+        var attributes: [String: String] = [:]
+        var children: [String: Node] = [:]
+    }
+
+    private var root = Node()
+    private var currentPath: [String] = []
+
+    init?(xml: String) {
+        guard let data = xml.data(using: .utf8) else { return nil }
+        super.init()
+        let parser = XMLParser(data: data)
+        parser.shouldResolveExternalEntities = false
+        parser.shouldProcessNamespaces = false
+        parser.delegate = self
+        guard parser.parse() else { return nil }
+    }
+
+    func text(atPath path: [String]) -> String? {
+        node(atPath: path)?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func attributes(atPath path: [String]) -> [String: String]? {
+        node(atPath: path)?.attributes
+    }
+
+    private func node(atPath path: [String]) -> Node? {
+        var current = root
+        for key in path {
+            guard let next = current.children[key] else { return nil }
+            current = next
+        }
+        return current
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        currentPath.append(elementName)
+        setAttributes(attributeDict, at: currentPath)
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        appendText(string, at: currentPath)
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if !currentPath.isEmpty { currentPath.removeLast() }
+    }
+
+    private func setAttributes(_ attributes: [String: String], at path: [String]) {
+        modify(path: path) { node in
+            if !attributes.isEmpty { node.attributes = attributes }
+        }
+    }
+
+    private func appendText(_ string: String, at path: [String]) {
+        guard !path.isEmpty else { return }
+        modify(path: path) { node in node.text += string }
+    }
+
+    private func modify(path: [String], _ body: (inout Node) -> Void) {
+        modify(&root, path: path[...], body)
+    }
+
+    private func modify(_ node: inout Node, path: ArraySlice<String>, _ body: (inout Node) -> Void) {
+        guard let head = path.first else {
+            body(&node)
+            return
+        }
+        modify(&node.children[head, default: Node()], path: path.dropFirst(), body)
+    }
+}
+
 struct ArchiveV1MediaInput {
     let mediaType: ArchiveV1MediaType
     let variant: ArchiveV1MediaVariant
@@ -517,6 +771,11 @@ private extension Dictionary where Key == String, Value == ArchivedSQLiteValue {
 
     func text(named names: [String]) -> String? {
         guard case let .text(value)? = value(named: names) else { return nil }
+        return value
+    }
+
+    func blob(named names: [String]) -> Data? {
+        guard case let .blob(value)? = value(named: names) else { return nil }
         return value
     }
 }

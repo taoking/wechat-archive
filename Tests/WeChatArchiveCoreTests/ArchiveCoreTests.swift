@@ -447,6 +447,69 @@ final class ArchiveCoreTests: XCTestCase {
         }
     }
 
+    func testCompressedTextMessageAdapterDecodesRevokeLocationAndQuoteReplyFromZstdXML() throws {
+        let revokeXML = "<sysmsg type=\"revokemsg\"><revokemsg><session>fixture</session><oldmsgid>1</oldmsgid><msgid>2</msgid><content>\"Fixture User\" 撤回了一条消息</content><revoketime>1700000000</revoketime></revokemsg></sysmsg>"
+        let revokeText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress(revokeXML))],
+            rawType: 10_000
+        )
+        XCTAssertEqual(revokeText, "\"Fixture User\" 撤回了一条消息")
+
+        let locationXML = "<msg><location x=\"1.0\" y=\"2.0\" label=\"Fixture Address\" poiname=\"Fixture POI\"/></msg>"
+        let locationText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress(locationXML))],
+            rawType: 48
+        )
+        XCTAssertEqual(locationText, "[位置] Fixture POI")
+
+        let quoteXML = "<msg><appmsg appid=\"\" sdkver=\"0\"><title>Fixture reply text</title><type>57</type><refermsg><type>1</type><svrid>1</svrid><fromusr>fixture</fromusr><chatusr>fixture</chatusr><displayname>Fixture Sender</displayname><content>Fixture quoted content</content></refermsg></appmsg></msg>"
+        let quoteRawType = Int64(bitPattern: (UInt64(57) << 32) | 49)
+        let quoteText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress("fixture_wxid:\n" + quoteXML))],
+            rawType: quoteRawType
+        )
+        XCTAssertEqual(quoteText, "引用「Fixture Sender」：Fixture quoted content\nFixture reply text")
+
+        let linkXML = "<msg><appmsg appid=\"\" sdkver=\"0\"><title>Fixture Link Title</title><type>5</type></appmsg></msg>"
+        let linkRawType = Int64(bitPattern: (UInt64(5) << 32) | 49)
+        let linkText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress(linkXML))],
+            rawType: linkRawType
+        )
+        XCTAssertEqual(linkText, "[链接] Fixture Link Title")
+    }
+
+    func testCompressedTextMessageAdapterRecoversGroupTextAndFallsThroughOnUnrecognizedTypes() throws {
+        let text = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress("fixture_wxid:\nFixture plain text message"))],
+            rawType: 1
+        )
+        XCTAssertEqual(text, "Fixture plain text message")
+
+        // An unrecognized sysmsg subtype (not revokemsg) must fall through
+        // to nil so the caller leaves the message `.unknown`, never guessed.
+        let otherSysmsgText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress("<sysmsg type=\"other\"><other><content>fixture</content></other></sysmsg>"))],
+            rawType: 10_000
+        )
+        XCTAssertNil(otherSysmsgText)
+
+        // Stickers (local_type 47) are not yet parsed by this adapter and
+        // must stay nil so the message remains `.unknown`.
+        let stickerText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress("<msg><emoji md5=\"fixture\" cdnurl=\"fixture\"/></msg>"))],
+            rawType: 47
+        )
+        XCTAssertNil(stickerText)
+
+        XCTAssertNil(WeChatCompressedTextMessageAdapter().textContent(from: [:], rawType: 1))
+    }
+
+    func testZstdPayloadDecompressorRejectsNonZstdAndOversizedInput() {
+        XCTAssertNil(ZstdPayloadDecompressor.decompress(Data("not zstd".utf8)))
+        XCTAssertNil(ZstdPayloadDecompressor.decompress(Data()))
+    }
+
     func testVideoAndVoiceAdaptersUseValidatedBoundedMappings() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2682,6 +2745,71 @@ final class ArchiveCoreTests: XCTestCase {
         )
     }
 
+    /// Opt-in local acceptance coverage. Measures how many currently-
+    /// `unknown` messages `WeChatCompressedTextMessageAdapter` recovers
+    /// against a real archive, broken down only by `raw_local_type`'s low
+    /// 32 bits. It never inspects or prints recovered message text, only
+    /// aggregate counts, mirroring ConversationExportTests's real-archive
+    /// acceptance test.
+    func testOptionalCompressedTextMessageAdapterCoverageAgainstRealArchive() throws {
+        guard let rootPath = ProcessInfo.processInfo.environment["WECHAT_ARCHIVE_REAL_ROOT"], !rootPath.isEmpty else {
+            throw XCTSkip("Set WECHAT_ARCHIVE_REAL_ROOT for local archive acceptance coverage.")
+        }
+        let databaseURL = URL(fileURLWithPath: rootPath).appending(path: "archive.sqlite")
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path(), &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let handle else {
+            throw TestFailure(description: "Could not open the real archive read-only.")
+        }
+        defer { sqlite3_close(handle) }
+
+        var idStatement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "SELECT id, raw_local_type FROM messages WHERE normalized_type = 'unknown'", -1, &idStatement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(idStatement) }
+
+        var totalUnknown = 0
+        var totalRecovered = 0
+        var recoveredByLow32 = [UInt64: Int]()
+
+        while sqlite3_step(idStatement) == SQLITE_ROW {
+            totalUnknown += 1
+            guard let idText = sqlite3_column_text(idStatement, 0) else { continue }
+            let messageID = String(cString: idText)
+            let rawType: Int64? = sqlite3_column_type(idStatement, 1) == SQLITE_NULL ? nil : sqlite3_column_int64(idStatement, 1)
+
+            var valueStatement: OpaquePointer?
+            XCTAssertEqual(sqlite3_prepare_v2(handle, "SELECT column_name, sqlite_type, integer_value, real_value, text_value, blob_value FROM message_source_values WHERE message_id = ?", -1, &valueStatement, nil), SQLITE_OK)
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            sqlite3_bind_text(valueStatement, 1, messageID, -1, transient)
+            var values = [String: ArchivedSQLiteValue]()
+            while sqlite3_step(valueStatement) == SQLITE_ROW {
+                guard let nameText = sqlite3_column_text(valueStatement, 0), let typeText = sqlite3_column_text(valueStatement, 1) else { continue }
+                let name = String(cString: nameText)
+                switch String(cString: typeText) {
+                case "integer": values[name] = .integer(sqlite3_column_int64(valueStatement, 2))
+                case "real": values[name] = .real(sqlite3_column_double(valueStatement, 3))
+                case "text":
+                    if let text = sqlite3_column_text(valueStatement, 4) { values[name] = .text(String(cString: text)) }
+                case "blob":
+                    if let bytes = sqlite3_column_blob(valueStatement, 5) {
+                        values[name] = .blob(Data(bytes: bytes, count: Int(sqlite3_column_bytes(valueStatement, 5))))
+                    }
+                default: break
+                }
+            }
+            sqlite3_finalize(valueStatement)
+
+            if WeChatCompressedTextMessageAdapter().textContent(from: values, rawType: rawType) != nil {
+                totalRecovered += 1
+                recoveredByLow32[rawTypeLow32(rawType) ?? 0, default: 0] += 1
+            }
+        }
+
+        // Aggregate counts only: never print message content or identifiers.
+        let breakdown = recoveredByLow32.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        print("Compressed-text adapter coverage: unknown=\(totalUnknown) recovered=\(totalRecovered) byLow32=[\(breakdown)]")
+        XCTAssertGreaterThan(totalRecovered, 0)
+    }
+
     private func date(_ value: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -2692,6 +2820,31 @@ final class ArchiveCoreTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appending(path: "WeChatArchiveTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    /// Builds a real zstd-compressed fixture via the local `zstd` CLI (the
+    /// same external tool `ZstdPayloadDecompressor` depends on), so these
+    /// tests exercise the actual decode path rather than a hand-rolled
+    /// stand-in for the compressed format.
+    private func zstdCompress(_ text: String) throws -> Data {
+        let candidates = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd"]
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("zstd CLI not available locally; install via `brew bundle`.")
+        }
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let inputURL = directory.appending(path: "fixture.txt")
+        let outputURL = directory.appending(path: "fixture.zst")
+        try Data(text.utf8).write(to: inputURL)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["-q", "-f", "-o", outputURL.path(), inputURL.path()]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw TestFailure(description: "zstd compression failed") }
+        return try Data(contentsOf: outputURL)
     }
 
     private func permissionBits(at url: URL) throws -> Int {
