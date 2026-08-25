@@ -73,9 +73,19 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .init(items: [], hasMore: false) }
         let pageSize = min(max(limit, 1), 500)
-        guard let indexURL,
-              let preparation = try existingPreparation(at: indexURL, fingerprint: try sourceFingerprint(databaseURL: validatedArchiveDatabaseURL()).value)
-        else {
+        guard let indexURL else {
+            return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
+        }
+        let preparation: ArchiveSearchIndexPreparation
+        do {
+            guard let existing = try existingPreparation(
+                at: indexURL,
+                fingerprint: try sourceFingerprint(databaseURL: validatedArchiveDatabaseURL()).value
+            ) else {
+                return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
+            }
+            preparation = existing
+        } catch {
             return try fallbackSearch(query: trimmed, offset: offset, limit: pageSize)
         }
 

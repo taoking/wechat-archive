@@ -469,6 +469,18 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertFalse(schema.contains("source_sqlite_rowid"))
     }
 
+    func testDerivedSearchFallsBackWhenItsDisposableIndexIsCorrupt() throws {
+        let fixture = try makeFixture(messageCount: 20)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
+        _ = try search.prepareIndex()
+        let indexURL = try XCTUnwrap(search.indexURL)
+        try FileManager.default.removeItem(at: indexURL)
+        try writePrivate(Data("not a sqlite database".utf8), to: indexURL)
+
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
+    }
+
     func testMessageOffsetMatchesAscendingTimelinePosition() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
