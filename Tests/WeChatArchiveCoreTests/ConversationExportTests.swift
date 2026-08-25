@@ -139,6 +139,31 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertEqual(ConversationTimestampFormatter.string(for: priorYear, now: now, calendar: calendar), "2025/12/31")
     }
 
+    func testMessageCopyFormatterIncludesOnlyRequestedContext() {
+        let message = ArchiveViewerMessage(
+            id: "fixture-message",
+            timestamp: 1_700_000_000,
+            normalizedType: .text,
+            rawLocalType: 1,
+            textContent: "第一行\n第二行",
+            hasSender: true,
+            direction: .incoming,
+            senderDisplayName: "Fixture sender",
+            avatar: nil,
+            media: []
+        )
+
+        XCTAssertEqual(ArchiveViewerMessageCopyFormatter.text(message), "第一行\n第二行")
+        XCTAssertEqual(
+            ArchiveViewerMessageCopyFormatter.textWithTimestamp(message, timeZone: TimeZone(secondsFromGMT: 0)!),
+            "2023-11-14 22:13\n第一行\n第二行"
+        )
+        XCTAssertEqual(
+            ArchiveViewerMessageCopyFormatter.textWithSenderAndTimestamp(message, timeZone: TimeZone(secondsFromGMT: 0)!),
+            "Fixture sender · 2023-11-14 22:13\n第一行\n第二行"
+        )
+    }
+
     func testConversationExporterWritesEscapedPortableHTMLWithMediaAndAvatars() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
@@ -192,6 +217,32 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertTrue(markdownText.contains("[图片]"))
         XCTAssertTrue(markdownText.contains("[语音"))
         XCTAssertTrue(markdownText.contains("[视频]"))
+    }
+
+    func testConversationExportFormatsLegacyQuotedImageXMLWithoutInternalMetadata() throws {
+        let legacyQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\" cdnurl=\"fixture\" md5=\"fixture\"/></msg>\nFixture reply text"
+        let fixture = try makeFixture(messageCount: 1, textContent: legacyQuote)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appending(path: "Exports")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let exporter = WeChatArchiveConversationExporter()
+        let html = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .html)
+        let markdown = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .markdown)
+        let json = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .json)
+        let exportedTexts = try [html, markdown, json].map { try String(contentsOf: $0.primaryFileURL, encoding: .utf8) }
+
+        for text in exportedTexts {
+            XCTAssertTrue(text.contains("Fixture Sender"))
+            XCTAssertTrue(text.contains("[图片]"))
+            XCTAssertTrue(text.contains("Fixture reply text"))
+            XCTAssertFalse(text.contains("<?xml"))
+            XCTAssertFalse(text.contains("aeskey"))
+            XCTAssertFalse(text.contains("cdnurl"))
+            XCTAssertFalse(text.contains("md5"))
+        }
+        XCTAssertTrue(exportedTexts[0].contains("quote-preview"))
+        XCTAssertTrue(exportedTexts[1].contains("> Fixture Sender · [图片]"))
     }
 
     func testConversationExporterSupportsTechnicalMetadataOnlyWhenExplicitlyEnabled() throws {
@@ -379,6 +430,124 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertTrue(escaped.items.isEmpty)
     }
 
+    func testLegacyQuotedXMLNeverAppearsInConversationPreviewOrSearchResults() throws {
+        let legacyQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\" cdnurl=\"fixture\" md5=\"fixture\"/></msg>\nFixture reply text"
+        let fixture = try makeFixture(messageCount: 1, textContent: legacyQuote)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+
+        let preview = try XCTUnwrap(viewer.conversation(id: fixture.conversationID)?.lastMessagePreview)
+        let directResult = try XCTUnwrap(viewer.searchMessagePage(query: "Fixture reply", limit: 10).items.first)
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
+        _ = try search.prepareIndex()
+        let indexedResult = try XCTUnwrap(search.search(query: "Fixture reply", offset: 0, limit: 10).items.first)
+
+        for text in [preview, directResult.snippet, indexedResult.snippet] {
+            XCTAssertTrue(text.contains("[图片]"))
+            XCTAssertTrue(text.contains("Fixture reply text"))
+            XCTAssertFalse(text.contains("<?xml"))
+            XCTAssertFalse(text.contains("aeskey"))
+            XCTAssertFalse(text.contains("cdnurl"))
+            XCTAssertFalse(text.contains("md5"))
+        }
+
+        let indexURL = search.indexURL
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(indexURL.path, &handle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "SELECT text_content FROM messages_fts LIMIT 1", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        let indexedText = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+        XCTAssertFalse(indexedText.contains("<?xml"))
+        XCTAssertFalse(indexedText.contains("aeskey"))
+    }
+
+    func testDerivedSearchIndexSupportsChineseSubstringAndRebuildsOnArchiveChange() throws {
+        let fixture = try makeFixture(messageCount: 20)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let cacheRoot = fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes")
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: cacheRoot)
+
+        let firstBuild = try search.prepareIndex()
+        XCTAssertEqual(firstBuild.state, .built)
+        XCTAssertEqual(firstBuild.tokenizer, .trigram)
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
+        XCTAssertEqual(try search.search(query: "咖啡", offset: 0, limit: 50).items.count, 20)
+        XCTAssertEqual(try search.search(query: "Hello", offset: 0, limit: 50).items.count, 20)
+
+        XCTAssertEqual(try search.prepareIndex().state, .reused)
+        let databaseURL = search.indexURL
+        XCTAssertEqual(try permissionBits(at: databaseURL), 0o600)
+        XCTAssertEqual(try permissionBits(at: cacheRoot), 0o700)
+
+        let archiveDatabase = fixture.root.appending(path: "archive.sqlite")
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: archiveDatabase.path)
+        XCTAssertEqual(try search.prepareIndex().state, .built)
+    }
+
+    func testDerivedSearchFallsBackBeforeBuildAndCancelsWithoutPublishingPartialIndex() throws {
+        let fixture = try makeFixture(messageCount: 1_000)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let cacheRoot = fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes")
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: cacheRoot)
+
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 50, "LIKE fallback remains available while indexing")
+
+        var indexed = 0
+        XCTAssertThrowsError(try search.prepareIndex(
+            shouldCancel: { indexed >= 250 },
+            progress: { count, _ in indexed = count }
+        )) { error in
+            XCTAssertEqual(error as? ArchiveSearchIndexError, .cancelled)
+        }
+        XCTAssertGreaterThanOrEqual(indexed, 250)
+        let target = search.indexURL
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    func testDerivedSearchIndexStoresOnlyDisplaySearchFields() throws {
+        let fixture = try makeFixture(messageCount: 20)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
+        _ = try search.prepareIndex()
+        let indexURL = search.indexURL
+
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(indexURL.path, &handle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "SELECT sql FROM sqlite_master WHERE type = 'table' OR type = 'index'", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        var schema = ""
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let value = sqlite3_column_text(statement, 0) { schema += String(cString: value) }
+        }
+        XCTAssertFalse(schema.contains("source_database"))
+        XCTAssertFalse(schema.contains("source_table"))
+        XCTAssertFalse(schema.contains("source_sqlite_rowid"))
+    }
+
+    func testDerivedSearchFallsBackWhenItsDisposableIndexIsCorrupt() throws {
+        let fixture = try makeFixture(messageCount: 20)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
+        _ = try search.prepareIndex()
+        let indexURL = search.indexURL
+        try FileManager.default.removeItem(at: indexURL)
+        try writePrivate(Data("not a sqlite database".utf8), to: indexURL)
+
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
+
+        // prepareIndex() must also recover on its own: a corrupt cached index
+        // should be detected and rebuilt, not left in place to keep failing
+        // every subsequent launch.
+        let rebuilt = try search.prepareIndex()
+        XCTAssertEqual(rebuilt.state, .built)
+        XCTAssertEqual(try search.search(query: "深圳", offset: 0, limit: 50).items.count, 20)
+    }
+
     func testMessageOffsetMatchesAscendingTimelinePosition() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
@@ -391,6 +560,97 @@ final class ConversationExportTests: XCTestCase {
         }
 
         XCTAssertNil(try viewer.messageOffset(conversationID: fixture.conversationID, messageID: "missing-message-id"))
+    }
+
+    func testMessageWindowAroundAnchorProvidesStableBidirectionalCursors() throws {
+        let fixture = try makeFixture(messageCount: 1_000)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        let target = try XCTUnwrap(viewer.messagePage(conversationID: fixture.conversationID, offset: 500, limit: 1).items.first)
+
+        let window = try viewer.messageWindow(conversationID: fixture.conversationID, aroundMessageID: target.id, before: 50, after: 50)
+
+        XCTAssertEqual(window.items.count, 101)
+        XCTAssertEqual(window.items[50].id, target.id)
+        XCTAssertTrue(window.hasOlder)
+        XCTAssertTrue(window.hasNewer)
+        XCTAssertEqual(Set(window.items.map(\.id)).count, window.items.count)
+        XCTAssertEqual(window.items, window.items.sorted { $0.timestamp < $1.timestamp || ($0.timestamp == $1.timestamp && $0.id < $1.id) }, "fixture timestamps are unique")
+    }
+
+    func testCursorPagingHandlesSameTimestampsWithoutDuplicatesOrGaps() throws {
+        let fixture = try makeFixture(messageCount: 1_000, sameTimestamp: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        let target = try XCTUnwrap(viewer.messagePage(conversationID: fixture.conversationID, offset: 500, limit: 1).items.first)
+        let cursor = try XCTUnwrap(viewer.messageCursor(conversationID: fixture.conversationID, messageID: target.id))
+
+        let older = try viewer.olderMessages(conversationID: fixture.conversationID, before: cursor, limit: 100)
+        let newer = try viewer.newerMessages(conversationID: fixture.conversationID, after: cursor, limit: 100)
+        let window = try viewer.messageWindow(conversationID: fixture.conversationID, aroundMessageID: target.id, before: 50, after: 50)
+
+        XCTAssertEqual(older.items.count, 100)
+        XCTAssertEqual(newer.items.count, 100)
+        XCTAssertFalse(Set(older.items.map(\.id)).contains(target.id))
+        XCTAssertFalse(Set(newer.items.map(\.id)).contains(target.id))
+        XCTAssertTrue(Set(older.items.map(\.id)).isDisjoint(with: Set(newer.items.map(\.id))))
+        XCTAssertEqual(window.items.count, 101)
+        XCTAssertEqual(window.items[50].id, target.id)
+        XCTAssertEqual(Set(window.items.map(\.id)).count, window.items.count)
+    }
+
+    func testTenThousandMessageTimelineCanPageBackwardWithStableCursors() throws {
+        let fixture = try makeFixture(messageCount: 10_000, sameTimestamp: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        var page = try viewer.recentMessagePage(conversationID: fixture.conversationID, limit: 100)
+        var seen = Set(page.items.map(\.id))
+
+        while page.hasMore {
+            let cursor = try XCTUnwrap(viewer.messageCursor(conversationID: fixture.conversationID, messageID: try XCTUnwrap(page.items.first).id))
+            page = try viewer.olderMessages(conversationID: fixture.conversationID, before: cursor, limit: 100)
+            let pageIDs = page.items.map(\.id)
+            XCTAssertTrue(seen.isDisjoint(with: pageIDs))
+            seen.formUnion(pageIDs)
+        }
+        XCTAssertEqual(seen.count, 10_000)
+    }
+
+    func testConversationDateBucketsUseRequestedTimezone() throws {
+        let fixture = try makeFixture(messageCount: 5)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3_600)!
+
+        let buckets = try viewer.conversationDateBuckets(conversationID: fixture.conversationID, calendar: calendar)
+
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.messageCount }, 5)
+        XCTAssertEqual(buckets.count, 1)
+        XCTAssertEqual(buckets.first?.messageCount, 5)
+        let first = try viewer.messagePage(conversationID: fixture.conversationID, limit: 1).items.first
+        XCTAssertEqual(
+            try viewer.firstMessageID(conversationID: fixture.conversationID, on: try XCTUnwrap(buckets.first?.day), calendar: calendar),
+            first?.id
+        )
+    }
+
+    func testConversationDateBucketsRespectLocalTimezoneAcrossUTCMidnight() throws {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let boundary = try XCTUnwrap(utc.date(from: DateComponents(year: 2026, month: 8, day: 1, hour: 15, minute: 59, second: 59)))
+        let fixture = try makeFixture(
+            messageCount: 2,
+            timestamps: [Int64(boundary.timeIntervalSince1970), Int64(boundary.timeIntervalSince1970) + 2]
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        var local = Calendar(identifier: .gregorian)
+        local.timeZone = TimeZone(secondsFromGMT: 8 * 3_600)!
+
+        let buckets = try viewer.conversationDateBuckets(conversationID: fixture.conversationID, calendar: local)
+        XCTAssertEqual(buckets.map(\.day), ["2026-08-01", "2026-08-02"])
+        XCTAssertEqual(buckets.map(\.messageCount), [1, 1])
     }
 
     /// Opt-in local acceptance coverage. It deliberately emits no private
@@ -444,7 +704,10 @@ final class ConversationExportTests: XCTestCase {
     private func makeFixture(
         messageCount: Int = 5,
         conversationTitle: String = "Fixture Group 中文",
-        largeVideoBytes: Int? = nil
+        largeVideoBytes: Int? = nil,
+        sameTimestamp: Bool = false,
+        timestamps: [Int64]? = nil,
+        textContent: String? = nil
     ) throws -> ConversationExportFixture {
         let parent = FileManager.default.temporaryDirectory.appending(path: "ConversationExport-\(UUID().uuidString)")
         let root = parent.appending(path: "WeChatArchive")
@@ -475,12 +738,12 @@ final class ConversationExportTests: XCTestCase {
                 sourceSQLiteRowID: Int64(index + 1),
                 sourceLocalID: Int64(index + 1),
                 sourceServerID: nil,
-                timestamp: Int64(1_700_000_000 + index),
+                timestamp: timestamps?[index] ?? (sameTimestamp ? 1_700_000_000 : Int64(1_700_000_000 + index)),
                 senderSourceID: index.isMultiple(of: 2) ? "fixture-contact" : "fixture-owner",
                 receiverSourceID: nil,
                 rawLocalType: Int64(index + 1),
                 normalizedType: type,
-                textContent: type == .text ? "# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀" : nil,
+                textContent: type == .text ? (textContent ?? "今天去深圳湾喝咖啡。Hello\n# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀") : nil,
                 replySourceID: nil,
                 sourceSequence: Int64(index),
                 sourceValues: ["private_blob": .blob(Data([0xAA]))],

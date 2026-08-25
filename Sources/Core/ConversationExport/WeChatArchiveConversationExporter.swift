@@ -356,7 +356,7 @@ private struct HTMLConversationExportWriter: ConversationExportWriter {
         <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <title>\(htmlEscape(conversation.title))</title>
         <style>
-        :root{color-scheme:light dark} body{margin:0;background:#f3f5f7;color:#1d1d1f;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;padding:16px max(20px,calc((100% - 900px)/2));background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-bottom:1px solid #ddd}.header-avatar,.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#c8cdd4}.placeholder{display:inline-block}.meta{color:#6d7178;font-size:12px}main{max-width:900px;margin:auto;padding:24px 16px 48px}.day{margin:22px auto 12px;width:max-content;color:#777;background:#e4e7ea;border-radius:12px;padding:4px 10px;font-size:12px}.row{display:flex;align-items:flex-end;gap:8px;margin:9px 0}.row.outgoing{justify-content:flex-end}.row.system{justify-content:center}.bubble{max-width:66%;padding:10px 12px;border-radius:14px;background:#fff;box-shadow:0 1px 1px #0000000d;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{background:#ccefb8}.system .bubble,.unknown{color:#70757c;background:#e7e9eb;font-size:13px}.sender{margin:0 0 4px;font-size:12px;color:#747980}.message-avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:#c8cdd4}.media-image{display:block;max-width:min(480px,100%);max-height:420px;border-radius:8px}.media-video{display:block;max-width:min(560px,100%);max-height:420px;border-radius:8px}.media-audio{max-width:320px;width:100%}.missing{color:#777;font-size:13px}@media print{body{background:#fff;color:#111}.header{position:static;background:#fff;backdrop-filter:none}.row{break-inside:avoid}.media-video,.media-audio{max-width:100%}}@media (prefers-color-scheme:dark){body{background:#1e2023;color:#eee}.header{background:rgba(35,37,40,.92);border-color:#43464b}.bubble{background:#303338}.outgoing .bubble{background:#365d2b}.day,.system .bubble{background:#3b3e42}.meta,.sender{color:#aab0b8}}</style></head><body>
+        :root{color-scheme:light dark} body{margin:0;background:#f3f5f7;color:#1d1d1f;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;padding:16px max(20px,calc((100% - 900px)/2));background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-bottom:1px solid #ddd}.header-avatar,.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#c8cdd4}.placeholder{display:inline-block}.meta{color:#6d7178;font-size:12px}main{max-width:900px;margin:auto;padding:24px 16px 48px}.day{margin:22px auto 12px;width:max-content;color:#777;background:#e4e7ea;border-radius:12px;padding:4px 10px;font-size:12px}.row{display:flex;align-items:flex-end;gap:8px;margin:9px 0}.row.outgoing{justify-content:flex-end}.row.system{justify-content:center}.bubble{max-width:66%;padding:10px 12px;border-radius:14px;background:#fff;box-shadow:0 1px 1px #0000000d;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{background:#ccefb8}.system .bubble,.unknown{color:#70757c;background:#e7e9eb;font-size:13px}.sender{margin:0 0 4px;font-size:12px;color:#747980}.message-avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;background:#c8cdd4}.quote-preview{margin-bottom:6px;padding:5px 0 5px 8px;border-left:3px solid #a6adb5;color:#676d74;font-size:.9em;white-space:pre-wrap;overflow-wrap:anywhere}.media-image{display:block;max-width:min(480px,100%);max-height:420px;border-radius:8px}.media-video{display:block;max-width:min(560px,100%);max-height:420px;border-radius:8px}.media-audio{max-width:320px;width:100%}.missing{color:#777;font-size:13px}@media print{body{background:#fff;color:#111}.header{position:static;background:#fff;backdrop-filter:none}.row{break-inside:avoid}.media-video,.media-audio{max-width:100%}}@media (prefers-color-scheme:dark){body{background:#1e2023;color:#eee}.header{background:rgba(35,37,40,.92);border-color:#43464b}.bubble{background:#303338}.outgoing .bubble{background:#365d2b}.day,.system .bubble{background:#3b3e42}.meta,.sender,.quote-preview{color:#aab0b8}}</style></head><body>
         <header class="header">\(avatar)<div><strong>\(htmlEscape(conversation.title))</strong><div class="meta">\(conversation.messageCount) 条消息 · 导出于 \(htmlEscape(exportTimestamp(Date())))</div></div></header><main>
         """
     }
@@ -383,7 +383,13 @@ private struct HTMLConversationExportWriter: ConversationExportWriter {
 
     private func htmlContent(_ prepared: ExportedMessage) -> String {
         switch prepared.message.normalizedType {
-        case .text: return htmlEscape(prepared.message.textContent ?? "")
+        case .text:
+            if let quote = ArchiveMessagePresentationFormatter.quotedPresentation(for: prepared.message.textContent) {
+                let preview = "<div class=\"quote-preview\"><strong>\(htmlEscape(quote.quotedSender))</strong> · \(htmlEscape(quote.quotedSummary))</div>"
+                let reply = quote.replyText.isEmpty ? "" : "<div class=\"message-text\">\(htmlEscape(quote.replyText))</div>"
+                return preview + reply
+            }
+            return htmlEscape(ArchiveMessagePresentationFormatter.displayText(for: prepared.message.textContent) ?? "")
         case .unknown: return "<span class=\"unknown\">[暂不支持的消息]</span>"
         case .image:
             guard let media = prepared.media.first, media.available, let path = media.path else { return "<span class=\"missing\">[图片文件不可用]</span>" }
@@ -469,7 +475,13 @@ private struct MarkdownConversationExportWriter: ConversationExportWriter {
         }
         let header = "\n**\(markdownEscape(sender)) · \(timeLabel(message.timestamp))**\n\n"
         switch message.normalizedType {
-        case .text: return header + markdownEscape(message.textContent ?? "") + "\n"
+        case .text:
+            if let quote = ArchiveMessagePresentationFormatter.quotedPresentation(for: message.textContent) {
+                let preview = "> \(markdownEscape(quote.quotedSender)) · \(markdownQuoteSummary(quote.quotedSummary))"
+                let reply = quote.replyText.isEmpty ? "" : "\n\n\(markdownEscape(quote.replyText))"
+                return header + preview + reply + "\n"
+            }
+            return header + markdownEscape(ArchiveMessagePresentationFormatter.displayText(for: message.textContent) ?? "") + "\n"
         case .unknown: return header + "> 暂不支持的消息\n"
         case .image: return header + mediaLine(prepared.media.first, image: true, label: "图片")
         case .video: return header + mediaLine(prepared.media.first, image: false, label: "视频")
@@ -508,7 +520,7 @@ private struct JSONConversationMessage: Encodable {
         direction = prepared.message.direction.rawValue
         sender = prepared.message.direction == .outgoing ? "我" : prepared.message.senderDisplayName
         type = prepared.message.normalizedType.rawValue
-        text = prepared.message.normalizedType == .text ? prepared.message.textContent : nil
+        text = prepared.message.normalizedType == .text ? ArchiveMessagePresentationFormatter.displayText(for: prepared.message.textContent) : nil
         media = prepared.media
         rawLocalType = technical ? prepared.message.rawLocalType : nil
     }
@@ -541,6 +553,17 @@ private func markdownEscape(_ text: String) -> String {
         escaped.unicodeScalars.append(scalar)
     }
     return escaped
+}
+
+/// The known quote media labels are intentional plain-text placeholders, not
+/// Markdown links. Preserve their compact `[图片]` form while still escaping
+/// arbitrary quoted text that follows a label (for example share titles).
+private func markdownQuoteSummary(_ summary: String) -> String {
+    let labels = ["[图片]", "[视频]", "[语音]", "[表情]", "[分享]", "[位置]", "[引用消息]"]
+    guard let label = labels.first(where: { summary.hasPrefix($0) }) else {
+        return markdownEscape(summary)
+    }
+    return label + markdownEscape(String(summary.dropFirst(label.count)))
 }
 
 private func date(_ timestamp: Int64) -> Date {
