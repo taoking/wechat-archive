@@ -15,6 +15,7 @@ struct ArchiveViewerView: View {
     @State private var selectedConversationID: String?
     @State private var messages = [ArchiveViewerMessage]()
     @State private var messageHasMore = false
+    @State private var messageHasNewer = false
     @State private var status = "请选择 WeChatArchive 文件夹。查看器仅以只读方式打开 archive.sqlite。"
     @State private var searchText = ""
     @State private var showingExport = false
@@ -132,7 +133,8 @@ struct ArchiveViewerView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity)
-                        } else if selectedConversationID != nil, messageHasMore {
+                        }
+                        if selectedConversationID != nil, messageHasMore {
                             Button("加载更早的消息", action: loadMore)
                                 .frame(maxWidth: .infinity)
                         }
@@ -147,6 +149,10 @@ struct ArchiveViewerView: View {
                                 bubbleMaxWidth: max(260, min(680, geometry.size.width * 0.66)),
                                 isHighlighted: message.id == highlightedMessageID
                             )
+                        }
+                        if selectedConversationID != nil, messageHasNewer {
+                            Button("加载更新的消息", action: loadNewer)
+                                .frame(maxWidth: .infinity)
                         }
                         Color.clear.frame(height: 1).id("timeline-bottom")
                     }
@@ -287,6 +293,7 @@ struct ArchiveViewerView: View {
             let page = try viewer.recentMessagePage(conversationID: conversationID, limit: 100)
             messages = page.items
             messageHasMore = page.hasMore
+            messageHasNewer = false
             isShowingJumpedContext = false
             let instruction = timelinePaging.replaceWithRecent(page.items.map(\.id), hasMore: page.hasMore)
             videoPlayback.stop()
@@ -300,24 +307,22 @@ struct ArchiveViewerView: View {
 
     /// Loads a window of messages centered on `messageID` (used by search
     /// result navigation) instead of the usual tail-anchored recent page.
-    /// "加载更早的消息" is unavailable until the caller returns to the recent
-    /// tail via "回到最新", since the offset here is no longer tail-relative.
+    /// Both older and newer paging remain available around this window.
     private func jumpToMessage(_ messageID: String, in conversationID: String) {
         guard let viewer else { return }
         do {
-            guard let position = try viewer.messageOffset(conversationID: conversationID, messageID: messageID) else {
+            guard try viewer.messageOffset(conversationID: conversationID, messageID: messageID) != nil else {
                 status = "未找到该消息，归档内容可能已发生变化。"
                 return
             }
-            let windowSize = 100
-            let offset = max(0, position - windowSize / 2)
-            let page = try viewer.messagePage(conversationID: conversationID, offset: offset, limit: windowSize)
-            messages = page.items
-            messageHasMore = false
+            let window = try viewer.messageWindow(conversationID: conversationID, aroundMessageID: messageID, before: 50, after: 50)
+            messages = window.items
+            messageHasMore = window.hasOlder
+            messageHasNewer = window.hasNewer
             isShowingJumpedContext = true
             videoPlayback.stop()
             voicePlayback.stop()
-            let instruction = timelinePaging.replaceCentered(page.items.map(\.id), focus: messageID)
+            let instruction = timelinePaging.replaceCentered(window.items.map(\.id), focus: messageID)
             requestTimelineScroll(instruction)
             highlightedMessageID = messageID
             Task { @MainActor in
@@ -359,6 +364,17 @@ struct ArchiveViewerView: View {
     private func loadMore() {
         guard let viewer, let conversationID = selectedConversationID else { return }
         do {
+            if isShowingJumpedContext, let firstID = messages.first?.id,
+               let position = try viewer.messageOffset(conversationID: conversationID, messageID: firstID) {
+                let offset = max(0, position - 100)
+                let page = try viewer.messagePage(conversationID: conversationID, offset: offset, limit: 100)
+                let additional = page.items.filter { candidate in !messages.contains(where: { $0.id == candidate.id }) }
+                let instruction = timelinePaging.prependOlder(additional.map(\.id), hasMore: offset > 0)
+                messages.insert(contentsOf: additional, at: 0)
+                messageHasMore = offset > 0
+                requestTimelineScroll(instruction)
+                return
+            }
             let page = try viewer.recentMessagePage(conversationID: conversationID, offset: messages.count, limit: 100)
             let instruction = timelinePaging.prependOlder(page.items.map(\.id), hasMore: page.hasMore)
             messages.insert(contentsOf: page.items, at: 0)
@@ -366,6 +382,20 @@ struct ArchiveViewerView: View {
             requestTimelineScroll(instruction)
         } catch {
             status = "无法加载更多归档消息。"
+        }
+    }
+
+    private func loadNewer() {
+        guard let viewer, let conversationID = selectedConversationID,
+              let lastID = messages.last?.id else { return }
+        do {
+            guard let position = try viewer.messageOffset(conversationID: conversationID, messageID: lastID) else { return }
+            let page = try viewer.messagePage(conversationID: conversationID, offset: position + 1, limit: 100)
+            let additional = page.items.filter { candidate in !messages.contains(where: { $0.id == candidate.id }) }
+            messages.append(contentsOf: additional)
+            messageHasNewer = page.hasMore
+        } catch {
+            status = "无法加载更新的归档消息。"
         }
     }
 

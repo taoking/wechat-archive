@@ -58,6 +58,23 @@ public struct ArchiveViewerMessage: Identifiable, Equatable, Sendable {
     public var media: [ArchiveViewerMedia]
 }
 
+/// A bounded, chronologically ordered viewport around an archive message.
+/// `hasOlder` and `hasNewer` let the UI continue browsing in either direction
+/// after a search or date jump without exposing source-database coordinates.
+public struct ArchiveViewerMessageWindow: Equatable, Sendable {
+    public let items: [ArchiveViewerMessage]
+    public let hasOlder: Bool
+    public let hasNewer: Bool
+}
+
+/// One local-calendar day containing one or more messages in a conversation.
+/// The day is an ISO-8601 calendar date in the caller-supplied timezone.
+public struct ArchiveViewerDateBucket: Identifiable, Equatable, Sendable {
+    public let day: String
+    public let messageCount: Int
+    public var id: String { day }
+}
+
 /// One text-content search hit. It carries only a display snippet, never the
 /// full message body or any source database identifier.
 public struct ArchiveViewerMessageSearchResult: Identifiable, Equatable, Sendable {
@@ -369,6 +386,51 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         return Int(sqlite3_column_int64(statement, 0)) - 1
     }
 
+    /// Returns a bounded chronological window centered on an existing message.
+    /// The public contract intentionally exposes only message identities and
+    /// directional availability; source table and row identifiers remain
+    /// private to the archive database.
+    public func messageWindow(
+        conversationID: String,
+        aroundMessageID: String,
+        before: Int = 50,
+        after: Int = 50
+    ) throws -> ArchiveViewerMessageWindow {
+        guard let position = try messageOffset(conversationID: conversationID, messageID: aroundMessageID) else {
+            throw ArchiveError.invalidInput
+        }
+        let beforeCount = max(0, before)
+        let afterCount = max(0, after)
+        let start = max(0, position - beforeCount)
+        let requested = max(1, beforeCount + afterCount + 1)
+        let page = try messagePage(conversationID: conversationID, offset: start, limit: requested)
+        let total = try messageCount(conversationID: conversationID)
+        return .init(items: page.items, hasOlder: start > 0, hasNewer: start + page.items.count < total)
+    }
+
+    /// Groups a conversation's message timestamps by the user's local day.
+    /// SQLite does the aggregation; no message body is selected.
+    public func conversationDateBuckets(conversationID: String, calendar: Calendar = .current) throws -> [ArchiveViewerDateBucket] {
+        let offset = calendar.timeZone.secondsFromGMT()
+        let modifier = String(format: "%+03d:%02d", offset / 3_600, abs(offset / 60) % 60)
+        let statement = try prepare("""
+            SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch', ?), COUNT(*)
+            FROM messages
+            WHERE conversation_id = ?
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(modifier, at: 1, to: statement)
+        try bind(conversationID, at: 2, to: statement)
+        var buckets = [ArchiveViewerDateBucket]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let day = text(statement, 0) else { continue }
+            buckets.append(.init(day: day, messageCount: Int(sqlite3_column_int64(statement, 1))))
+        }
+        return buckets
+    }
+
     /// Searches `messages.text_content` across every conversation in the
     /// archive. It never searches media, sender identifiers, or source
     /// database values, and only text messages are matched.
@@ -424,6 +486,14 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
     private func scalarInt(_ sql: String) throws -> Int {
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw ArchiveError.databaseFailure }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func messageCount(conversationID: String) throws -> Int {
+        let statement = try prepare("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind(conversationID, at: 1, to: statement)
         guard sqlite3_step(statement) == SQLITE_ROW else { throw ArchiveError.databaseFailure }
         return Int(sqlite3_column_int64(statement, 0))
     }

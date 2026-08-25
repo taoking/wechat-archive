@@ -393,6 +393,36 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertNil(try viewer.messageOffset(conversationID: fixture.conversationID, messageID: "missing-message-id"))
     }
 
+    func testMessageWindowAroundAnchorProvidesStableBidirectionalCursors() throws {
+        let fixture = try makeFixture(messageCount: 1_000)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        let target = try XCTUnwrap(viewer.messagePage(conversationID: fixture.conversationID, offset: 500, limit: 1).items.first)
+
+        let window = try viewer.messageWindow(conversationID: fixture.conversationID, aroundMessageID: target.id, before: 50, after: 50)
+
+        XCTAssertEqual(window.items.count, 101)
+        XCTAssertEqual(window.items[50].id, target.id)
+        XCTAssertTrue(window.hasOlder)
+        XCTAssertTrue(window.hasNewer)
+        XCTAssertEqual(Set(window.items.map(\.id)).count, window.items.count)
+        XCTAssertEqual(window.items, window.items.sorted { $0.timestamp < $1.timestamp || ($0.timestamp == $1.timestamp && $0.id < $1.id) }, "fixture timestamps are unique")
+    }
+
+    func testConversationDateBucketsUseRequestedTimezone() throws {
+        let fixture = try makeFixture(messageCount: 5)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3_600)!
+
+        let buckets = try viewer.conversationDateBuckets(conversationID: fixture.conversationID, calendar: calendar)
+
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.messageCount }, 5)
+        XCTAssertEqual(buckets.count, 1)
+        XCTAssertEqual(buckets.first?.messageCount, 5)
+    }
+
     /// Opt-in local acceptance coverage. It deliberately emits no private
     /// archive values and is skipped in normal CI.
     func testOptionalExistingArchiveExportsFromArchiveOnly() throws {
