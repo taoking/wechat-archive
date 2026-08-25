@@ -1,1 +1,2 @@
 brew "sqlcipher"
+brew "zstd"

@@ -97,4 +97,4 @@ git diff --check
 ./scripts/build-app.sh
 ```
 
-产物位于 `dist/WeChat Archive.app`，会内置 SQLCipher 与所需 OpenSSL runtime，因而不依赖目标机器上的 Homebrew。Silk → WAV 仍需要一个兼容的本机 `silk_v3_decoder`；已经归档的 WAV 语音无需该工具即可播放。该 App 采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)。
+产物位于 `dist/WeChat Archive.app`，会内置 SQLCipher 与所需 OpenSSL runtime，因而不依赖目标机器上的 Homebrew。Silk → WAV 仍需要一个兼容的本机 `silk_v3_decoder`；已经归档的 WAV 语音无需该工具即可播放。同理，撤回通知/位置/链接/引用回复等消息文本的恢复需要本机 `zstd`（`brew bundle` 已包含）；缺少时这些消息按原样保留为未识别类型，不影响归档其余部分。该 App 采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)。

@@ -6,6 +6,7 @@
 - Swift 6、Foundation、CryptoKit 和 SQLite3。
 - 编译／运行 SwiftUI App 与 XCTest 需要完整 Xcode。仅安装 Command Line Tools 可以编译 Core，但会缺少 SwiftUI macro plugin 和 XCTest。
 - 加密数据库导入需要 SQLCipher 4.17+：推荐执行 `brew bundle`，或执行 `brew install sqlcipher`。
+- 部分消息类别（撤回通知、位置分享、链接/小程序/引用回复等 app 消息、被压缩存储的群聊文本）在较新微信版本中以 zstd 压缩存储，恢复这部分文本需要本机 `zstd` CLI（`brew bundle` 已包含）。这与 Silk 语音解码采用同一个"可选外部工具"边界：`ZstdPayloadDecompressor` 在找不到 `zstd` 时返回 nil，对应消息保持原有的 `unknown` 归一化类型，不会阻塞或影响导入其余部分。Apple 的系统 `Compression` 框架**不支持** Zstandard（已对照 SDK 的 `compression.h` 确认），因此这里不是零依赖。
 
 运行时加载器会明确报告 SQLCipher dylib 缺失。它尚不强制检查已加载库的版本；在实现该后续工作前，请保持 SQLCipher 4.17+ 要求。
 

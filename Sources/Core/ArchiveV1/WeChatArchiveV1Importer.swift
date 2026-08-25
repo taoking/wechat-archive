@@ -221,6 +221,16 @@ public struct WeChatArchiveV1Importer: Sendable {
         } else if rawTypeLow32(rawType) == 34 {
             normalizedType = .voice
             textContent = nil
+        } else if let content = WeChatCompressedTextMessageAdapter().textContent(from: message.values, rawType: rawType) {
+            // Covers message categories WeChat stores as a zstd-compressed
+            // BLOB rather than a TEXT column: group-chat text, revoke
+            // notices, location shares, and app messages (link/mini
+            // program/quote-reply/red packet/transfer/...). See
+            // WeChatCompressedTextMessageAdapter for what is and is not
+            // recognized; anything it cannot parse still falls through to
+            // `.unknown` below exactly as before.
+            normalizedType = .text
+            textContent = content
         } else {
             normalizedType = .unknown
             textContent = nil
@@ -240,9 +250,11 @@ public struct WeChatArchiveV1Importer: Sendable {
         let sender = identities.sender(for: senderSourceID, in: conversationSourceIdentity)
         let direction: ArchiveV1MessageDirection
         if rawTypeLow32(rawType) == 10_000 {
-            // Verified locally as WeChat's system-notification raw type. It
-            // remains losslessly normalized as `unknown` until a dedicated
-            // adapter is implemented, but has system presentation direction.
+            // Verified locally as WeChat's system-notification raw type. Its
+            // presentation direction is always `.system`, independent of
+            // whether WeChatCompressedTextMessageAdapter recognized this
+            // particular sysmsg subtype (only revoke notices are so far);
+            // an unrecognized subtype still normalizes as `.unknown`.
             direction = .system
         } else if let owner = identities.ownerSourceIdentity, senderSourceID == owner {
             direction = .outgoing

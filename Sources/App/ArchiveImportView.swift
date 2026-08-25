@@ -374,12 +374,36 @@ struct ArchiveImportView: View {
             status = value.status == .cancelled
                 ? "导出已取消。已完成的消息事务仍然有效；如需再次完整导出，请使用新的目标目录。"
                 : "完整导出完成。请使用归档查看器打开归档。"
-        case .failure:
-            status = "归档导出未能完成。目标目录仅保留用于验证；请使用新的空目录重试。"
+        case let .failure(error):
+            status = importFailureMessage(for: error)
         }
         progress = nil
         cancellation = nil
         isWorking = false
+    }
+
+    /// `WeChatArchiveV1Importer.validateImportRoots` throws the same generic
+    /// `.invalidInput` case for several distinct problems (non-directory,
+    /// symlink, or — in practice the most common cause when three folder
+    /// pickers are involved — one of the three roots nested inside another).
+    /// This can't pinpoint which one without a source-side change, so it
+    /// names the likely cause instead of a fully generic message.
+    private func importFailureMessage(for error: Error) -> String {
+        guard let archiveError = error as? ArchiveError else {
+            return "归档导出未能完成。目标目录仅保留用于验证；请使用新的空目录重试。"
+        }
+        switch archiveError {
+        case .invalidInput:
+            return "归档导出未能完成：普通 SQLite 目录、账号目录、归档目标目录三者中有一个位于另一个内部（或不是有效目录）。请确认三者互不嵌套，且都是真实存在的文件夹后重试。"
+        case .invalidArchive:
+            return "归档导出未能完成：目标目录已存在且不为空。请改用一个新的空目录重试。"
+        case .databaseInUse:
+            return "归档导出未能完成：数据库正在使用中。请完全退出微信后重试。"
+        case .decryptionRuntimeUnavailable:
+            return "归档导出未能完成：SQLCipher 运行时不可用。请运行 brew bundle 后重试。"
+        default:
+            return "归档导出未能完成。目标目录仅保留用于验证；请使用新的空目录重试。"
+        }
     }
 
     private func displayPath(_ url: URL) -> String {

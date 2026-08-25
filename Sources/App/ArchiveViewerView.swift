@@ -22,6 +22,12 @@ struct ArchiveViewerView: View {
     @State private var timelineScrollInstruction: TimelineScrollInstruction = .none
     @State private var searchTask: Task<Void, Never>?
     @State private var searchDebouncer = SearchDebouncer()
+    @State private var showingMessageSearch = false
+    @State private var pendingSearchJump: (conversationID: String, messageID: String)?
+    @State private var highlightedMessageID: String?
+    @State private var isShowingJumpedContext = false
+    @State private var showingCoverageReport = false
+    @State private var coverageSummary: ArchiveViewerCoverageSummary?
     @StateObject private var voicePlayback = VoicePlaybackController()
     @StateObject private var videoPlayback = VideoPlaybackController()
 
@@ -121,7 +127,12 @@ struct ArchiveViewerView: View {
                     ScrollViewReader { proxy in
                     ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        if selectedConversationID != nil, messageHasMore {
+                        if isShowingJumpedContext {
+                            Label("已跳转到搜索结果附近；点击“回到最新”恢复正常浏览", systemImage: "arrow.turn.up.left")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                        } else if selectedConversationID != nil, messageHasMore {
                             Button("加载更早的消息", action: loadMore)
                                 .frame(maxWidth: .infinity)
                         }
@@ -133,7 +144,8 @@ struct ArchiveViewerView: View {
                                 videoPlayback: videoPlayback,
                                 voicePlayback: voicePlayback,
                                 showSenderName: selectedConversation?.type == .group,
-                                bubbleMaxWidth: max(260, min(680, geometry.size.width * 0.66))
+                                bubbleMaxWidth: max(260, min(680, geometry.size.width * 0.66)),
+                                isHighlighted: message.id == highlightedMessageID
                             )
                         }
                         Color.clear.frame(height: 1).id("timeline-bottom")
@@ -147,6 +159,8 @@ struct ArchiveViewerView: View {
                                     proxy.scrollTo("timeline-bottom", anchor: .bottom)
                                 case let .preserveAnchor(id):
                                     proxy.scrollTo(id, anchor: .top)
+                                case let .jumpTo(id):
+                                    proxy.scrollTo(id, anchor: .center)
                                 case .none:
                                     break
                                 }
@@ -169,15 +183,28 @@ struct ArchiveViewerView: View {
         }
         .onChange(of: selectedConversationID) { _, id in
             if viewer != nil { workspace.preferences.lastSelectedConversationID = id }
-            loadMessages()
+            if let pending = pendingSearchJump, pending.conversationID == id {
+                pendingSearchJump = nil
+                jumpToMessage(pending.messageID, in: pending.conversationID)
+            } else {
+                loadMessages()
+            }
         }
         .onChange(of: searchText) { _, _ in scheduleConversationSearch() }
         .navigationTitle("归档查看器")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button("切换归档", action: chooseArchive)
+                if viewer != nil {
+                    Button("搜索消息内容", systemImage: "magnifyingglass") { showingMessageSearch = true }
+                    Button("恢复统计", systemImage: "chart.bar.doc.horizontal") { presentCoverageReport() }
+                }
                 if selectedConversation != nil {
-                    Button("回到最新") { timelineScrollInstruction = .scrollToBottom }
+                    if isShowingJumpedContext {
+                        Button("回到最新", action: loadMessages)
+                    } else {
+                        Button("回到最新") { timelineScrollInstruction = .scrollToBottom }
+                    }
                 }
                 if selectedConversation != nil {
                     Button("导出聊天记录…") { showingExport = true }
@@ -188,6 +215,14 @@ struct ArchiveViewerView: View {
             if let viewer, let conversation = selectedConversation {
                 ConversationExportSheet(viewer: viewer, conversation: conversation, workspace: workspace)
             }
+        }
+        .sheet(isPresented: $showingMessageSearch) {
+            if let viewer {
+                MessageSearchSheet(viewer: viewer, onSelect: openSearchResult)
+            }
+        }
+        .sheet(isPresented: $showingCoverageReport) {
+            CoverageReportSheet(summary: coverageSummary)
         }
         .onAppear(perform: restoreLastArchive)
         .onDisappear {
@@ -252,6 +287,7 @@ struct ArchiveViewerView: View {
             let page = try viewer.recentMessagePage(conversationID: conversationID, limit: 100)
             messages = page.items
             messageHasMore = page.hasMore
+            isShowingJumpedContext = false
             let instruction = timelinePaging.replaceWithRecent(page.items.map(\.id), hasMore: page.hasMore)
             videoPlayback.stop()
             voicePlayback.stop()
@@ -260,6 +296,64 @@ struct ArchiveViewerView: View {
             messages = []
             status = "无法读取所选归档会话时间线。"
         }
+    }
+
+    /// Loads a window of messages centered on `messageID` (used by search
+    /// result navigation) instead of the usual tail-anchored recent page.
+    /// "加载更早的消息" is unavailable until the caller returns to the recent
+    /// tail via "回到最新", since the offset here is no longer tail-relative.
+    private func jumpToMessage(_ messageID: String, in conversationID: String) {
+        guard let viewer else { return }
+        do {
+            guard let position = try viewer.messageOffset(conversationID: conversationID, messageID: messageID) else {
+                status = "未找到该消息，归档内容可能已发生变化。"
+                return
+            }
+            let windowSize = 100
+            let offset = max(0, position - windowSize / 2)
+            let page = try viewer.messagePage(conversationID: conversationID, offset: offset, limit: windowSize)
+            messages = page.items
+            messageHasMore = false
+            isShowingJumpedContext = true
+            videoPlayback.stop()
+            voicePlayback.stop()
+            let instruction = timelinePaging.replaceCentered(page.items.map(\.id), focus: messageID)
+            requestTimelineScroll(instruction)
+            highlightedMessageID = messageID
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                if highlightedMessageID == messageID { highlightedMessageID = nil }
+            }
+        } catch {
+            status = "无法定位到该消息。"
+        }
+    }
+
+    private func openSearchResult(_ result: ArchiveViewerMessageSearchResult) {
+        showingMessageSearch = false
+        if selectedConversationID == result.conversationID {
+            jumpToMessage(result.id, in: result.conversationID)
+        } else {
+            pendingSearchJump = (result.conversationID, result.id)
+            ensureConversationVisible(result.conversationID)
+            selectedConversationID = result.conversationID
+        }
+    }
+
+    /// Inserts a conversation the sidebar hasn't paged in yet (e.g. a search
+    /// hit outside the currently loaded page) so the chat header and sidebar
+    /// selection resolve correctly once `selectedConversationID` changes.
+    private func ensureConversationVisible(_ id: String) {
+        guard let viewer, !conversations.contains(where: { $0.id == id }) else { return }
+        if let conversation = try? viewer.conversation(id: id) {
+            conversations.insert(conversation, at: 0)
+        }
+    }
+
+    private func presentCoverageReport() {
+        guard let viewer else { return }
+        coverageSummary = try? viewer.coverageSummary()
+        showingCoverageReport = true
     }
 
     private func loadMore() {
@@ -377,6 +471,7 @@ private struct ArchiveTimelineMessageRow: View {
     @ObservedObject var voicePlayback: VoicePlaybackController
     let showSenderName: Bool
     let bubbleMaxWidth: CGFloat
+    var isHighlighted: Bool = false
     @State private var showsImagePreview = false
 
     var body: some View {
@@ -414,6 +509,12 @@ private struct ArchiveTimelineMessageRow: View {
             }
         }
         .frame(maxWidth: .infinity)
+        .padding(.vertical, isHighlighted ? 6 : 0)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHighlighted ? ArchivePalette.jade.opacity(0.16) : .clear)
+        )
+        .animation(.easeInOut(duration: 0.4), value: isHighlighted)
     }
 
     private var bubbleColor: Color {
@@ -441,7 +542,7 @@ private struct ArchiveTimelineMessageRow: View {
         if let media = preferredImage,
            let viewer,
            let url = viewer.mediaURL(for: media, preferDecoded: true),
-           let image = NSImage(contentsOf: url) {
+           let image = ArchiveMediaImageCache.shared.image(at: url) {
             Button {
                 showsImagePreview = true
             } label: {
@@ -464,7 +565,7 @@ private struct ArchiveTimelineMessageRow: View {
         if let thumbnail = preferredVideoThumbnail,
            let viewer,
            let url = viewer.mediaURL(for: thumbnail, preferDecoded: false),
-           let image = NSImage(contentsOf: url) {
+           let image = ArchiveMediaImageCache.shared.image(at: url) {
             Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 220, alignment: .leading)
         }
         if let video = preferredVideo, let viewer, let url = viewer.mediaURL(for: video, preferDecoded: false) {
@@ -530,6 +631,24 @@ private final class ArchiveAvatarImageCache {
     }
 }
 
+/// Caches decoded message images and video thumbnails by archive-relative
+/// URL, avoiding a synchronous re-decode of the same file on every scroll
+/// pass. Never reads outside the URLs `WeChatArchiveViewerDatabase` already
+/// validated as being inside the opened archive.
+@MainActor
+private final class ArchiveMediaImageCache {
+    static let shared = ArchiveMediaImageCache()
+    private let values = NSCache<NSString, NSImage>()
+
+    func image(at url: URL) -> NSImage? {
+        let key = url.path(percentEncoded: false) as NSString
+        if let cached = values.object(forKey: key) { return cached }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        values.setObject(image, forKey: key, cost: max(1, Int(image.size.width * image.size.height)))
+        return image
+    }
+}
+
 @MainActor
 private struct ArchiveAvatarView: View {
     let viewer: WeChatArchiveViewerDatabase?
@@ -571,7 +690,7 @@ private struct ArchiveImagePreview: View {
                 Button("关闭", action: dismiss.callAsFunction)
             }
             .padding(.horizontal)
-            if let image = NSImage(contentsOf: url) {
+            if let image = ArchiveMediaImageCache.shared.image(at: url) {
                 ScrollView([.horizontal, .vertical]) {
                     Image(nsImage: image).resizable().scaledToFit()
                         .frame(width: max(1, image.size.width * scale), height: max(1, image.size.height * scale))
@@ -651,6 +770,169 @@ private final class VideoPlaybackController: ObservableObject {
         player?.replaceCurrentItem(with: nil)
         player = nil
         expandedID = nil
+    }
+}
+
+/// Searches message text across every conversation in the opened archive.
+/// It never opens a source WeChat directory or database; it only queries
+/// the already-imported, read-only `archive.sqlite`.
+private struct MessageSearchSheet: View {
+    let viewer: WeChatArchiveViewerDatabase
+    let onSelect: (ArchiveViewerMessageSearchResult) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var results = [ArchiveViewerMessageSearchResult]()
+    @State private var status = "输入关键词以搜索所有会话中的文本消息。"
+    @State private var searchTask: Task<Void, Never>?
+    @State private var debouncer = SearchDebouncer()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("搜索消息内容").font(.headline)
+                Spacer()
+                Button("关闭", action: dismiss.callAsFunction)
+            }
+            .padding()
+            TextField("搜索文本消息…", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+                .onChange(of: query) { _, _ in scheduleSearch() }
+            Text(status).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.top, 6)
+            List(results) { result in
+                Button {
+                    onSelect(result)
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            Text(result.conversationTitle).font(.subheadline.bold())
+                            Spacer()
+                            Text(Date(timeIntervalSince1970: TimeInterval(result.timestamp)).formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(result.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    .padding(.vertical, 2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(minWidth: 460, minHeight: 420)
+    }
+
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            results = []
+            status = "输入关键词以搜索所有会话中的文本消息。"
+            return
+        }
+        let ticket = debouncer.schedule()
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(280))
+            guard !Task.isCancelled, debouncer.shouldRun(ticket: ticket) else { return }
+            do {
+                let page = try viewer.searchMessagePage(query: trimmed, limit: 100)
+                results = page.items
+                status = results.isEmpty ? "未找到匹配的文本消息。" : "找到 \(results.count) 条匹配消息\(page.hasMore ? "（仅显示前 100 条）" : "")。"
+            } catch {
+                results = []
+                status = "搜索失败，请重试。"
+            }
+        }
+    }
+}
+
+/// Displays how much of the archive Core could normalize into a viewable
+/// type, computed on demand from `archive.sqlite` aggregates only.
+private struct CoverageReportSheet: View {
+    let summary: ArchiveViewerCoverageSummary?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("归档恢复统计").font(.headline)
+                Spacer()
+                Button("关闭", action: dismiss.callAsFunction)
+            }
+            .padding()
+            if let summary {
+                Form {
+                    Section("总览") {
+                        LabeledContent("会话数", value: "\(summary.totalConversations)")
+                        LabeledContent("消息数", value: "\(summary.totalMessages)")
+                    }
+                    Section("消息类型分布") {
+                        ForEach(summary.byType) { row in
+                            LabeledContent(localizedType(row.normalizedType), value: countLabel(row.messageCount, of: summary.totalMessages))
+                        }
+                    }
+                    Section("媒体恢复状态") {
+                        if summary.mediaByStatus.isEmpty {
+                            Text("此归档不包含媒体资产。").foregroundStyle(.secondary)
+                        } else {
+                            ForEach(summary.mediaByStatus) { row in
+                                LabeledContent("\(localizedMediaType(row.mediaType)) · \(localizedStatus(row.status))", value: "\(row.count)")
+                            }
+                        }
+                    }
+                    Text("统计仅来自归档内已聚合的计数，不读取消息正文或媒体内容。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .formStyle(.grouped)
+            } else {
+                ContentUnavailableView("暂无统计数据", systemImage: "chart.bar.doc.horizontal")
+            }
+        }
+        .frame(minWidth: 420, minHeight: 460)
+    }
+
+    private func countLabel(_ count: Int, of total: Int) -> String {
+        guard total > 0 else { return "\(count)" }
+        let percentage = Double(count) / Double(total) * 100
+        return "\(count)（\(String(format: "%.1f", percentage))%）"
+    }
+
+    private func localizedType(_ type: ArchiveV1NormalizedType) -> String {
+        switch type {
+        case .text: "文本"
+        case .image: "图片"
+        case .video: "视频"
+        case .voice: "语音"
+        case .unknown: "未识别"
+        }
+    }
+
+    private func localizedMediaType(_ type: ArchiveV1MediaType) -> String {
+        switch type {
+        case .image: "图片"
+        case .video: "视频"
+        case .voice: "语音"
+        }
+    }
+
+    private func localizedStatus(_ status: ArchiveV1MediaStatus) -> String {
+        switch status {
+        case .missing: "缺失"
+        case .rawArchived: "已保留原始文件"
+        case .decoded: "已解码"
+        case .decodeUnsupported: "暂不支持解码"
+        case .imageKeyUnavailable: "缺少解密密钥"
+        case .imageKeyRejected: "密钥不匹配"
+        case .invalidDATLayout: "文件结构异常"
+        case .invalidPadding: "填充校验失败"
+        case .decodeFailed: "解码失败"
+        case .decodedUnknownFormat: "解码后格式未知"
+        case .unsupportedVersion: "版本不支持"
+        case .resolutionConflict: "定位冲突"
+        case .archiveCopyFailed: "归档复制失败"
+        case .rawCopyFailed: "原始文件复制失败"
+        case .decodedCopyFailed: "解码文件复制失败"
+        }
     }
 }
 #endif
