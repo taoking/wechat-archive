@@ -5,10 +5,47 @@ import AVKit
 import SwiftUI
 import WeChatArchiveCore
 
+private enum ArchiveViewerTimestampFormatter {
+    static func timeline(_ timestamp: Int64) -> String {
+        guard timestamp > 0 else { return "未知时间" }
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let calendar = Calendar.current
+        let time = timeFormatter.string(from: date)
+        if calendar.isDateInToday(date) { return "今天 \(time)" }
+        if calendar.isDateInYesterday(date) { return "昨天 \(time)" }
+        return dateFormatter.string(from: date)
+    }
+
+    static func detail(_ timestamp: Int64) -> String {
+        guard timestamp > 0 else { return "未知时间" }
+        return dateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp)))
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        return formatter
+    }()
+}
+
 struct ArchiveViewerView: View {
     let workspace: ArchiveWorkspace
     @State private var archivePath = ""
     @State private var viewer: WeChatArchiveViewerDatabase?
+    @State private var messageSearchService: ArchiveMessageSearchService?
+    @State private var searchIndexStatus: String?
+    @State private var isBuildingSearchIndex = false
+    @State private var searchIndexTask: Task<Void, Never>?
     @State private var conversations = [ArchiveViewerConversation]()
     @State private var conversationLoadedOffset = 0
     @State private var conversationHasMore = false
@@ -24,6 +61,7 @@ struct ArchiveViewerView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var searchDebouncer = SearchDebouncer()
     @State private var showingMessageSearch = false
+    @State private var showingDateNavigator = false
     @State private var pendingSearchJump: (conversationID: String, messageID: String)?
     @State private var highlightedMessageID: String?
     @State private var isShowingJumpedContext = false
@@ -81,7 +119,7 @@ struct ArchiveViewerView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(searchIndexStatus ?? status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -90,7 +128,14 @@ struct ArchiveViewerView: View {
             HStack(spacing: 0) {
                 List(selection: $selectedConversationID) {
                     ForEach(conversations) { conversation in
-                        ConversationSidebarRow(conversation: conversation, viewer: viewer)
+                        ConversationSidebarRow(
+                            conversation: conversation,
+                            viewer: viewer,
+                            onExport: {
+                                selectedConversationID = conversation.id
+                                showingExport = true
+                            }
+                        )
                             .tag(conversation.id)
                     }
                     if conversationHasMore {
@@ -203,17 +248,30 @@ struct ArchiveViewerView: View {
                 Button("切换归档", action: chooseArchive)
                 if viewer != nil {
                     Button("搜索消息内容", systemImage: "magnifyingglass") { showingMessageSearch = true }
+                        .keyboardShortcut("f", modifiers: .command)
+                        .help("搜索所有消息")
+                    if selectedConversation != nil {
+                        Button("按日期跳转", systemImage: "calendar") { showingDateNavigator = true }
+                            .help("按日期跳转")
+                    }
                     Button("恢复统计", systemImage: "chart.bar.doc.horizontal") { presentCoverageReport() }
+                    if isBuildingSearchIndex {
+                        Button("取消建立搜索索引") { searchIndexTask?.cancel() }
+                            .help("取消建立搜索索引")
+                    }
                 }
                 if selectedConversation != nil {
                     if isShowingJumpedContext {
                         Button("回到最新", action: loadMessages)
+                            .keyboardShortcut("j", modifiers: .command)
                     } else {
                         Button("回到最新") { timelineScrollInstruction = .scrollToBottom }
+                            .keyboardShortcut("j", modifiers: .command)
                     }
                 }
                 if selectedConversation != nil {
                     Button("导出聊天记录…") { showingExport = true }
+                        .keyboardShortcut("e", modifiers: .command)
                 }
             }
         }
@@ -224,7 +282,12 @@ struct ArchiveViewerView: View {
         }
         .sheet(isPresented: $showingMessageSearch) {
             if let viewer {
-                MessageSearchSheet(viewer: viewer, onSelect: openSearchResult)
+                MessageSearchSheet(viewer: viewer, searchService: messageSearchService, onSelect: openSearchResult)
+            }
+        }
+        .sheet(isPresented: $showingDateNavigator) {
+            if let viewer, let conversation = selectedConversation {
+                DateNavigatorSheet(viewer: viewer, conversation: conversation, onSelect: jumpToDate)
             }
         }
         .sheet(isPresented: $showingCoverageReport) {
@@ -233,6 +296,7 @@ struct ArchiveViewerView: View {
         .onAppear(perform: restoreLastArchive)
         .onDisappear {
             searchTask?.cancel()
+            searchIndexTask?.cancel()
             searchDebouncer.cancelAll()
             voicePlayback.stop()
             videoPlayback.stop()
@@ -258,6 +322,19 @@ struct ArchiveViewerView: View {
             let page = try database.conversationPage()
             var loadedConversations = page.items
             viewer = database
+            let service = ArchiveMessageSearchService(archiveRoot: root)
+            messageSearchService = service
+            searchIndexStatus = "正在建立消息搜索索引…"
+            isBuildingSearchIndex = true
+            searchIndexTask?.cancel()
+            searchIndexTask = Task.detached {
+                let result = try? service.prepareIndex(shouldCancel: { Task.isCancelled })
+                await MainActor.run {
+                    guard self.messageSearchService === service else { return }
+                    self.isBuildingSearchIndex = false
+                    self.searchIndexStatus = result == nil ? "消息搜索将临时使用兼容模式。" : nil
+                }
+            }
             let restoredID = workspace.preferences.lastSelectedConversationID
             if let restoredID,
                let restoredConversation = try database.conversation(id: restoredID),
@@ -276,6 +353,10 @@ struct ArchiveViewerView: View {
             loadMessages()
         } catch {
             viewer = nil
+            messageSearchService = nil
+            searchIndexStatus = nil
+            searchIndexTask?.cancel()
+            isBuildingSearchIndex = false
             conversations = []
             conversationLoadedOffset = 0
             conversationHasMore = false
@@ -362,22 +443,15 @@ struct ArchiveViewerView: View {
     }
 
     private func loadMore() {
-        guard let viewer, let conversationID = selectedConversationID else { return }
+        guard let viewer,
+              let conversationID = selectedConversationID,
+              let firstID = messages.first?.id else { return }
         do {
-            if isShowingJumpedContext, let firstID = messages.first?.id,
-               let position = try viewer.messageOffset(conversationID: conversationID, messageID: firstID) {
-                let offset = max(0, position - 100)
-                let page = try viewer.messagePage(conversationID: conversationID, offset: offset, limit: 100)
-                let additional = page.items.filter { candidate in !messages.contains(where: { $0.id == candidate.id }) }
-                let instruction = timelinePaging.prependOlder(additional.map(\.id), hasMore: offset > 0)
-                messages.insert(contentsOf: additional, at: 0)
-                messageHasMore = offset > 0
-                requestTimelineScroll(instruction)
-                return
-            }
-            let page = try viewer.recentMessagePage(conversationID: conversationID, offset: messages.count, limit: 100)
-            let instruction = timelinePaging.prependOlder(page.items.map(\.id), hasMore: page.hasMore)
-            messages.insert(contentsOf: page.items, at: 0)
+            guard let cursor = try viewer.messageCursor(conversationID: conversationID, messageID: firstID) else { return }
+            let page = try viewer.olderMessages(conversationID: conversationID, before: cursor, limit: 100)
+            let additional = page.items.filter { candidate in !messages.contains(where: { $0.id == candidate.id }) }
+            let instruction = timelinePaging.prependOlder(additional.map(\.id), hasMore: page.hasMore)
+            messages.insert(contentsOf: additional, at: 0)
             messageHasMore = page.hasMore
             requestTimelineScroll(instruction)
         } catch {
@@ -389,13 +463,27 @@ struct ArchiveViewerView: View {
         guard let viewer, let conversationID = selectedConversationID,
               let lastID = messages.last?.id else { return }
         do {
-            guard let position = try viewer.messageOffset(conversationID: conversationID, messageID: lastID) else { return }
-            let page = try viewer.messagePage(conversationID: conversationID, offset: position + 1, limit: 100)
+            guard let cursor = try viewer.messageCursor(conversationID: conversationID, messageID: lastID) else { return }
+            let page = try viewer.newerMessages(conversationID: conversationID, after: cursor, limit: 100)
             let additional = page.items.filter { candidate in !messages.contains(where: { $0.id == candidate.id }) }
             messages.append(contentsOf: additional)
             messageHasNewer = page.hasMore
         } catch {
             status = "无法加载更新的归档消息。"
+        }
+    }
+
+    private func jumpToDate(_ day: String) {
+        guard let viewer, let conversationID = selectedConversationID else { return }
+        do {
+            guard let messageID = try viewer.firstMessageID(conversationID: conversationID, on: day) else {
+                status = "该日期没有可定位的归档消息。"
+                return
+            }
+            showingDateNavigator = false
+            jumpToMessage(messageID, in: conversationID)
+        } catch {
+            status = "无法按日期定位消息。"
         }
     }
 
@@ -469,6 +557,7 @@ struct ArchiveViewerView: View {
 private struct ConversationSidebarRow: View {
     let conversation: ArchiveViewerConversation
     let viewer: WeChatArchiveViewerDatabase?
+    let onExport: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -490,6 +579,15 @@ private struct ConversationSidebarRow: View {
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button("打开") { }
+            Button("导出聊天记录…", action: onExport)
+            Divider()
+            Button("复制会话名称") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(conversation.title, forType: .string)
+            }
+        }
     }
 }
 
@@ -545,6 +643,7 @@ private struct ArchiveTimelineMessageRow: View {
                 .fill(isHighlighted ? ArchivePalette.jade.opacity(0.16) : .clear)
         )
         .animation(.easeInOut(duration: 0.4), value: isHighlighted)
+        .contextMenu { contextMenu }
     }
 
     private var bubbleColor: Color {
@@ -629,8 +728,7 @@ private struct ArchiveTimelineMessageRow: View {
     }
 
     private var timestampLabel: String {
-        guard message.timestamp > 0 else { return "未知时间" }
-        return Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .abbreviated, time: .shortened)
+        ArchiveViewerTimestampFormatter.timeline(message.timestamp)
     }
 
     private var preferredImage: ArchiveViewerMedia? { ArchiveViewerMediaSelector.preferredImage(in: message.media) }
@@ -646,6 +744,78 @@ private struct ArchiveTimelineMessageRow: View {
     }
 
     private func durationLabel(_ value: Double?) -> String { "\(max(0, Int((value ?? 0).rounded()))) 秒" }
+
+    @ViewBuilder
+    private var contextMenu: some View {
+        if message.normalizedType == .text {
+            Button("复制") { copy(ArchiveViewerMessageCopyFormatter.text(message)) }
+            Button("复制文字和时间") { copy(ArchiveViewerMessageCopyFormatter.textWithTimestamp(message)) }
+            if showSenderName {
+                Button("复制文字、发送者和时间") { copy(ArchiveViewerMessageCopyFormatter.textWithSenderAndTimestamp(message)) }
+            }
+        }
+        if let media = contextMedia, let viewer, let url = viewer.mediaURL(for: media, preferDecoded: message.normalizedType != .video) {
+            if message.normalizedType == .image {
+                Button("打开预览") { showsImagePreview = true }
+                Button("复制图片") {
+                    if let image = ArchiveMediaImageCache.shared.image(at: url) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([image])
+                    }
+                }
+            }
+            if message.normalizedType == .video {
+                Button("播放") { videoPlayback.toggle(id: media.id, url: url) }
+            }
+            if message.normalizedType == .voice {
+                Button(voicePlayback.playingID == media.id ? "暂停" : "播放") { voicePlayback.toggle(id: media.id, url: url) }
+            }
+            Button("另存为…") { save(url: url, filename: defaultMediaFilename(for: media, url: url)) }
+            Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        }
+        if message.normalizedType == .unknown {
+            Button("复制时间") { copy(timestampLabel) }
+        }
+    }
+
+    private var contextMedia: ArchiveViewerMedia? {
+        switch message.normalizedType {
+        case .image: preferredImage
+        case .video: preferredVideo
+        case .voice: message.media.first { $0.mediaType == .voice && ($0.decodedRelativePath != nil || $0.rawRelativePath != nil) }
+        case .text, .unknown: nil
+        }
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+    }
+
+    private func save(url: URL, filename: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = filename
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try FileManager.default.copyItem(at: url, to: destination)
+        } catch {
+            NSSound.beep()
+        }
+    }
+
+    private func defaultMediaFilename(for media: ArchiveViewerMedia, url: URL) -> String {
+        let stamp = Date(timeIntervalSince1970: TimeInterval(max(0, message.timestamp))).formatted(.dateTime.year().month().day().hour().minute())
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+        let prefix: String
+        switch media.mediaType {
+        case .image: prefix = "image"
+        case .video: prefix = "video"
+        case .voice: prefix = "voice"
+        }
+        return "\(prefix)-\(stamp).\(url.pathExtension.isEmpty ? "bin" : url.pathExtension)"
+    }
 }
 
 @MainActor
@@ -808,6 +978,7 @@ private final class VideoPlaybackController: ObservableObject {
 /// the already-imported, read-only `archive.sqlite`.
 private struct MessageSearchSheet: View {
     let viewer: WeChatArchiveViewerDatabase
+    let searchService: ArchiveMessageSearchService?
     let onSelect: (ArchiveViewerMessageSearchResult) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -815,6 +986,7 @@ private struct MessageSearchSheet: View {
     @State private var status = "输入关键词以搜索所有会话中的文本消息。"
     @State private var searchTask: Task<Void, Never>?
     @State private var debouncer = SearchDebouncer()
+    @State private var hasMore = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -837,15 +1009,22 @@ private struct MessageSearchSheet: View {
                         HStack {
                             Text(result.conversationTitle).font(.subheadline.bold())
                             Spacer()
-                            Text(Date(timeIntervalSince1970: TimeInterval(result.timestamp)).formatted(date: .abbreviated, time: .shortened))
+                            Text(ArchiveViewerTimestampFormatter.detail(result.timestamp))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
-                        Text(result.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        highlightedSnippet(result.snippet, query: query)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
                     .padding(.vertical, 2)
                 }
                 .buttonStyle(.plain)
+            }
+            if hasMore {
+                Button("加载更多结果", action: loadMore)
+                    .padding(.vertical, 8)
             }
         }
         .frame(minWidth: 460, minHeight: 420)
@@ -856,6 +1035,7 @@ private struct MessageSearchSheet: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             results = []
+            hasMore = false
             status = "输入关键词以搜索所有会话中的文本消息。"
             return
         }
@@ -863,15 +1043,207 @@ private struct MessageSearchSheet: View {
         searchTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(280))
             guard !Task.isCancelled, debouncer.shouldRun(ticket: ticket) else { return }
-            do {
-                let page = try viewer.searchMessagePage(query: trimmed, limit: 100)
+            performSearch(query: trimmed, offset: 0, appending: false)
+        }
+    }
+
+    private func loadMore() {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        performSearch(query: trimmed, offset: results.count, appending: true)
+    }
+
+    private func performSearch(query: String, offset: Int, appending: Bool) {
+        do {
+            let page = try (searchService?.search(query: query, offset: offset, limit: 50)
+                ?? viewer.searchMessagePage(query: query, offset: offset, limit: 50))
+            if appending {
+                results.append(contentsOf: page.items.filter { candidate in !results.contains(where: { $0.id == candidate.id }) })
+            } else {
                 results = page.items
-                status = results.isEmpty ? "未找到匹配的文本消息。" : "找到 \(results.count) 条匹配消息\(page.hasMore ? "（仅显示前 100 条）" : "")。"
-            } catch {
-                results = []
-                status = "搜索失败，请重试。"
+            }
+            hasMore = page.hasMore
+            status = results.isEmpty ? "未找到匹配的文本消息。" : "已显示 \(results.count) 条匹配消息\(page.hasMore ? "，可继续加载。" : "。")"
+        } catch {
+            results = []
+            hasMore = false
+            status = "搜索失败，请重试。"
+        }
+    }
+
+    private func highlightedSnippet(_ snippet: String, query: String) -> Text {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let range = snippet.range(of: trimmed, options: [.caseInsensitive]) else {
+            return Text(snippet)
+        }
+        return Text(String(snippet[..<range.lowerBound]))
+            + Text(String(snippet[range])).foregroundColor(.accentColor)
+            + Text(String(snippet[range.upperBound...]))
+    }
+}
+
+/// A local-calendar navigator for the selected conversation. It requests
+/// aggregate day buckets only; message bodies are loaded after a day is chosen.
+private struct DateNavigatorSheet: View {
+    let viewer: WeChatArchiveViewerDatabase
+    let conversation: ArchiveViewerConversation
+    let onSelect: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var buckets = [ArchiveViewerDateBucket]()
+    @State private var status = "正在读取有消息的日期…"
+    @State private var selectedMonth: String?
+
+    private var months: [String] {
+        Array(Set(buckets.map { String($0.day.prefix(7)) })).sorted(by: >)
+    }
+
+    private var displayedMonth: String? { selectedMonth ?? months.first }
+
+    private var bucketsByDay: [String: ArchiveViewerDateBucket] {
+        Dictionary(uniqueKeysWithValues: buckets.map { ($0.day, $0) })
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("按日期跳转", systemImage: "calendar")
+                    .font(.headline)
+                Spacer()
+                Button("关闭", action: dismiss.callAsFunction)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+            if buckets.isEmpty {
+                ContentUnavailableView(status, systemImage: "calendar.badge.exclamationmark")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 16) {
+                    HStack {
+                        Button("上个月", systemImage: "chevron.left", action: showOlderMonth)
+                            .disabled(!canShowOlderMonth)
+                        Spacer()
+                        Picker("有消息的月份", selection: $selectedMonth) {
+                            ForEach(months, id: \.self) { month in
+                                Text(monthLabel(month)).tag(Optional(month))
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 180)
+                        Spacer()
+                        Button("下个月", systemImage: "chevron.right", action: showNewerMonth)
+                            .disabled(!canShowNewerMonth)
+                    }
+                    .padding(.horizontal)
+
+                    let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+                    LazyVGrid(columns: columns, spacing: 7) {
+                        ForEach(weekdayLabels, id: \.self) { label in
+                            Text(label).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(calendarCells.enumerated()), id: \.offset) { _, day in
+                            if let day {
+                                let key = dayKey(day)
+                                let bucket = bucketsByDay[key]
+                                Button {
+                                    if bucket != nil { onSelect(key) }
+                                } label: {
+                                    VStack(spacing: 2) {
+                                        Text("\(Calendar.current.component(.day, from: day))")
+                                        Text(bucket.map { "\($0.messageCount)" } ?? "")
+                                            .font(.system(size: 9))
+                                            .lineLimit(1)
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 34)
+                                    .foregroundStyle(bucket == nil ? .secondary : .primary)
+                                    .background(bucket == nil ? .clear : Color.accentColor.opacity(0.16), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(bucket == nil)
+                                .help(bucket.map { "\($0.messageCount) 条消息" } ?? "没有消息")
+                            } else {
+                                Color.clear.frame(height: 34)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    Spacer(minLength: 0)
+                }
             }
         }
+        .frame(minWidth: 360, minHeight: 440)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        do {
+            buckets = try viewer.conversationDateBuckets(conversationID: conversation.id)
+            selectedMonth = months.first
+            status = buckets.isEmpty ? "该会话没有可用的日期索引。" : ""
+        } catch {
+            buckets = []
+            status = "无法读取该会话的日期导航。"
+        }
+    }
+
+    private func monthLabel(_ value: String) -> String {
+        let components = value.split(separator: "-")
+        guard components.count == 2 else { return value }
+        return "\(components[0])年\(Int(components[1]) ?? 0)月"
+    }
+
+    private var weekdayLabels: [String] {
+        let symbols = Calendar.current.veryShortWeekdaySymbols
+        let start = Calendar.current.firstWeekday - 1
+        return Array(symbols[start...] + symbols[..<start])
+    }
+
+    private var calendarCells: [Date?] {
+        guard let value = displayedMonth else { return [] }
+        let components = value.split(separator: "-")
+        guard components.count == 2,
+              let year = Int(components[0]),
+              let month = Int(components[1]),
+              let first = Calendar.current.date(from: DateComponents(year: year, month: month, day: 1)),
+              let days = Calendar.current.range(of: .day, in: .month, for: first) else { return [] }
+        let firstWeekday = Calendar.current.component(.weekday, from: first)
+        let padding = (firstWeekday - Calendar.current.firstWeekday + 7) % 7
+        var result = Array<Date?>(repeating: nil, count: padding)
+        result += days.compactMap { Calendar.current.date(byAdding: .day, value: $0 - 1, to: first) }
+        return result
+    }
+
+    private func dayKey(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar.current
+        formatter.timeZone = Calendar.current.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private var selectedMonthIndex: Int? {
+        guard let displayedMonth else { return nil }
+        return months.firstIndex(of: displayedMonth)
+    }
+
+    private var canShowOlderMonth: Bool {
+        guard let selectedMonthIndex else { return false }
+        return selectedMonthIndex + 1 < months.count
+    }
+
+    private var canShowNewerMonth: Bool {
+        guard let selectedMonthIndex else { return false }
+        return selectedMonthIndex > 0
+    }
+
+    private func showOlderMonth() {
+        guard let selectedMonthIndex, canShowOlderMonth else { return }
+        selectedMonth = months[selectedMonthIndex + 1]
+    }
+
+    private func showNewerMonth() {
+        guard let selectedMonthIndex, canShowNewerMonth else { return }
+        selectedMonth = months[selectedMonthIndex - 1]
     }
 }
 

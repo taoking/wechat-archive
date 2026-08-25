@@ -58,6 +58,45 @@ public struct ArchiveViewerMessage: Identifiable, Equatable, Sendable {
     public var media: [ArchiveViewerMedia]
 }
 
+/// A stable, source-preserving position in a conversation timeline. It is
+/// deliberately a value cursor rather than an OFFSET so loading around a
+/// search or date jump remains correct when many messages share one second.
+public struct ArchiveMessageCursor: Equatable, Sendable {
+    public let timestamp: Int64
+    public let sourceSequence: Int64
+    public let sourceDatabase: String
+    public let sourceTable: String
+    public let sourceSQLiteRowID: Int64
+    public let messageID: String
+}
+
+/// Pure formatting helpers for the Viewer copy actions. These deliberately
+/// operate only on already-normalized display fields, never source rows.
+public enum ArchiveViewerMessageCopyFormatter {
+    public static func text(_ message: ArchiveViewerMessage) -> String {
+        message.textContent ?? ""
+    }
+
+    public static func textWithTimestamp(_ message: ArchiveViewerMessage, timeZone: TimeZone = .current) -> String {
+        "\(timestamp(message, timeZone: timeZone))\n\(text(message))"
+    }
+
+    public static func textWithSenderAndTimestamp(_ message: ArchiveViewerMessage, timeZone: TimeZone = .current) -> String {
+        let sender = message.senderDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = (sender?.isEmpty == false ? sender! : "消息") + " · " + timestamp(message, timeZone: timeZone)
+        return "\(prefix)\n\(text(message))"
+    }
+
+    private static func timestamp(_ message: ArchiveViewerMessage, timeZone: TimeZone) -> String {
+        guard message.timestamp > 0 else { return "未知时间" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(message.timestamp)))
+    }
+}
+
 /// A bounded, chronologically ordered viewport around an archive message.
 /// `hasOlder` and `hasNewer` let the UI continue browsing in either direction
 /// after a search or date jump without exposing source-database coordinates.
@@ -365,6 +404,163 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         return .init(items: messages, hasMore: hasMore)
     }
 
+    /// Returns a stable cursor for a visible message. The cursor retains the
+    /// full physical ordering key used by the Archive, rather than assuming
+    /// timestamps are unique.
+    public func messageCursor(conversationID: String, messageID: String) throws -> ArchiveMessageCursor? {
+        let statement = try prepare("""
+            SELECT timestamp, source_sequence, source_database, source_table, \(sourceRowIDColumn), id
+            FROM messages
+            WHERE conversation_id = ? AND id = ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(conversationID, at: 1, to: statement)
+        try bind(messageID, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let sourceDatabase = text(statement, 2),
+              let sourceTable = text(statement, 3),
+              let id = text(statement, 5) else { return nil }
+        return .init(
+            timestamp: sqlite3_column_int64(statement, 0),
+            sourceSequence: sqlite3_column_int64(statement, 1),
+            sourceDatabase: sourceDatabase,
+            sourceTable: sourceTable,
+            sourceSQLiteRowID: sqlite3_column_int64(statement, 4),
+            messageID: id
+        )
+    }
+
+    /// Loads messages strictly before `cursor`, in chronological order.
+    public func olderMessages(conversationID: String, before cursor: ArchiveMessageCursor, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
+        try keysetMessagePage(conversationID: conversationID, cursor: cursor, relation: .before, limit: limit)
+    }
+
+    /// Loads messages strictly after `cursor`, in chronological order.
+    public func newerMessages(conversationID: String, after cursor: ArchiveMessageCursor, limit: Int = 100) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
+        try keysetMessagePage(conversationID: conversationID, cursor: cursor, relation: .after, limit: limit)
+    }
+
+    private enum KeysetRelation { case before, after, atOrAfter }
+
+    private func keysetMessagePage(
+        conversationID: String,
+        cursor: ArchiveMessageCursor,
+        relation: KeysetRelation,
+        limit: Int
+    ) throws -> ArchiveViewerPage<ArchiveViewerMessage> {
+        let pageSize = clamped(limit)
+        let comparison: String
+        let pageOrder: String
+        let selectedDescending: Bool
+        switch relation {
+        case .before:
+            comparison = "<"
+            pageOrder = "timestamp DESC, source_sequence DESC, source_database DESC, source_table DESC, \(sourceRowIDColumn) DESC, id DESC"
+            selectedDescending = true
+        case .after:
+            comparison = ">"
+            pageOrder = "timestamp ASC, source_sequence ASC, source_database ASC, source_table ASC, \(sourceRowIDColumn) ASC, id ASC"
+            selectedDescending = false
+        case .atOrAfter:
+            comparison = ">="
+            pageOrder = "timestamp ASC, source_sequence ASC, source_database ASC, source_table ASC, \(sourceRowIDColumn) ASC, id ASC"
+            selectedDescending = false
+        }
+        let chronologicalOrder = "page.timestamp ASC, page.source_sequence ASC, page.source_database ASC, page.source_table ASC, page.\(sourceRowIDColumn) ASC, page.id ASC"
+        let directionColumns = archiveSchemaVersion >= 3 ? "sender_display_name, direction" : "NULL AS sender_display_name, 'unknown' AS direction"
+        let senderContactColumn = archiveSchemaVersion >= 3 ? "sender_contact_id" : "NULL AS sender_contact_id"
+        let avatarColumns = archiveSchemaVersion >= 4 ? "sender_avatar.id, sender_avatar.archive_path, sender_avatar.width, sender_avatar.height" : "NULL, NULL, NULL, NULL"
+        let avatarJoin = archiveSchemaVersion >= 4
+            ? """
+              LEFT JOIN avatar_owner_links sender_avatar_link ON sender_avatar_link.owner_type = 'contact' AND sender_avatar_link.owner_id = page.sender_contact_id
+              LEFT JOIN avatar_assets sender_avatar ON sender_avatar.id = sender_avatar_link.avatar_asset_id AND sender_avatar.archive_path IS NOT NULL
+              """
+            : ""
+        let statement = try prepare("""
+            WITH page AS (
+                SELECT id, timestamp, normalized_type, raw_local_type, text_content, sender_source_id, \(directionColumns), \(senderContactColumn), source_sequence, source_database, source_table, \(sourceRowIDColumn)
+                FROM messages
+                WHERE conversation_id = ?
+                  AND (timestamp, source_sequence, source_database, source_table, \(sourceRowIDColumn), id) \(comparison) (?, ?, ?, ?, ?, ?)
+                ORDER BY \(pageOrder)
+                LIMIT ?
+            )
+            SELECT page.id, page.timestamp, page.normalized_type, page.raw_local_type, page.text_content, page.sender_source_id, page.sender_display_name, page.direction, page.sender_contact_id,
+                   \(avatarColumns),
+                   a.id, a.media_type, a.variant, a.status, a.raw_archive_path, a.decoded_archive_path, a.width, a.height, a.duration, a.raw_size, a.decoded_size
+            FROM page
+            LEFT JOIN message_media_links l ON l.message_id = page.id
+            LEFT JOIN media_assets a ON a.id = l.media_asset_id
+            \(avatarJoin)
+            ORDER BY \(chronologicalOrder), a.media_type ASC, a.variant ASC
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(conversationID, at: 1, to: statement)
+        try bind(cursor.timestamp, at: 2, to: statement)
+        try bind(cursor.sourceSequence, at: 3, to: statement)
+        try bind(cursor.sourceDatabase, at: 4, to: statement)
+        try bind(cursor.sourceTable, at: 5, to: statement)
+        try bind(cursor.sourceSQLiteRowID, at: 6, to: statement)
+        try bind(cursor.messageID, at: 7, to: statement)
+        try bind(Int64(pageSize + 1), at: 8, to: statement)
+        var messages = try collectMessageRows(statement)
+        let hasMore = messages.count > pageSize
+        if hasMore {
+            if selectedDescending { messages.removeFirst() } else { messages.removeLast() }
+        }
+        return .init(items: messages, hasMore: hasMore)
+    }
+
+    private func collectMessageRows(_ statement: OpaquePointer?) throws -> [ArchiveViewerMessage] {
+        var messages = [ArchiveViewerMessage]()
+        var indexes = [String: Int]()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = text(statement, 0),
+                  let typeValue = text(statement, 2),
+                  let normalizedType = ArchiveV1NormalizedType(rawValue: typeValue) else { throw ArchiveError.invalidArchive }
+            let messageIndex: Int
+            if let existing = indexes[id] {
+                messageIndex = existing
+            } else {
+                let rawType = sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 3)
+                let direction = text(statement, 7).flatMap(ArchiveV1MessageDirection.init(rawValue:)) ?? .unknown
+                let senderAvatar = avatar(statement, idIndex: 9, pathIndex: 10, widthIndex: 11, heightIndex: 12)
+                messageIndex = messages.count
+                indexes[id] = messageIndex
+                messages.append(.init(
+                    id: id,
+                    timestamp: sqlite3_column_int64(statement, 1),
+                    normalizedType: normalizedType,
+                    rawLocalType: rawType,
+                    textContent: text(statement, 4),
+                    hasSender: text(statement, 5) != nil,
+                    direction: direction,
+                    senderDisplayName: text(statement, 6),
+                    avatar: direction == .outgoing ? accountAvatar : senderAvatar,
+                    media: []
+                ))
+            }
+            guard let assetID = text(statement, 13) else { continue }
+            guard let mediaTypeValue = text(statement, 14), let mediaType = ArchiveV1MediaType(rawValue: mediaTypeValue),
+                  let variantValue = text(statement, 15), let variant = ArchiveV1MediaVariant(rawValue: variantValue),
+                  let statusValue = text(statement, 16), let status = ArchiveV1MediaStatus(rawValue: statusValue) else { throw ArchiveError.invalidArchive }
+            messages[messageIndex].media.append(.init(
+                id: assetID,
+                mediaType: mediaType,
+                variant: variant,
+                status: status,
+                rawRelativePath: text(statement, 17),
+                decodedRelativePath: text(statement, 18),
+                width: integer(statement, 19).map(Int.init),
+                height: integer(statement, 20).map(Int.init),
+                duration: sqlite3_column_type(statement, 21) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 21),
+                rawSize: integer(statement, 22),
+                decodedSize: integer(statement, 23)
+            ))
+        }
+        return messages
+    }
+
     /// Finds the zero-based ascending timeline position of a message inside
     /// its conversation, using the same ordering as `messagePage`. Returns
     /// nil when the id is not present (e.g. a stale search result).
@@ -396,16 +592,18 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         before: Int = 50,
         after: Int = 50
     ) throws -> ArchiveViewerMessageWindow {
-        guard let position = try messageOffset(conversationID: conversationID, messageID: aroundMessageID) else {
+        guard let cursor = try messageCursor(conversationID: conversationID, messageID: aroundMessageID) else {
             throw ArchiveError.invalidInput
         }
         let beforeCount = max(0, before)
         let afterCount = max(0, after)
-        let start = max(0, position - beforeCount)
-        let requested = max(1, beforeCount + afterCount + 1)
-        let page = try messagePage(conversationID: conversationID, offset: start, limit: requested)
-        let total = try messageCount(conversationID: conversationID)
-        return .init(items: page.items, hasOlder: start > 0, hasNewer: start + page.items.count < total)
+        let older = try keysetMessagePage(conversationID: conversationID, cursor: cursor, relation: .before, limit: beforeCount)
+        let anchoredAndNewer = try keysetMessagePage(conversationID: conversationID, cursor: cursor, relation: .atOrAfter, limit: afterCount + 1)
+        return .init(
+            items: older.items + anchoredAndNewer.items,
+            hasOlder: older.hasMore,
+            hasNewer: anchoredAndNewer.hasMore
+        )
     }
 
     /// Groups a conversation's message timestamps by the user's local day.
@@ -429,6 +627,37 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
             buckets.append(.init(day: day, messageCount: Int(sqlite3_column_int64(statement, 1))))
         }
         return buckets
+    }
+
+    /// Finds the first message on a local-calendar day without loading that
+    /// day's text. The returned identifier can be passed to `messageWindow`.
+    public func firstMessageID(
+        conversationID: String,
+        on day: String,
+        calendar: Calendar = .current
+    ) throws -> String? {
+        let components = day.split(separator: "-", omittingEmptySubsequences: false)
+        guard components.count == 3,
+              let year = Int(components[0]),
+              let month = Int(components[1]),
+              let dayOfMonth = Int(components[2]),
+              let start = calendar.date(from: DateComponents(year: year, month: month, day: dayOfMonth)),
+              let end = calendar.date(byAdding: .day, value: 1, to: start) else {
+            throw ArchiveError.invalidInput
+        }
+        let statement = try prepare("""
+            SELECT id
+            FROM messages
+            WHERE conversation_id = ? AND timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp ASC, source_sequence ASC, source_database ASC, source_table ASC, \(sourceRowIDColumn) ASC, id ASC
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(conversationID, at: 1, to: statement)
+        try bind(Int64(start.timeIntervalSince1970), at: 2, to: statement)
+        try bind(Int64(end.timeIntervalSince1970), at: 3, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return text(statement, 0)
     }
 
     /// Searches `messages.text_content` across every conversation in the
