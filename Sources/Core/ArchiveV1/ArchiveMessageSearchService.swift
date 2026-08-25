@@ -26,6 +26,9 @@ public struct ArchiveSearchIndexPreparation: Equatable, Sendable {
 /// A private, disposable search projection of one archive. It reads only
 /// `archive.sqlite`; removing this cache never modifies the source archive.
 public final class ArchiveMessageSearchService: @unchecked Sendable {
+    /// Bumped when the safe display projection changes so a private index that
+    /// once contained legacy quote XML is rebuilt from archive.sqlite.
+    private static let presentationVersion = "2"
     public let archiveRoot: URL
     public let indexRoot: URL
     public private(set) var indexURL: URL?
@@ -119,6 +122,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         do {
             try setMetadata(index, key: "fingerprint", value: fingerprint)
             try setMetadata(index, key: "tokenizer", value: tokenizer.rawValue)
+            try setMetadata(index, key: "presentation_version", value: Self.presentationVersion)
             let total = try scalarInt(source, "SELECT COUNT(*) FROM messages WHERE text_content IS NOT NULL AND text_content <> ''")
             let sourceStatement = try prepare(source, """
                 SELECT m.id, m.conversation_id, COALESCE(c.display_name, ''), m.timestamp, m.text_content
@@ -142,7 +146,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
                 try bind(conversationID, at: 2, to: insert)
                 try bind(columnText(sourceStatement, 2) ?? "", at: 3, to: insert)
                 try bind(sqlite3_column_int64(sourceStatement, 3), at: 4, to: insert)
-                try bind(content, at: 5, to: insert)
+                try bind(ArchiveMessagePresentationFormatter.displayText(for: content) ?? "", at: 5, to: insert)
                 guard sqlite3_step(insert) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
                 count += 1
                 if count.isMultiple(of: 250) { progress(count, total) }
@@ -188,7 +192,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let id = columnText(statement, 0), let conversationID = columnText(statement, 1) else { continue }
             let title = columnText(statement, 2).flatMap { $0.isEmpty ? nil : $0 } ?? "会话"
-            let content = columnText(statement, 4) ?? ""
+            let content = ArchiveMessagePresentationFormatter.displayText(for: columnText(statement, 4)) ?? ""
             results.append(.init(
                 id: id,
                 conversationID: conversationID,
@@ -229,6 +233,7 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
         let database = try open(url, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX)
         defer { sqlite3_close(database) }
         guard try metadata(database, key: "fingerprint") == fingerprint,
+              try metadata(database, key: "presentation_version") == Self.presentationVersion,
               let tokenizerValue = try metadata(database, key: "tokenizer"),
               let tokenizer = ArchiveSearchTokenizer(rawValue: tokenizerValue) else { return nil }
         return .init(state: .reused, tokenizer: tokenizer, indexedMessageCount: try scalarInt(database, "SELECT COUNT(*) FROM messages_fts"))

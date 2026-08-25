@@ -81,7 +81,12 @@ struct WeChatCompressedTextMessageAdapter: Sendable {
         guard let title = document.text(atPath: ["msg", "appmsg", "title"]), !title.isEmpty else { return nil }
         if let quotedFrom = document.text(atPath: ["msg", "appmsg", "refermsg", "displayname"]), !quotedFrom.isEmpty,
            let quotedContent = document.text(atPath: ["msg", "appmsg", "refermsg", "content"]), !quotedContent.isEmpty {
-            return "引用「\(quotedFrom)」：\(quotedContent)\n\(title)"
+            let quotedType = document.text(atPath: ["msg", "appmsg", "refermsg", "type"])
+            let summary = ArchiveMessagePresentationFormatter.quotedMessageSummary(
+                referType: quotedType,
+                quotedContent: quotedContent
+            )
+            return "引用「\(quotedFrom)」：\(summary)\n\(title)"
         }
         return "[\(appMessageLabel(subtype: subtype))] \(title)"
     }

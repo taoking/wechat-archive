@@ -219,6 +219,32 @@ final class ConversationExportTests: XCTestCase {
         XCTAssertTrue(markdownText.contains("[视频]"))
     }
 
+    func testConversationExportFormatsLegacyQuotedImageXMLWithoutInternalMetadata() throws {
+        let legacyQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\" cdnurl=\"fixture\" md5=\"fixture\"/></msg>\nFixture reply text"
+        let fixture = try makeFixture(messageCount: 1, textContent: legacyQuote)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appending(path: "Exports")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let exporter = WeChatArchiveConversationExporter()
+        let html = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .html)
+        let markdown = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .markdown)
+        let json = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .json)
+        let exportedTexts = try [html, markdown, json].map { try String(contentsOf: $0.primaryFileURL, encoding: .utf8) }
+
+        for text in exportedTexts {
+            XCTAssertTrue(text.contains("Fixture Sender"))
+            XCTAssertTrue(text.contains("[图片]"))
+            XCTAssertTrue(text.contains("Fixture reply text"))
+            XCTAssertFalse(text.contains("<?xml"))
+            XCTAssertFalse(text.contains("aeskey"))
+            XCTAssertFalse(text.contains("cdnurl"))
+            XCTAssertFalse(text.contains("md5"))
+        }
+        XCTAssertTrue(exportedTexts[0].contains("quote-preview"))
+        XCTAssertTrue(exportedTexts[1].contains("> Fixture Sender · [图片]"))
+    }
+
     func testConversationExporterSupportsTechnicalMetadataOnlyWhenExplicitlyEnabled() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
@@ -402,6 +428,40 @@ final class ConversationExportTests: XCTestCase {
         // A raw LIKE wildcard in the query must be treated literally, not as a pattern.
         let escaped = try viewer.searchMessagePage(query: "100%")
         XCTAssertTrue(escaped.items.isEmpty)
+    }
+
+    func testLegacyQuotedXMLNeverAppearsInConversationPreviewOrSearchResults() throws {
+        let legacyQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\" cdnurl=\"fixture\" md5=\"fixture\"/></msg>\nFixture reply text"
+        let fixture = try makeFixture(messageCount: 1, textContent: legacyQuote)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let viewer = try WeChatArchiveViewerDatabase(archiveRoot: fixture.root)
+
+        let preview = try XCTUnwrap(viewer.conversation(id: fixture.conversationID)?.lastMessagePreview)
+        let directResult = try XCTUnwrap(viewer.searchMessagePage(query: "Fixture reply", limit: 10).items.first)
+        let search = ArchiveMessageSearchService(archiveRoot: fixture.root, indexRoot: fixture.root.deletingLastPathComponent().appending(path: "SearchIndexes"))
+        _ = try search.prepareIndex()
+        let indexedResult = try XCTUnwrap(search.search(query: "Fixture reply", offset: 0, limit: 10).items.first)
+
+        for text in [preview, directResult.snippet, indexedResult.snippet] {
+            XCTAssertTrue(text.contains("[图片]"))
+            XCTAssertTrue(text.contains("Fixture reply text"))
+            XCTAssertFalse(text.contains("<?xml"))
+            XCTAssertFalse(text.contains("aeskey"))
+            XCTAssertFalse(text.contains("cdnurl"))
+            XCTAssertFalse(text.contains("md5"))
+        }
+
+        let indexURL = try XCTUnwrap(search.indexURL)
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(indexURL.path, &handle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle, "SELECT text_content FROM messages_fts LIMIT 1", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        let indexedText = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+        XCTAssertFalse(indexedText.contains("<?xml"))
+        XCTAssertFalse(indexedText.contains("aeskey"))
     }
 
     func testDerivedSearchIndexSupportsChineseSubstringAndRebuildsOnArchiveChange() throws {
@@ -639,7 +699,8 @@ final class ConversationExportTests: XCTestCase {
         conversationTitle: String = "Fixture Group 中文",
         largeVideoBytes: Int? = nil,
         sameTimestamp: Bool = false,
-        timestamps: [Int64]? = nil
+        timestamps: [Int64]? = nil,
+        textContent: String? = nil
     ) throws -> ConversationExportFixture {
         let parent = FileManager.default.temporaryDirectory.appending(path: "ConversationExport-\(UUID().uuidString)")
         let root = parent.appending(path: "WeChatArchive")
@@ -675,7 +736,7 @@ final class ConversationExportTests: XCTestCase {
                 receiverSourceID: nil,
                 rawLocalType: Int64(index + 1),
                 normalizedType: type,
-                textContent: type == .text ? "今天去深圳湾喝咖啡。Hello\n# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀" : nil,
+                textContent: type == .text ? (textContent ?? "今天去深圳湾喝咖啡。Hello\n# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀") : nil,
                 replySourceID: nil,
                 sourceSequence: Int64(index),
                 sourceValues: ["private_blob": .blob(Data([0xAA]))],

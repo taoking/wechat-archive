@@ -665,7 +665,12 @@ private struct ArchiveTimelineMessageRow: View {
     @ViewBuilder
     private var content: some View {
         switch message.normalizedType {
-        case .text: Text(message.textContent ?? "").textSelection(.enabled)
+        case .text:
+            if let quote = ArchiveMessagePresentationFormatter.quotedPresentation(for: message.textContent) {
+                ArchiveQuotePresentationView(quote: quote)
+            } else {
+                Text(ArchiveMessagePresentationFormatter.displayText(for: message.textContent) ?? "").textSelection(.enabled)
+            }
         case .image: imageContent
         case .video: videoContent
         case .voice: voiceContent

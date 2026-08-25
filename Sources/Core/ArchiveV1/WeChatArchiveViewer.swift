@@ -74,7 +74,7 @@ public struct ArchiveMessageCursor: Equatable, Sendable {
 /// operate only on already-normalized display fields, never source rows.
 public enum ArchiveViewerMessageCopyFormatter {
     public static func text(_ message: ArchiveViewerMessage) -> String {
-        message.textContent ?? ""
+        ArchiveMessagePresentationFormatter.displayText(for: message.textContent) ?? ""
     }
 
     public static func textWithTimestamp(_ message: ArchiveViewerMessage, timeZone: TimeZone = .current) -> String {
@@ -686,7 +686,7 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
             let conversationType = text(statement, 3).flatMap(ArchiveV1ConversationType.init(rawValue:)) ?? .unknown
             let fallbackTitle = conversationType == .group ? "群聊" : "会话"
             let title = text(statement, 2).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackTitle
-            let content = text(statement, 6) ?? ""
+            let content = ArchiveMessagePresentationFormatter.displayText(for: text(statement, 6)) ?? ""
             results.append(.init(
                 id: id,
                 conversationID: conversationID,
@@ -817,7 +817,7 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         guard let normalizedType = normalizedType.flatMap(ArchiveV1NormalizedType.init(rawValue:)) else { return nil }
         switch normalizedType {
         case .text:
-            let compact = (textContent ?? "")
+            let compact = (ArchiveMessagePresentationFormatter.displayText(for: textContent) ?? "")
                 .components(separatedBy: .whitespacesAndNewlines)
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")

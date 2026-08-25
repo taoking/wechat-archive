@@ -479,6 +479,59 @@ final class ArchiveCoreTests: XCTestCase {
         XCTAssertEqual(linkText, "[链接] Fixture Link Title")
     }
 
+    func testCompressedTextMessageAdapterReplacesQuotedImageXMLWithReadableSummary() throws {
+        let quoteXML = "<msg><appmsg><title>Fixture reply text</title><refermsg><type>3</type><displayname>Fixture Sender</displayname><content>&lt;?xml version=\"1.0\"?&gt;&lt;msg&gt;&lt;img aeskey=\"fixture\" md5=\"fixture\"/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"
+        let quoteRawType = Int64(bitPattern: (UInt64(57) << 32) | 49)
+
+        let quoteText = WeChatCompressedTextMessageAdapter().textContent(
+            from: ["message_content": .blob(try zstdCompress(quoteXML))],
+            rawType: quoteRawType
+        )
+
+        XCTAssertEqual(quoteText, "引用「Fixture Sender」：[图片]\nFixture reply text")
+        XCTAssertFalse(quoteText?.contains("<?xml") ?? true)
+        XCTAssertFalse(quoteText?.contains("aeskey") ?? true)
+    }
+
+    func testQuotedMessagePresentationFormatsLegacyXMLAndPlainTextReplies() {
+        let imageQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\" md5=\"fixture\"/></msg>\nFixture reply text"
+        let imagePresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: imageQuote)
+
+        XCTAssertEqual(imagePresentation?.quotedSender, "Fixture Sender")
+        XCTAssertEqual(imagePresentation?.quotedSummary, "[图片]")
+        XCTAssertEqual(imagePresentation?.replyText, "Fixture reply text")
+        XCTAssertFalse(imagePresentation?.displayText.contains("<?xml") ?? true)
+        XCTAssertFalse(imagePresentation?.displayText.contains("aeskey") ?? true)
+
+        let nestedXMLQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><appmsg><title>Fixture share</title></appmsg></msg>\nFixture reply text"
+        let nestedXMLPresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: nestedXMLQuote)
+        XCTAssertEqual(nestedXMLPresentation?.quotedSummary, "[分享] Fixture share")
+        XCTAssertEqual(nestedXMLPresentation?.replyText, "Fixture reply text")
+
+        let malformedXMLQuote = "引用「Fixture Sender」：<?xml version=\"1.0\"?><msg><img aeskey=\"fixture\">\nFixture reply text"
+        let malformedXMLPresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: malformedXMLQuote)
+        XCTAssertEqual(malformedXMLPresentation?.quotedSummary, "[图片]")
+        XCTAssertTrue(malformedXMLPresentation?.replyText.isEmpty ?? false)
+        XCTAssertFalse(malformedXMLPresentation?.displayText.contains("aeskey") ?? true)
+
+        let plainQuote = "引用「Fixture Sender」：Fixture quoted text\nFixture reply body"
+        let plainPresentation = ArchiveMessagePresentationFormatter.quotedPresentation(for: plainQuote)
+        XCTAssertEqual(plainPresentation?.quotedSummary, "Fixture quoted text")
+        XCTAssertEqual(plainPresentation?.replyText, "Fixture reply body")
+    }
+
+    func testQuotedMessageSummaryRecognizesReferenceTypesAndSafeXMLFallbacks() {
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "1", quotedContent: "  Fixture\nquoted\ttext  "), "Fixture quoted text")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "3", quotedContent: "ignored"), "[图片]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "34", quotedContent: "ignored"), "[语音]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "43", quotedContent: "ignored"), "[视频]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "47", quotedContent: "ignored"), "[表情]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: "49", quotedContent: "ignored"), "[分享]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: nil, quotedContent: "<msg><location label=\"fixture\"/></msg>"), "[位置]")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: nil, quotedContent: "<msg><appmsg><title>Fixture share</title></appmsg></msg>"), "[分享] Fixture share")
+        XCTAssertEqual(ArchiveMessagePresentationFormatter.quotedMessageSummary(referType: nil, quotedContent: "<msg><unknown secret=\"fixture\"/></msg>"), "[引用消息]")
+    }
+
     func testCompressedTextMessageAdapterRecoversGroupTextAndFallsThroughOnUnrecognizedTypes() throws {
         let text = WeChatCompressedTextMessageAdapter().textContent(
             from: ["message_content": .blob(try zstdCompress("fixture_wxid:\nFixture plain text message"))],
