@@ -328,7 +328,15 @@ struct ArchiveViewerView: View {
             isBuildingSearchIndex = true
             searchIndexTask?.cancel()
             searchIndexTask = Task.detached {
-                let result = try? service.prepareIndex(shouldCancel: { Task.isCancelled })
+                let result = try? service.prepareIndex(
+                    shouldCancel: { Task.isCancelled },
+                    progress: { completed, total in
+                        Task { @MainActor in
+                            guard self.messageSearchService === service else { return }
+                            self.searchIndexStatus = "正在建立消息搜索索引：\(completed) / \(total)"
+                        }
+                    }
+                )
                 await MainActor.run {
                     guard self.messageSearchService === service else { return }
                     self.isBuildingSearchIndex = false
@@ -1005,18 +1013,21 @@ private struct MessageSearchSheet: View {
                 Button {
                     onSelect(result)
                 } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(result.conversationTitle).font(.subheadline.bold())
-                            Spacer()
-                            Text(ArchiveViewerTimestampFormatter.detail(result.timestamp))
-                                .font(.caption2)
+                    HStack(spacing: 10) {
+                        ArchiveAvatarView(viewer: viewer, avatar: avatar(for: result), size: 32)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(result.conversationTitle).font(.subheadline.bold())
+                                Spacer()
+                                Text(ArchiveViewerTimestampFormatter.detail(result.timestamp))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            highlightedSnippet(result.snippet, query: query)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(2)
                         }
-                        highlightedSnippet(result.snippet, query: query)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
                     }
                     .padding(.vertical, 2)
                 }
@@ -1079,6 +1090,11 @@ private struct MessageSearchSheet: View {
         return Text(String(snippet[..<range.lowerBound]))
             + Text(String(snippet[range])).foregroundColor(.accentColor)
             + Text(String(snippet[range.upperBound...]))
+    }
+
+    private func avatar(for result: ArchiveViewerMessageSearchResult) -> ArchiveViewerAvatar? {
+        guard let conversation = try? viewer.conversation(id: result.conversationID) else { return nil }
+        return conversation.avatar
     }
 }
 
