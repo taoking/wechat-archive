@@ -1,11 +1,34 @@
 # 微信聊天归档（WeChat Archive）
 
-WeChat Archive 是一个 macOS 本地优先的个人聊天记录归档工具。它把用户本人有权访问的微信本地数据转换为独立的 `WeChatArchive`：之后无需再打开微信、原始数据库或密钥，也能离线查看聊天记录和已归档媒体。
+WeChat Archive 是一个用于 **Mac 微信聊天记录导出、备份、归档和离线查看**的本地工具。它把用户本人有权访问的微信本地数据转换为独立的 `WeChatArchive`：之后无需再打开微信、原始数据库或密钥，也能搜索聊天记录、查看已归档媒体，并导出 HTML、JSON、Markdown。
+
+WeChat chat history export, backup and offline viewer for macOS. The latest source includes a local database key extraction → SQLCipher validation → archive workflow.
 
 > 所有处理都在本机进行。项目不上传聊天内容、媒体或密钥。
 
+**第一次使用：先看 [新手入门与下载指南](docs/getting-started.md)。** 详细操作见 [中文使用说明](USAGE.md) / [English usage guide](USAGE.en.md)；取钥参数见 [取钥与全流程说明](tools/wechat_keys/README.md)。
+
+## 这个项目适合谁
+
+- 希望把自己 Mac 上的微信私聊、群聊保存成独立归档，之后离线查找。
+- 希望将某个会话导出为浏览器可打开的 HTML 或可读文本。
+- 已有 `all_keys.json`，希望验证密钥、解密自己的 SQLCipher 数据库并归档。
+- 已有 `WeChatArchive`，希望换到另一台兼容的 Mac 继续查看。
+
+这里的“迁移”指**归档文件迁移**，不能把记录导入回微信，也不替代微信官方的手机／电脑聊天迁移功能。当前运行平台为 macOS 15+；没有 Windows、Linux、Android 或 iPhone 取钥入口。取钥已在 Apple Silicon + 微信 4.1.15 验收，Intel 与其他微信版本仍需实机验证。
+
+## 下载哪个版本
+
+| 你的目标 | 下载入口 | 需要准备什么 |
+| --- | --- | --- |
+| 查看已有归档，或使用旧版桌面工具 | [Releases](https://github.com/taoking/wechat-archive/releases)，选择适合的 App 附件 | v0.3.0 已提供 Apple Silicon App；内置 SQLCipher，无需为查看归档安装 Xcode |
+| 从取钥开始完成新流程，或使用最新功能 | [最新源码 ZIP](https://github.com/taoking/wechat-archive/archive/refs/heads/main.zip)，或下方 Git 下载命令 | macOS 15+、完整 Xcode、Homebrew、Python 3.9+；首次取钥还需要 Rust |
+
+**v0.3.0 App 不包含新集成的取钥模块。** GitHub 的 `Source code (zip)` 和首页 `Code → Download ZIP` 是源码，不能当作安装包双击运行。源码 ZIP 请先解压；终端后续命令都在解压后的项目根目录执行。App 为本地 ad-hoc 签名，尚未公证；首次打开可能出现系统提示，处理方式见新手指南。
+
 ## 可以做什么
 
+- 使用项目内取钥模块，串联数据库密钥导出、验证、解密和一次性归档。
 - 将用户主动选择的微信 SQLCipher 数据库导出为普通 SQLite。
 - 一次性创建完整、私有的 `WeChatArchive`，保存全部消息源字段与 BLOB。
 - 在只读归档查看器中浏览私聊和群聊：文本、图片、视频、WAV 语音，以及未支持消息的安全占位。
@@ -18,36 +41,52 @@ WeChat Archive 是一个 macOS 本地优先的个人聊天记录归档工具。�
 
 ### 1. 准备环境
 
-从源码运行需要 macOS 15、完整 Xcode 和 Homebrew SQLCipher：
+以下命令针对最新源码。安装完整 Xcode（仅 Command Line Tools 不足以运行桌面应用）和 Homebrew 后，在终端下载并进入项目；已经下载 ZIP 的用户直接进入解压后的文件夹：
+
+```zsh
+git clone https://github.com/taoking/wechat-archive.git
+cd wechat-archive
+```
+
+安装项目依赖：
 
 ```zsh
 brew bundle
+brew install rust  # 首次取钥时需要；仅查看归档不需要
+python3 --version  # 取钥流程要求 3.9 或更高
 ```
 
-若项目没有 Brewfile，可使用：
+### 2. 根据你的情况选择入口
 
-```zsh
-brew install sqlcipher
-```
+| 你已经有的文件 | 下一步 |
+| --- | --- |
+| 什么都没有，但 Mac 微信已登录自己的账号 | 按步骤 3 使用全流程命令 |
+| `all_keys.json` 和对应的微信账号目录 | 按 [已有密钥步骤](docs/getting-started.md#已有密钥时) 跳过重新取钥 |
+| 普通 SQLite 导出和账号媒体目录 | 在应用的“完整导出”中创建归档 |
+| 含 `archive.sqlite` 的归档文件夹 | 启动应用，在“归档查看器”打开该文件夹 |
 
-### 2. 启动应用
+源码启动桌面应用：
 
 ```zsh
 ./scripts/run-app.sh
 ```
 
-应用启动后默认显示“归档查看器”。没有已有归档时，选择“创建完整归档”。
+应用启动后默认显示“归档查看器”。“创建完整归档”需要已有普通 SQLite 导出；首次取钥请继续下一步。
 
 ### 3. 创建一次性完整归档
 
 也可以从取钥开始，用项目内的统一入口完成验证、解密和完整归档：
 
 ```zsh
-brew install rust  # 首次取钥编译本地工具需要
 ./scripts/archive-wechat.command --prepare-copy --open-viewer
 ```
 
-先在官方微信登录要归档的账号；等待终端提示后在临时副本点击“进入微信”。官方应用保持原签名，运行数据全部在被 Git 忽略的 `wechat/`。缺少密钥默认停止，只有逐项明确指定的数据库可以排除。
+1. 在官方微信登录要归档的本人账号，然后执行上面的命令。
+2. 流程会退出当前微信并打开临时副本；等待登录页出现，**先不要点击“进入微信”**。
+3. 按终端提示回车，看到采集提示后，再在副本点击“进入微信”，完成手机确认／系统授权，并打开需要归档的聊天。
+4. 等待验证和归档完成。成功时终端显示验证数量和归档位置，查看器自动打开。
+
+官方应用保持原签名，运行数据全部在被 Git 忽略的 `wechat/`。不要给整个命令加 `sudo`；遇到权限问题按 [权限说明](docs/getting-started.md#权限与常见问题) 处理。缺少密钥默认停止，只有逐项明确指定的数据库可以排除；这类结果不代表全部数据库均已覆盖。
 仅导出密钥使用 `./scripts/extract-keys.command --prepare-copy`。已有密钥复用、保留选项、权限和限制见 [取钥与全流程说明](tools/wechat_keys/README.md)。
 
 桌面应用逐步操作方式仍然可用：
@@ -58,6 +97,8 @@ brew install rust  # 首次取钥编译本地工具需要
 4. 完成后点击“打开归档”。
 
 归档会创建 `archive.sqlite`、manifest、媒体和聚合导入报告。目录权限为私有权限；源数据库和微信媒体只读访问，不会被修改。
+
+统一入口的最终归档在 `wechat/archives/<run-id>/`，运行报告在 `wechat/runs/<run-id>/result.json`。备份时复制**整个归档文件夹**，包含媒体；仅复制 `archive.sqlite` 不够。完整归档流程默认清理本次临时密钥和明文工作库，单独导出密钥则保留私有 JSON。成功判断与清理说明见 [新手指南](docs/getting-started.md#如何确认完成)。
 
 ### 4. 日常查看与导出会话
 
@@ -81,6 +122,8 @@ brew install rust  # 首次取钥编译本地工具需要
 - 未支持消息仍会以完整原始 SQLite 值保存到 Archive，不会因当前查看器无法解释而丢失
 
 当前版本有意不提供实时同步、增量合并、云端上传、写回微信或新的微信消息协议解析。
+
+本机没有下载过的媒体不能凭空恢复；当前查看器不能解释的消息仍保存其源字段。已有实机取钥验收不等于所有微信版本都兼容，真实聊天的完整归档尚未作端到端验收，自动化端到端测试使用合成数据。大量媒体会占用较多空间，请为快照、工作库和归档预留容量。
 
 ## 隐私与安全
 
@@ -112,3 +155,13 @@ git diff --check
 ```
 
 产物位于 `dist/WeChat Archive.app`，会内置 SQLCipher 与所需 OpenSSL runtime，因而不依赖目标机器上的 Homebrew。Silk → WAV 仍需要一个兼容的本机 `silk_v3_decoder`；已经归档的 WAV 语音无需该工具即可播放。同理，撤回通知/位置/链接/引用回复等消息文本的恢复需要本机 `zstd`（`brew bundle` 已包含）；缺少时这些消息按原样保留为未识别类型，不影响归档其余部分。该 App 采用 ad-hoc 本地签名；尚未进行 Developer ID 签名或 notarization。更多开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)，使用细节见 [USAGE.md](USAGE.md)（[English](USAGE.en.md)）。
+
+## 问题反馈
+
+请先查看 [新手常见问题](docs/getting-started.md#权限与常见问题)。仍无法解决时，在 [GitHub Issues](https://github.com/taoking/wechat-archive/issues) 提供 macOS 版本、芯片类型、微信版本、使用的入口和脱敏后的错误提示。不要上传 `wechat/`、`all_keys.json`、数据库、聊天截图或含个人信息的完整日志。
+
+## 搜索关键词
+
+微信聊天记录导出、微信聊天记录备份、微信聊天记录归档、Mac 微信、macOS 微信、微信数据库密钥、SQLCipher 解密、本地聊天记录搜索、离线聊天查看器、微信聊天记录导出 HTML / JSON / Markdown、归档文件迁移（不写回微信）。
+
+WeChat Archive · WeChat chat history export · WeChat backup · WeChat database key extraction · SQLCipher · macOS · offline chat viewer · local-first · privacy · SwiftUI · HTML export · JSON export · Markdown export.

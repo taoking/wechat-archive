@@ -1,5 +1,18 @@
 # WeChat Archive 开发计划
 
+## 新手说明与搜索信息（2026-10-13）
+
+- [x] 阅读 README、PLAN、已有使用说明及用户提供的 AGENTS.md；核对 GitHub 下载包、源码入口和当前参数。
+- [x] 补充首页项目定位、适用范围、下载选择、使用步骤及中英文搜索关键词。
+- [x] 添加新手指南，说明取钥时机、已有密钥、成功判断、输出备份、权限和常见问题；同步中英文使用说明。
+- [x] 检查 Markdown 本地链接、命令帮助、文档与实现一致性和提交范围。
+- [x] 更新 GitHub 中英文简介与 18 个 Topics，包括 wechat、wechat-export、wechat-backup、sqlcipher、macos、key-extraction。
+- [ ] 提交并推送文档，确认远端与 CI。
+
+本次只修改公开文档和仓库搜索信息，不运行真实聊天完整归档，不提交本机密钥、数据库或媒体。GitHub v0.3.0 已有 Apple Silicon App 下载，但不含最新源码中的取钥模块；新手说明须明确区分。
+
+提交前检查：`./scripts/archive-wechat.command --help`、`./scripts/extract-keys.command --help` 均退出 0；`zsh -n scripts/run-app.sh scripts/build-app.sh scripts/archive-wechat.command scripts/extract-keys.command` 通过；一次性 `python3` 文档检查核对 6 份 Markdown 的 45 个链接（本地目标／锚点有效）、23 个代码块闭合，以及 22 个 shell 示例的语法和脚本路径，均通过；`git diff --check` 通过。核对下载包使用 GitHub Release 元数据，未实际下载安装包；本次没有重新执行真实取钥或真实聊天完整归档。
+
 ## 密钥获取与一次性归档集成（2026-10-13）
 
 - [x] 阅读 README、开发／隐私／安全说明与现有归档 API，确认远端 main 未发生变化。

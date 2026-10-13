@@ -2,7 +2,20 @@
 
 *[中文版本见 USAGE.md](USAGE.md)*
 
-Phase 1 of WeChat Archive reads a wx-cli `all_keys.json` you select, matches each database's `enc_key` by its **relative path**, and exports the corresponding SQLCipher databases into plain SQLite databases openable by any ordinary `sqlite3` client or SQLite GUI tool. Phase 2 performs read-only structure discovery on those plain SQLite databases only. Phase 3C can export the plain SQLite export and your original account media into a standalone archive in one pass, viewable offline inside the App.
+WeChat Archive turns your authorized local Mac WeChat data into a standalone archive for offline browsing, search and conversation export. The latest source includes local database key extraction, SQLCipher validation, decryption and archive creation in one workflow. The desktop app also supports separate steps.
+
+For download choices and a beginner walkthrough, see the [Chinese getting-started guide](docs/getting-started.md). The v0.3.0 Release provides an Apple Silicon App, but **does not include the newly integrated key extraction workflow**. Download the latest main source for that workflow. Source builds require macOS 15+, full Xcode with Swift 6, Python 3.9+ and Homebrew; fresh key extraction also requires Rust. Key extraction has been checked on Apple Silicon with WeChat 4.1.15; Intel and other WeChat versions still need real-device verification.
+
+## Choose Your Starting Point
+
+| What you already have | Next step |
+| --- | --- |
+| Your account logged into Mac WeChat, no keys | Use the workflow below |
+| Matching `all_keys.json` | Reuse it below or use desktop Database Export |
+| Plain SQLite export and original account media | Use desktop Full Export |
+| A standalone `WeChatArchive` folder | Open it in Archive Viewer; no WeChat or keys needed |
+
+Migration means copying the whole archive to another compatible Mac. It does not import records back into WeChat. No Windows or phone key extraction entry point is provided.
 
 ## Environment Setup
 
@@ -29,6 +42,45 @@ Phase 1 of WeChat Archive reads a wx-cli `all_keys.json` you select, matches eac
 
    You can also open `Package.swift` in Xcode, select the `WeChatArchive` executable, and run it there.
 
+## From Key Extraction to an Archive
+
+Download and extract the latest main source, or clone it with Git. Run all commands from the project folder containing `Package.swift`:
+
+```zsh
+git clone https://github.com/taoking/wechat-archive.git
+cd wechat-archive
+brew bundle
+brew install rust
+```
+
+If you downloaded the ZIP, enter its extracted folder instead of cloning again. Log into your account in the official WeChat app, then run:
+
+```zsh
+./scripts/archive-wechat.command --prepare-copy --open-viewer
+```
+
+This explicitly allows stopping the running WeChat and preparing a temporary debugging copy. The official app is not re-signed or replaced. Wait for the copy's login screen, **do not enter WeChat yet**, and press Return in the terminal when asked to arm capture. After the capture prompt, enter WeChat in the copy and complete any phone confirmation or system authorization. Open relevant chats during capture. The default window is 180 seconds; `--capture-seconds 300` extends it to the maximum. Do not run the whole workflow with `sudo`.
+
+The workflow then quits WeChat, snapshots the databases, validates keys, exports plain SQLite, creates and validates the archive, and opens the viewer. Missing keys stop the workflow by default. Only exact database paths explicitly passed with `--allow-missing` can be excluded; such results report incomplete coverage. Invalid keys cannot be excluded.
+
+The archive is under `wechat/archives/<run-id>/`; the result report is `wechat/runs/<run-id>/result.json`. For archive success, check `status`, `completeCoverage`, `archiveCreated`, and the import report. `completed_with_allowed_missing` is not full database coverage. Coverage only describes detected database keys, not absent local media or unsynced phone history. Real chat full archival has not yet received end-to-end acceptance testing; automated end-to-end tests use synthetic data.
+
+Archive mode cleans up the generated temporary keys and plain working databases by default, including on failure; `--keep-keys` / `--keep-databases` explicitly retain them. Encrypted snapshots and incomplete archives may remain. Back up the **entire archive folder**, including media. Private file permissions do not encrypt your backups. See [module details](tools/wechat_keys/README.md) for limitations, options and cleanup.
+
+## Reuse Existing Keys
+
+Fully quit WeChat first, then replace these placeholders with your own absolute paths:
+
+```zsh
+./scripts/archive-wechat.command \
+  --db-dir "/absolute/path/to/db_storage" \
+  --keys "/absolute/path/to/all_keys.json" --open-viewer
+```
+
+Use the original account's `db_storage`: its parent supplies media. A database-only snapshot is not an account media root. Your original `--keys` input file is never deleted. To export only keys, run `./scripts/extract-keys.command --prepare-copy`; that mode retains a private `wechat/keys/<run-id>/all_keys.json`.
+
+The following sections describe the desktop steps. Schema and message discovery are advanced diagnostic tools, not mandatory archive creation steps.
+
 ## Batch Export to Plain SQLite
 
 1. **Fully quit WeChat.** Don't just close the window — quit from the menu and confirm it isn't still running. This avoids missing WAL data that hasn't been checkpointed yet.
@@ -44,7 +96,7 @@ Phase 1 of WeChat Archive reads a wx-cli `all_keys.json` you select, matches eac
    sqlite3 /path/to/Export/contact/contact.db '.tables'
    ```
 
-`all_keys.json` is only ever read into memory; it is never copied into the export directory, written to logs, databases, plain files, or Git. Keys are never passed as command-line arguments. After export completes, the app discards the matched keys held in the session; to export again, re-scan and re-validate.
+The desktop Database Export page reads `all_keys.json` into memory only; it never copies the keys into exports, logs, databases or Git, or passes key bytes as command-line arguments. After export completes, the app discards matched keys held in the session; to export again, re-scan and re-validate. The separate key extraction workflow explicitly creates a private key JSON as described above.
 
 ## Database Structure Discovery (Plain SQLite)
 
@@ -99,11 +151,18 @@ The archive contains `archive.sqlite`, `archive-manifest.json`, `metadata/import
 
 Some newer WeChat versions store the body of revoke notices, location shares, and app messages (link shares/mini programs/quote-replies) as compressed data. With `zstd` installed (included in `brew bundle`), export automatically attempts to decompress these and display them as plain text. Without `zstd`, these messages are still fully preserved as their raw SQLite values in the archive — they just display as unrecognized messages in the viewer. No data is lost and the export never fails because of this.
 
-## Archive Viewer: Search and Recovery Stats
+## Archive Viewer: Search, Dates and Recovery Stats
 
 - **Search message content**: click the magnifying-glass icon in the viewer toolbar and type a keyword to search message text across **every conversation** (not just conversation titles). Selecting a result switches to that conversation and jumps to, and briefly highlights, the matching message.
-  After jumping, a "jumped to a search result" banner appears; you can only page further backward (older) from there — click "Jump to latest" to return to normal browsing at the end of the conversation.
+  The viewer builds a private, disposable local FTS index; when unavailable it falls back to read-only `LIKE` search. The index contains searchable display text, not source databases or keys, and can be deleted and rebuilt.
+- **Jump to date**: use the calendar button to choose a date with messages in the current conversation.
+- **Browse both directions**: after a search or date jump, load older messages at the top or newer ones at the bottom. "Jump to latest" returns to the latest messages.
+- **Context actions and shortcuts**: copy text, save media or reveal it in Finder. `⌘F` searches all messages, `⌘E` exports the selected conversation, and `⌘J` jumps to the latest messages.
 - **Recovery stats**: click the stats icon in the toolbar to see how many messages in the current archive fall into each type (text/image/video/voice/unrecognized), and how media breaks down by recovery status (decoded/raw-only/missing/etc). The stats only read counts already aggregated inside the archive — they never read message text or media content.
+
+## Export a Conversation
+
+Select a conversation in Archive Viewer and choose **Export Chat History** or press `⌘E`. HTML is suitable for offline browser reading; Markdown is readable text, and JSON provides structured `WeChatConversationExport` v1 data. Keep the exported HTML with its media folder so relative media paths continue to work. Conversation export reads only the archive and does not require WeChat, source databases or keys.
 
 ## Snapshots and Temporary Plaintext Data
 
@@ -117,10 +176,12 @@ Output files with the same name default to **Skip** rather than silently overwri
 
 ## FAQ
 
+For terminal read permissions, check the actual terminal app's Full Disk Access in macOS Privacy & Security, then restart it. Read access does not grant debugger access; for LLDB attachment failures, use `--prepare-copy` and check Developer Tools authorization. Do not re-sign the official WeChat or disable SIP. For download warnings, missing media, disk space and reporting failures, see the [beginner FAQ](docs/getting-started.md#权限与常见问题). Never publish keys, databases, private logs or the `wechat/` directory in an issue.
+
 | Message | What to do |
 | --- | --- |
 | `Key map is invalid.` | Confirm you selected wx-cli's `all_keys.json`, where every `enc_key` must be 64 hex characters. |
-| `SQLCipher runtime unavailable. Install with: brew bundle` | Run `brew bundle` in the project directory, then restart the app. Intel Macs are also supported via Homebrew SQLCipher under `/usr/local`. |
+| `SQLCipher runtime unavailable. Install with: brew bundle` | For source builds, run `brew bundle` in the project folder and restart. The loader recognizes Intel Homebrew's `/usr/local` path; this does not imply real-device verification of Intel key extraction. |
 | `Database is in use. Please quit WeChat and try again.` | Fully quit WeChat and retry; don't validate while syncing, backing up, or writing. |
 | `Key missing` | `all_keys.json` doesn't contain that database's relative path; check whether you selected the correct `db_storage` root. |
 | `Key invalid` | A key matched, but it cannot open this database; that item is skipped. |

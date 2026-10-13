@@ -2,7 +2,20 @@
 
 *[English version: USAGE.en.md](USAGE.en.md)*
 
-WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按数据库**相对路径**匹配 `enc_key`，将对应的 SQLCipher 数据库导出为可由普通 `sqlite3` 或 SQLite 图形工具打开的 SQLite 数据库。第二阶段仅对这些普通 SQLite 数据库做只读结构发现。第三阶段 C 可将用户主动选择的普通 SQLite 与原始账号媒体一次性导出为独立归档，并在 App 中离线查看。
+WeChat Archive 将本人有权访问的 Mac 微信本地数据保存为独立归档，用于离线浏览、搜索和单会话导出。最新源码已经包含取钥、验证、解密与归档的统一入口；也可以使用桌面应用分步操作。
+
+第一次下载或不熟悉终端，请先阅读 [新手入门与下载指南](docs/getting-started.md)。GitHub v0.3.0 App 可用于桌面查看，但不含最新取钥模块；要从取钥开始请下载 main 源码。源码流程要求 macOS 15+、完整 Xcode、Python 3.9+、Homebrew，首次取钥另需 Rust。Apple Silicon + 微信 4.1.15 已有取钥实机验收，Intel 与其他版本兼容性仍需验证。
+
+## 按你的情况选择
+
+| 已有数据 | 入口 |
+| --- | --- |
+| Mac 微信账号已登录，尚无密钥 | 下方“从取钥开始一次归档” |
+| 对应账号的 `all_keys.json` | 下方“已有密钥复用”，或桌面“数据库导出” |
+| 已导出的普通 SQLite 和原始账号媒体 | 桌面“完整导出” |
+| 独立 `WeChatArchive` 文件夹 | “归档查看器”，无需微信、源数据库或密钥 |
+
+“归档迁移”是复制整个归档文件夹到另一台兼容的 Mac，不是向微信写回聊天记录。本项目没有手机或 Windows 取钥入口。
 
 ## 准备环境
 
@@ -29,6 +42,35 @@ WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按
 
    也可以用 Xcode 打开 `Package.swift`，选择 `WeChatArchive` executable 后运行。
 
+## 从取钥开始一次归档
+
+先在官方微信登录目标账号，在项目根目录运行：
+
+```zsh
+brew install rust  # 首次构建取钥工具需要
+./scripts/archive-wechat.command --prepare-copy --open-viewer
+```
+
+脚本将退出当前微信并准备临时副本，官方应用不重签、不替换。等副本登录页出现后，先在终端按回车安装捕获；看到采集提示，再在微信副本点击“进入微信”并按需完成手机确认。采集期间可打开需要归档的聊天，默认窗口 180 秒，最多可用 `--capture-seconds 300` 延长。不要给整个流程加 `sudo`。
+
+随后流程退出微信、创建私有快照、验证密钥、导出普通 SQLite、创建并校验归档，再打开查看器。缺少密钥默认停止；允许排除某个数据库需逐项使用精确的 `--allow-missing`，此时结果明确表示覆盖不完整。无效密钥不能跳过。
+
+最终归档在 `wechat/archives/<run-id>/`，结果在 `wechat/runs/<run-id>/result.json`。检查 `status`、`completeCoverage`、`archiveCreated` 和导入报告，不要仅凭文件夹存在判断成功。完整归档默认清理本次临时密钥和明文工作库；快照和失败归档可能保留。详细步骤及备份方式见 [新手指南](docs/getting-started.md#如何确认完成)，参数及保留选项见 [模块说明](tools/wechat_keys/README.md)。
+
+## 已有密钥复用
+
+完全退出微信，将示例路径替换为自己的绝对路径：
+
+```zsh
+./scripts/archive-wechat.command \
+  --db-dir "/absolute/path/to/db_storage" \
+  --keys "/absolute/path/to/all_keys.json" --open-viewer
+```
+
+`db_storage` 必须来自原始账号目录，其父目录用来读取媒体；不要用仅含数据库的快照冒充账号媒体目录。用户传入的原始密钥文件不会删除。仅导出密钥时使用 `./scripts/extract-keys.command --prepare-copy`，结果保存在本次私有 `wechat/keys/<run-id>/all_keys.json`。
+
+以下为桌面应用分步操作。普通 SQLite 是解密后的工作数据库，`WeChatArchive` 才是可独立离线查看的归档。数据库结构／消息发现是高级诊断工具，不是创建归档的必经步骤。
+
 ## 批量导出为普通 SQLite
 
 1. **完全退出微信。** 不要只关闭窗口；请从菜单退出并确认没有继续运行。这样能避免遗漏尚未 checkpoint 的 WAL 数据。
@@ -44,7 +86,7 @@ WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按
    sqlite3 /path/to/Export/contact/contact.db '.tables'
    ```
 
-`all_keys.json` 只会在内存中读取；不会复制到导出目录、写入日志、数据库、普通文件或 Git。密钥不会作为命令行参数传递。导出完成后，应用会丢弃会话中保存的匹配密钥；如需再次导出，请重新扫描和验证。
+桌面数据库导出页面只在内存中读取 `all_keys.json`；不会把密钥复制到导出目录、日志、数据库或 Git。密钥不会作为命令行参数传递。导出完成后，应用会丢弃会话中保存的匹配密钥；如需再次导出，请重新扫描和验证。单独取钥脚本则按用户选择创建私有密钥 JSON，保留规则见上方说明。
 
 ## 数据库结构发现（普通 SQLite）
 
@@ -120,10 +162,12 @@ WeChat Archive 的第一阶段读取用户选择的 wx-cli `all_keys.json`，按
 
 ## 常见问题
 
+取钥、首次安装、终端权限、下载的 App 被拦截、备份与磁盘空间问题，见 [新手常见问题](docs/getting-started.md#权限与常见问题)。下表为桌面导出页面的常见提示。
+
 | 提示 | 处理方式 |
 | --- | --- |
 | `Key map is invalid.` | 确认选择的是 wx-cli `all_keys.json`，其中每个 `enc_key` 必须是 64 个十六进制字符。 |
-| `SQLCipher runtime unavailable. Install with: brew bundle` | 在项目目录运行 `brew bundle`，然后重新启动应用。Intel Mac 也支持 `/usr/local` 下的 Homebrew SQLCipher。 |
+| `SQLCipher runtime unavailable. Install with: brew bundle` | 源码用户在项目目录运行 `brew bundle` 后重启应用。SQLCipher 加载器也识别 Intel Homebrew 的 `/usr/local` 路径，这不代表 Intel 取钥已实机验证。 |
 | `Database is in use. Please quit WeChat and try again.` | 完全退出微信后重试；不要在同步、备份或写入时验证。 |
 | `Key missing` | `all_keys.json` 未包含该数据库的相对路径；检查是否选择了正确的 `db_storage` 根目录。 |
 | `Key invalid` | 匹配到了 key，但该 key 不能打开当前数据库；该项会被跳过。 |

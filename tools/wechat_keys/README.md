@@ -1,5 +1,7 @@
 # 本地取钥与一次性归档
 
+[第一次下载／使用请先看新手指南](../../docs/getting-started.md) · [项目首页](../../README.md) · [中文使用说明](../../USAGE.md) · [English](../../USAGE.en.md)
+
 公开代码在本目录；所有本机输出在项目 `wechat/`，已排除在 Git 外。
 Rust 扫描器基于 hum0r23/wx-cli 指定提交，来源及许可证见 [NOTICE.md](NOTICE.md) 和 [LICENSE](LICENSE)。
 
