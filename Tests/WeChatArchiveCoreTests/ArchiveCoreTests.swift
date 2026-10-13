@@ -6,6 +6,15 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ArchiveCoreTests: XCTestCase {
+    func testStreamingFileHashMatchesDataHashAcrossChunkBoundaries() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "synthetic-bytes.bin")
+        let bytes = Data(repeating: 0xA5, count: 3 * 1_048_576 + 17)
+        try bytes.write(to: file)
+        XCTAssertEqual(try ArchiveCryptography.sha256(fileAt: file), ArchiveCryptography.sha256(bytes))
+    }
+
     func testResumeRejectsChangedSourceBeforeAddingMessages() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

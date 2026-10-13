@@ -56,6 +56,7 @@ INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES(1, 1, 1700000000, 'synth
         self.assertEqual(report["exported"], 1)
         self.assertEqual(report["messagesImported"], 1)
         self.assertTrue(report["archiveCreated"])
+        self.assertTrue(report["archiveVerified"])
         self.assertTrue(report["completeCoverage"])
         self.assertEqual(self.database.read_bytes(), original)
         self.assertTrue((archive / "archive.sqlite").is_file())
@@ -74,6 +75,7 @@ INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES(1, 1, 1700000000, 'synth
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(self.report.read_bytes())
         self.assertTrue(report["archiveCreated"])
+        self.assertTrue(report["archiveVerified"])
         self.assertEqual(report["messagesImported"], 1)
         self.assertFalse(report["keyCoverageChecked"])
         self.assertFalse(report["completeCoverage"])
@@ -85,6 +87,23 @@ INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES(1, 1, 1700000000, 'synth
         self.assertNotEqual(resumed.returncode, 0)
         self.assertEqual((archive / "archive.sqlite").read_bytes(), archived_database)
         self.assertEqual(database.read_bytes(), original)
+        verification = self.root / "verification.json"
+        checked = subprocess.run([str(CLI), "verify-archive", "--db-dir", str(archive), "--report", str(verification)], capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        checked_report = json.loads(verification.read_text())
+        self.assertTrue(checked_report["archiveVerified"])
+        self.assertFalse(checked_report["archiveCreated"])
+        self.assertFalse(checked_report["keyCoverageChecked"])
+        self.assertTrue(all(checked_report["archiveChecks"].values()))
+        self.assertEqual((archive / "archive.sqlite").read_bytes(), archived_database)
+        unexpected = archive / "media/unexpected.bin"
+        unexpected.write_bytes(b"synthetic orphan media")
+        failed_report = self.root / "verification-failed.json"
+        failed = subprocess.run([str(CLI), "verify-archive", "--db-dir", str(archive), "--report", str(failed_report)], capture_output=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(json.loads(failed_report.read_text())["archiveVerified"])
+        self.assertFalse(json.loads(failed_report.read_text())["archiveChecks"]["orphanFiles"])
+        self.assertEqual((archive / "archive.sqlite").read_bytes(), archived_database)
 
     def test_missing_database_blocks_before_plaintext_export(self):
         missing = self.source / "migrate/old.db"

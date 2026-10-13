@@ -20,7 +20,7 @@ public struct WeChatArchiveV1Validator: Sendable {
         var verified = [String: String]()
         func verifyOnce(path: String?, hash: String?) throws -> Bool {
             if let path, let hash, let previous = verified[path] { return previous == hash }
-            let passed = try verify(path: path, hash: hash, below: root)
+            let passed = try autoreleasepool { try verify(path: path, hash: hash, below: root) }
             if passed, let path, let hash { verified[path] = hash }
             return passed
         }
@@ -100,15 +100,19 @@ public struct WeChatArchiveV1Validator: Sendable {
             options: []
         ) else { throw ArchiveError.invalidArchive }
         for case let file as URL in enumerator {
-            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { return false }
-            guard values.isRegularFile == true else { continue }
-            let resolved = file.resolvingSymlinksInPath().standardizedFileURL
-            let path = resolved.path()
-            let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-            guard path.hasPrefix(prefix) else { return false }
-            let relative = String(path.dropFirst(prefix.count))
-            guard expectedPaths.contains(relative) else { return false }
+            let valid = try autoreleasepool {
+                let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
+                guard values.isSymbolicLink != true else { return false }
+                guard values.isRegularFile == true else { return true }
+                let resolved = file.resolvingSymlinksInPath().standardizedFileURL
+                let path = resolved.path()
+                let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+                guard path.hasPrefix(prefix) else { return false }
+                let relative = String(path.dropFirst(prefix.count))
+                guard expectedPaths.contains(relative) else { return false }
+                return true
+            }
+            guard valid else { return false }
         }
         return true
     }

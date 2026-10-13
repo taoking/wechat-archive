@@ -10,7 +10,11 @@ enum ArchiveCryptography {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var digest = SHA256()
-        while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty { digest.update(data: chunk) }
+        while try autoreleasepool(invoking: {
+            guard let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty else { return false }
+            digest.update(data: chunk)
+            return true
+        }) {}
         return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

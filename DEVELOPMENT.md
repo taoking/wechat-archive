@@ -33,6 +33,8 @@ cargo test --locked --manifest-path tools/wechat_keys/native/Cargo.toml
 
 测试套件涵盖模型序列化、NDJSON 分区、SHA-256 媒体去重、增量导入、SQLite FTS 筛选、离线导出转义、归档验证、SQLCipher 正确密钥／错误密钥／普通 SQLite 导出行为、wx-cli key map 解析、相对路径匹配、顺序批量验证／导出、`-wal`／`-shm` 快照复制、变更拒绝、受保护权限、目标不覆盖行为和普通 SQLite sidecar 清理。每次行为变更前先添加测试。
 
+文件哈希按 1 MiB 块读取，每块以及校验每个文件时释放临时 Foundation 对象。`verify-archive` 是已有归档的独立只读入口，报告结构、外键、清单、媒体哈希、头像哈希及孤立媒体六项结果，不能替代源数据库密钥覆盖检查。合成测试包含跨块哈希一致性、独立校验前后数据库字节不变及孤立文件拒绝；尚未完成真实大归档的修正后全量校验，不能据此声称进程退出问题已实机解决。
+
 ## 本地 App 构建
 
 在完整 Xcode 中打开 package，并选择 `WeChatArchive` 可执行产品。若从终端启动，运行 `./scripts/run-app.sh`；它会创建本地 `.app` 包装，使文件面板能够成为前台 macOS 窗口。Package 有意保持轻量依赖；未经威胁模型和许可证审查，不得添加网络 package。
