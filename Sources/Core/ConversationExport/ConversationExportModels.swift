@@ -278,7 +278,7 @@ public enum ConversationTimestampFormatter {
 public enum ArchiveViewerMediaSelector {
     public static func preferredImage(in media: [ArchiveViewerMedia]) -> ArchiveViewerMedia? {
         let ranks: [ArchiveV1MediaVariant: Int] = [.main: 3, .hd: 2, .thumbnail: 1]
-        return media.filter { $0.mediaType == .image && $0.decodedRelativePath != nil }.sorted { lhs, rhs in
+        return media.filter { $0.mediaType == .image && $0.status == .decoded && $0.decodedRelativePath != nil }.sorted { lhs, rhs in
             let lhsArea = (lhs.width ?? 0) * (lhs.height ?? 0)
             let rhsArea = (rhs.width ?? 0) * (rhs.height ?? 0)
             if lhsArea != rhsArea { return lhsArea > rhsArea }

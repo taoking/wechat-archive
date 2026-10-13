@@ -36,3 +36,7 @@
 162 项 Swift 测试通过（2 项跳过），覆盖跨批次取消后续跑、来源变更拒绝、完成归档拒绝与表情缓存安全关联；Python 30 项通过，Release CLI/App 构建通过。独立后台续跑已超过 93 万条，内存保持在可控范围；源数据库会话/会话摘要另按读取缓存，后续全流程与来源核对更快。
 
 交付前复核：`swift test` 162 项、2 项跳过、0 失败；`WECHAT_ARCHIVE_CLI="$PWD/.build/out/Products/Debug/WeChatArchiveCLI" python3 -m unittest discover -s tools/wechat_keys/tests -v` 30 项通过，包含 CLI 拒绝续跑已完成归档及源/目标字节不变；`./scripts/build-app.sh .build/optimized-delivery-app` 构建及深度签名校验通过；`zsh -n scripts/build-app.sh scripts/extract-keys.command scripts/archive-wechat.command` 与 `git diff --check` 通过。Rust 取钥模块本轮未改动，此前 13 项测试通过。全量归档仍在运行，最终覆盖与大小报告待验收。
+
+展示/导出复核补充：新增合成回归先复现 WXGF 不支持格式仍被当作普通图片的问题，再让查看器和会话导出只选择 decoded 变体；有有效缩略图时使用缩略图，否则显示占位，私有原始文件保持保存。`swift test` 163 项、2 项跳过、0 失败。全量导入仍在继续，未因界面选择逻辑改动重启数据生成。
+
+该显示修正交付复核：`./scripts/build-app.sh .build/optimized-image-selector-app` 构建及深度签名校验通过，`git diff --check` 通过；新的 App 在独立目录创建，已有构建不覆盖。

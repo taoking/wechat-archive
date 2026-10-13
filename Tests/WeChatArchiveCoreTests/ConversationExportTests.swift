@@ -4,6 +4,13 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ConversationExportTests: XCTestCase {
+    func testUnsupportedImageDoesNotHideUsableThumbnailOrExportAsDisplayable() {
+        let unsupported = ArchiveViewerMedia(id: "opaque-main", mediaType: .image, variant: .main, status: .decodeUnsupported, rawRelativePath: "media/images/raw/opaque.dat", decodedRelativePath: "media/images/decoded/opaque.wxgf", width: 4000, height: 3000, duration: nil, rawSize: 4096, decodedSize: 8192)
+        let thumbnail = ArchiveViewerMedia(id: "usable-thumbnail", mediaType: .image, variant: .thumbnail, status: .decoded, rawRelativePath: nil, decodedRelativePath: "media/images/decoded/thumbnail.jpg", width: 100, height: 100, duration: nil, rawSize: nil, decodedSize: 512)
+        XCTAssertEqual(ArchiveViewerMediaSelector.preferredImage(in: [unsupported, thumbnail])?.id, thumbnail.id)
+        XCTAssertNil(ArchiveViewerMediaSelector.preferredImage(in: [unsupported]))
+    }
+
     func testFileAttachmentsExportAcrossFormatsAndCanBeExcluded() throws {
         let fixture = try makeFixture(messageCount: 1, fileMessage: true)
         defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }

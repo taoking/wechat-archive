@@ -219,6 +219,8 @@ Omit `--limit` for a full import. This mode does not validate database keys: `ke
 
 Raw DAT images are preserved when decoding or key discovery fails. File messages are linked only when size and content MD5 match; archived files can be revealed in Finder and included in HTML/JSON/Markdown exports. Deleted or undownloaded attachments, missing resource mappings, sticker formats and embedded forwarded attachments can remain unsupported; original message fields are preserved. Validation does not prove every attachment is present or playable.
 
+The viewer and conversation exporter select successfully decoded image variants, using a usable thumbnail when available. Images available only as unsupported formats such as WXGF show a placeholder; their raw DAT and recovered format bytes remain in the private archive.
+
 APFS is recommended for many small files. On an ExFAT external disk, create a separate APFS sparse disk image in Disk Utility, mount it and save the new archive there. Preserve the existing disk contents. To migrate, copy the whole image, mount it on another Mac and open the archive folder inside. New v5 archives require the latest source build; older released apps may reject them. See [ADR-016](docs/decisions/ADR-016-local-attachment-preservation.md) for implementation boundaries and references.
 
 For an interrupted v5 import, rerun `import-plain` with `--resume`, the same source/account/output and a new report filename. Omit `--limit`. Completed archives are rejected. Resume verifies every stored source row and the account binding before removing only unreferenced managed/staging files and continuing. `messagesImported` is the archive total; `messagesSkipped` counts previously stored rows. A successful final validation is still required.
