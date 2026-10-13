@@ -64,10 +64,11 @@ public struct ArchiveV1ImportProgress: Equatable, Sendable {
     public let imageCount: Int
     public let videoCount: Int
     public let voiceCount: Int
+    public let fileCount: Int
     public let unknownCount: Int
     public let mediaBytesCopied: Int64
 
-    init(messagesRead: Int, messagesImported: Int, imagesResolved: Int, imagesDecoded: Int, imagesRawOnly: Int, imagesMissing: Int, textCount: Int, imageCount: Int, videoCount: Int, voiceCount: Int, unknownCount: Int, mediaBytesCopied: Int64) {
+    init(messagesRead: Int, messagesImported: Int, imagesResolved: Int, imagesDecoded: Int, imagesRawOnly: Int, imagesMissing: Int, textCount: Int, imageCount: Int, videoCount: Int, voiceCount: Int, fileCount: Int = 0, unknownCount: Int, mediaBytesCopied: Int64) {
         self.messagesRead = messagesRead
         self.messagesImported = messagesImported
         self.imagesResolved = imagesResolved
@@ -78,6 +79,7 @@ public struct ArchiveV1ImportProgress: Equatable, Sendable {
         self.imageCount = imageCount
         self.videoCount = videoCount
         self.voiceCount = voiceCount
+        self.fileCount = fileCount
         self.unknownCount = unknownCount
         self.mediaBytesCopied = mediaBytesCopied
     }
@@ -181,6 +183,7 @@ public struct WeChatArchiveV1Importer: Sendable {
                     imageCount: state.imageCount,
                     videoCount: state.videoCount,
                     voiceCount: state.voiceCount,
+                    fileCount: state.fileCount,
                     unknownCount: state.unknownCount,
                     mediaBytesCopied: state.archivedMediaBytes
                 ))

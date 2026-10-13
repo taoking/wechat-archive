@@ -132,6 +132,7 @@ struct ArchiveImportView: View {
                         SummaryValue(label: "图片", value: progress.imageCount)
                         SummaryValue(label: "视频", value: progress.videoCount)
                         SummaryValue(label: "语音", value: progress.voiceCount)
+                        SummaryValue(label: "文件", value: progress.fileCount)
                         SummaryValue(label: "未知", value: progress.unknownCount)
                     }
                     Text("已复制媒体：\(ByteCountFormatter.string(fromByteCount: progress.mediaBytesCopied, countStyle: .file))")
@@ -145,12 +146,13 @@ struct ArchiveImportView: View {
 
             if let summary {
                 Section("完整导出结果") {
-                    HStack(spacing: 18) {
+                    LazyVGrid(columns: [.init(.adaptive(minimum: 110), alignment: .leading)], alignment: .leading, spacing: 12) {
                         SummaryValue(label: "消息", value: summary.messagesImported)
                         SummaryValue(label: "文本", value: summary.textCount)
                         SummaryValue(label: "图片", value: summary.imageCount)
                         SummaryValue(label: "视频", value: summary.videoCount)
                         SummaryValue(label: "语音", value: summary.voiceCount)
+                        SummaryValue(label: "文件消息", value: summary.fileCount)
                         SummaryValue(label: "未知", value: summary.unknownCount)
                         SummaryValue(label: "会话", value: summary.conversationCount)
                         SummaryValue(label: "联系人", value: summary.contactCount)
@@ -158,14 +160,17 @@ struct ArchiveImportView: View {
                         SummaryValue(label: "群成员", value: summary.groupMemberCount)
                         SummaryValue(label: "头像", value: summary.avatarAssetCount)
                     }
-                    HStack(spacing: 18) {
+                    LazyVGrid(columns: [.init(.adaptive(minimum: 110), alignment: .leading)], alignment: .leading, spacing: 12) {
                         SummaryValue(label: "原始 DAT", value: summary.rawDATArchived)
                         SummaryValue(label: "已解码", value: summary.decodedImages)
                         SummaryValue(label: "视频文件", value: summary.rawVideoArchived)
                         SummaryValue(label: "原始语音", value: summary.rawVoiceArchived)
-                        SummaryValue(label: "缺失", value: summary.missingLocalMedia)
-                        SummaryValue(label: "解码失败", value: summary.decodeFailures)
+                        SummaryValue(label: "文件附件", value: summary.rawFileArchived)
+                        SummaryValue(label: "缺失变体", value: summary.missingLocalMedia)
+                        SummaryValue(label: "媒体处理失败", value: summary.decodeFailures)
                     }
+                    Text("媒体按文件变体计数：同一条消息可有原图、高清图与缩略图。原始文件保留不代表已经可以显示或播放。")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Text("每条已导入消息都会保留完整的原始 SQLite 行。未知类型将以未知消息归档，不会被丢弃。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
