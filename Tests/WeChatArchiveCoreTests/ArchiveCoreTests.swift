@@ -6,6 +6,64 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ArchiveCoreTests: XCTestCase {
+    func testNativeZstdDecodesBoundedFramesAndRejectsMalformedOrOversizedOutput() throws {
+        let runtime = try XCTUnwrap(NativeZstdPayloadRuntime.shared)
+        let text = "synthetic native payload 中文"
+        let compressed = try zstdCompress(text)
+        XCTAssertEqual(runtime.decompress(compressed), Data(text.utf8))
+        XCTAssertNil(runtime.decompress(Data([0x28, 0xb5, 0x2f, 0xfd, 0])))
+        XCTAssertNil(runtime.decompress(try zstdCompress(String(repeating: "x", count: 8 * 1_024 * 1_024 + 1))))
+    }
+
+    func testImportCancellationAcrossBatchBoundaryKeepsCompletedMessagesValid() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plain = directory.appending(path: "Plain")
+        let source = plain.appending(path: "message/message_0.db")
+        let account = directory.appending(path: "Account")
+        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: account, withIntermediateDirectories: true)
+        try createPlainSQLiteDatabase(at: source, sql: """
+            CREATE TABLE Msg_0123456789abcdef0123456789abcdef (local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT);
+            WITH RECURSIVE fixture(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM fixture WHERE n < 600)
+            INSERT INTO Msg_0123456789abcdef0123456789abcdef SELECT n, 1, 1700000000+n, 'synthetic batch text' FROM fixture;
+            """)
+        let before = try sha256Hex(of: source)
+        let cancellation = TestCancellation(afterChecks: 501)
+        let archive = directory.appending(path: "Archive")
+        let summary = try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(plainSQLiteRoot: plain, accountRoot: account, destinationRoot: archive, options: .all, shouldCancel: { cancellation.shouldCancel() })
+        XCTAssertEqual(summary.status, .cancelled)
+        XCTAssertEqual(summary.messagesImported, 501)
+        XCTAssertEqual(try WeChatArchiveV1Database(url: archive.appending(path: "archive.sqlite")).messageCount(), 501)
+        XCTAssertTrue(try WeChatArchiveV1Validator().validate(at: archive).passed)
+        XCTAssertEqual(try sha256Hex(of: source), before)
+    }
+
+    func testImageKeyProviderFailureStillArchivesRawImage() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let summary = try WeChatArchiveV1Importer(imageKeyProvider: UnavailableImageKeyProvider()).importArchive(
+            plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot,
+            destinationRoot: directory.appending(path: "Archive"), options: .all)
+        XCTAssertEqual(summary.rawDATArchived, 1)
+        XCTAssertEqual(summary.decodedImages, 0)
+        let rows = try WeChatArchiveV1Database(url: directory.appending(path: "Archive/archive.sqlite")).reconstruction()
+        XCTAssertTrue(rows.contains { $0.normalizedType == .image && $0.mediaStatuses.contains(.imageKeyUnavailable) })
+    }
+
+    func testArchiveV1MediaStoreReusesIdenticalBytesAndKeepsSharedFileOnRollback() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try WeChatArchiveV1MediaStore(root: directory)
+        let data = Data("synthetic repeated attachment".utf8)
+        let first = try store.storeRawData(data, mediaType: .voice, variant: .raw, sourceFormat: "silk", assetID: "first")
+        let second = try store.storeRawData(data, mediaType: .voice, variant: .raw, sourceFormat: "silk", assetID: "second")
+        XCTAssertEqual(first.relativePath, second.relativePath)
+        store.removeStoredMedia(second)
+        XCTAssertEqual(try Data(contentsOf: directory.appending(path: first.relativePath)), data)
+    }
+
 
     func testOneTimeWorkflowDecryptsAndImportsSyntheticEncryptedMessage() throws {
         let directory = try makeTemporaryDirectory()
@@ -49,7 +107,7 @@ final class ArchiveCoreTests: XCTestCase {
 
         let database = try WeChatArchiveV1Database(url: archiveURL)
 
-        try expectEqual(try database.schemaVersion(), 4)
+        try expectEqual(try database.schemaVersion(), 5)
         try expectEqual(try database.requiredTables(), Set([
             "import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links", "avatar_assets", "avatar_owner_links"
         ]))
@@ -3104,6 +3162,10 @@ private struct InvalidPlaintextDecryptor: WeChatDatabaseDecryptor {
         try Data("temporary sidecar".utf8).write(to: URL(fileURLWithPath: output.path() + "-wal"))
         return output
     }
+}
+
+private struct UnavailableImageKeyProvider: WeChatImageKeyProvider {
+    func keyCandidates(accountRoot: URL) throws -> [WeChatImageKeyMaterial] { throw ArchiveError.ioFailure }
 }
 
 private struct FixtureImageKeyProvider: WeChatImageKeyProvider {

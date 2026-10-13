@@ -20,6 +20,7 @@ public struct ConversationExportOptions: Equatable, Sendable {
     public let includeImages: Bool
     public let includeVoice: Bool
     public let includeVideo: Bool
+    public let includeFiles: Bool
     public let includeAvatars: Bool
     public let includeTechnicalMetadata: Bool
     public let pageSize: Int
@@ -28,6 +29,7 @@ public struct ConversationExportOptions: Equatable, Sendable {
         includeImages: Bool = true,
         includeVoice: Bool = true,
         includeVideo: Bool = true,
+        includeFiles: Bool = true,
         includeAvatars: Bool = true,
         includeTechnicalMetadata: Bool = false,
         pageSize: Int = 500
@@ -35,6 +37,7 @@ public struct ConversationExportOptions: Equatable, Sendable {
         self.includeImages = includeImages
         self.includeVoice = includeVoice
         self.includeVideo = includeVideo
+        self.includeFiles = includeFiles
         self.includeAvatars = includeAvatars
         self.includeTechnicalMetadata = includeTechnicalMetadata
         self.pageSize = min(max(pageSize, 1), 500)

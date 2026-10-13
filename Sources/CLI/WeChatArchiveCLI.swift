@@ -9,7 +9,7 @@ enum WeChatArchiveCLI {
     private struct Options {
         let action: String
         let source: URL
-        let keys: URL
+        let keys: URL?
         let report: URL
         let output: URL?
         let account: URL?
@@ -19,7 +19,7 @@ enum WeChatArchiveCLI {
         let configureViewer: Bool
 
         init(_ arguments: [String]) throws {
-            guard let action = arguments.first, ["validate", "archive"].contains(action) else {
+            guard let action = arguments.first, ["validate", "archive", "import-plain"].contains(action) else {
                 throw ArchiveError.invalidInput
             }
             self.action = action
@@ -53,7 +53,10 @@ enum WeChatArchiveCLI {
                 return URL(fileURLWithPath: path, isDirectory: ["--db-dir", "--output", "--account-root", "--archive-output"].contains(name)).standardizedFileURL
             }
             source = try LocalDatabaseDirectoryPath.resolve(url("--db-dir").path())
-            keys = try url("--keys")
+            if action == "import-plain" {
+                guard values["--keys"] == nil, values["--output"] == nil, missing.isEmpty else { throw ArchiveError.invalidInput }
+                keys = nil
+            } else { keys = try url("--keys") }
             report = try url("--report")
             allowedMissing = missing
             configureViewer = configure
@@ -61,8 +64,8 @@ enum WeChatArchiveCLI {
                 guard let count = Int(value), count > 0 else { throw ArchiveError.invalidInput }
                 limit = count
             } else { limit = nil }
-            if action == "archive" {
-                output = try url("--output")
+            if action == "archive" || action == "import-plain" {
+                output = action == "archive" ? try url("--output") : nil
                 account = try LocalDatabaseDirectoryPath.resolve(url("--account-root").path())
                 archive = try url("--archive-output")
             } else {
@@ -87,11 +90,13 @@ enum WeChatArchiveCLI {
         var exportFailed = 0
         var archiveCreated = false
         var messagesImported = 0
-        var completeCoverage: Bool { detected > 0 && validated == detected && missingKeys == 0 && invalid == 0 }
+        var keyCoverageChecked = true
+        var completeCoverage: Bool { keyCoverageChecked && detected > 0 && validated == detected && missingKeys == 0 && invalid == 0 }
 
         enum CodingKeys: String, CodingKey {
             case status, stage, detected, matched, validated, invalid, missingKeys, missingDatabases
             case exported, exportFailed, archiveCreated, messagesImported, completeCoverage
+            case keyCoverageChecked
         }
 
         func encode(to encoder: Encoder) throws {
@@ -109,6 +114,7 @@ enum WeChatArchiveCLI {
             try values.encode(archiveCreated, forKey: .archiveCreated)
             try values.encode(messagesImported, forKey: .messagesImported)
             try values.encode(completeCoverage, forKey: .completeCoverage)
+            try values.encode(keyCoverageChecked, forKey: .keyCoverageChecked)
         }
     }
 
@@ -116,6 +122,7 @@ enum WeChatArchiveCLI {
         guard CommandLine.arguments.count > 1, CommandLine.arguments[1] != "--help" else {
             print("WeChatArchiveCLI validate --db-dir DIR --keys FILE --report FILE [--allow-missing RELATIVE.db]")
             print("WeChatArchiveCLI archive ... --output DIR --account-root DIR --archive-output DIR [--limit N]")
+            print("WeChatArchiveCLI import-plain --db-dir PLAIN_ROOT --account-root DIR --archive-output NEW_DIR --report NEW_FILE [--limit N] [--configure-viewer]")
             return
         }
         umask(0o077)
@@ -162,6 +169,7 @@ enum WeChatArchiveCLI {
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? handle.close() }
         var report = Report()
+        report.keyCoverageChecked = options.action != "import-plain"
         do {
             try perform(options, report: &report)
         } catch {
@@ -173,8 +181,38 @@ enum WeChatArchiveCLI {
     }
 
     private static func perform(_ options: Options, report: inout Report) throws {
+        if options.action == "import-plain" {
+            guard let account = options.account, let archive = options.archive,
+                  disjoint(archive, options.source), disjoint(archive, account),
+                  !FileManager.default.fileExists(atPath: archive.path()) else { throw ArchiveError.invalidInput }
+            report.stage = "import"
+            let summary = try WeChatArchiveV1Importer(imageKeyProvider: WeChatKVCommImageKeyProvider()).importArchive(
+                plainSQLiteRoot: options.source, accountRoot: account, destinationRoot: archive,
+                options: options.limit.map { ArchiveV1ImportOptions(limit: $0) } ?? .all,
+                progress: { value in
+                    if value.messagesImported.isMultiple(of: 10_000) {
+                        print("已导入 \(value.messagesImported) 条；图片原始变体 \(value.imagesResolved)；媒体写入 \(value.mediaBytesCopied) 字节。")
+                        fflush(stdout)
+                    }
+                })
+            report.messagesImported = summary.messagesImported
+            report.stage = "archive_verify"
+            guard summary.status == .completed, try WeChatArchiveV1Validator().validate(at: archive).passed else { throw ArchiveError.invalidArchive }
+            report.archiveCreated = true
+            report.status = "completed"
+            report.stage = "done"
+            if options.configureViewer, let defaults = UserDefaults(suiteName: "com.taoking.wechatarchive") {
+                let workspace = WorkspacePreferences(defaults: defaults)
+                workspace.lastPlainSQLiteRoot = options.source
+                workspace.lastAccountRoot = account
+                workspace.lastArchiveParentDirectory = archive.deletingLastPathComponent()
+                workspace.recordOpenedArchive(archive)
+            }
+            return
+        }
+        guard let keys = options.keys else { throw ArchiveError.invalidInput }
         let coordinator = WeChatDatabaseExportCoordinator(decryptor: try SQLCipherDatabaseDecryptor())
-        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: options.source, keyMap: WXCLIKeyMapProvider(url: options.keys))
+        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: options.source, keyMap: WXCLIKeyMapProvider(url: keys))
         let valid = coordinator.validateAll(scanned)
         let counts = WeChatDatabaseExportSummary(databases: valid)
         report.detected = counts.detected; report.matched = counts.matched
@@ -212,7 +250,7 @@ enum WeChatArchiveCLI {
                 workspace.lastArchiveParentDirectory = archive.deletingLastPathComponent()
                 workspace.lastDatabaseStorageRoot = options.source
                 workspace.lastPlainSQLiteExportParent = output.deletingLastPathComponent()
-                workspace.lastKeyMapPath = options.keys
+                workspace.lastKeyMapPath = keys
                 workspace.lastConversationExportDirectory = archive.deletingLastPathComponent().deletingLastPathComponent().appending(path: "exports")
                 workspace.recordOpenedArchive(archive)
             }

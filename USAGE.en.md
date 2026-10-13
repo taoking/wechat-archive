@@ -200,3 +200,23 @@ git diff --check
 ```
 
 Tests use only randomized keys and synthetic SQLCipher databases — never add real chat records, databases, media, or keys to the project.
+
+## Local attachments and rebuilding an archive
+
+Current source builds create v5 archives and read older v1–v4 archives without changing them. Rebuild into a new folder using the matching plaintext SQLite export and original account media root; keep WeChat exited. The original files and old archive stay unchanged.
+
+```zsh
+swift build -c release --product WeChatArchiveCLI
+CLI_DIR="$(swift build -c release --show-bin-path)"
+"$CLI_DIR/WeChatArchiveCLI" import-plain \
+  --db-dir /absolute/path/PlainSQLite \
+  --account-root /absolute/path/Account \
+  --archive-output /absolute/path/NewArchive \
+  --report /absolute/path/new-result.json
+```
+
+Omit `--limit` for a full import. This mode does not validate database keys: `keyCoverageChecked` and `completeCoverage` are false. Check `status=completed`, `archiveCreated=true` and `metadata/import-report.json`. Media status counts are per variant, not per message; a single image can have main, HD and thumbnail variants. Missing local data, association failures, copy failures and decode failures are reported separately.
+
+Raw DAT images are preserved when decoding or key discovery fails. File messages are linked only when size and content MD5 match; archived files can be revealed in Finder and included in HTML/JSON/Markdown exports. Deleted or undownloaded attachments, missing resource mappings, sticker formats and embedded forwarded attachments can remain unsupported; original message fields are preserved. Validation does not prove every attachment is present or playable.
+
+APFS is recommended for many small files. On an ExFAT external disk, create a separate APFS sparse disk image in Disk Utility, mount it and save the new archive there. Preserve the existing disk contents. To migrate, copy the whole image, mount it on another Mac and open the archive folder inside. New v5 archives require the latest source build; older released apps may reject them. See [ADR-016](docs/decisions/ADR-016-local-attachment-preservation.md) for implementation boundaries and references.

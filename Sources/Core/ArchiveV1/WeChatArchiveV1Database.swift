@@ -6,7 +6,7 @@ private let archiveV1SQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_
 /// Private Archive v1 database. It is intentionally separate from the older
 /// rebuildable search index: this schema is the lossless import source of truth.
 public final class WeChatArchiveV1Database: @unchecked Sendable {
-    public static let schemaVersion = 4
+    public static let schemaVersion = 5
     private var handle: OpaquePointer?
     public let url: URL
 
@@ -44,6 +44,13 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
 
     public func schemaVersion() throws -> Int {
         Int(try scalarInt("PRAGMA user_version"))
+    }
+
+    /// Import-only batching retains SQLite's durable commit policy. Message
+    /// inserts use savepoints while a bounded batch is active.
+    func beginImportBatch() throws { try execute("BEGIN IMMEDIATE") }
+    func finishImportBatch() throws {
+        if sqlite3_get_autocommit(requireHandle()) == 0 { try execute("COMMIT") }
     }
 
     public func requiredTables() throws -> Set<String> {
@@ -437,7 +444,12 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
 
     private func migrate() throws {
         let version = try schemaVersion()
-        guard version == 0 || version == Self.schemaVersion else { throw ArchiveError.invalidArchive }
+        guard version == 0 || version == 4 || version == Self.schemaVersion else { throw ArchiveError.invalidArchive }
+        if version == 4 {
+            // v5 adds typed file attachments, with the same relational tables.
+            try execute("PRAGMA user_version = 5")
+            return
+        }
         guard version == 0 else { return }
         try inTransaction {
             try execute("""
@@ -467,7 +479,7 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
             try execute("CREATE TABLE avatar_assets (id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, variant TEXT NOT NULL, source_format TEXT, archive_path TEXT, width INTEGER, height INTEGER, size INTEGER, sha256 TEXT, source_url TEXT, status TEXT NOT NULL, created_at REAL NOT NULL)")
             try execute("CREATE TABLE avatar_owner_links (owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, avatar_asset_id TEXT NOT NULL REFERENCES avatar_assets(id) ON DELETE CASCADE, PRIMARY KEY(owner_type, owner_id))")
             try execute("CREATE INDEX avatar_owner_assets ON avatar_owner_links(avatar_asset_id)")
-            try execute("PRAGMA user_version = 4")
+            try execute("PRAGMA user_version = 5")
         }
     }
 
@@ -531,6 +543,11 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
     }
 
     private func inTransaction<T>(_ body: () throws -> T) throws -> T {
+        if sqlite3_get_autocommit(requireHandle()) == 0 {
+            try execute("SAVEPOINT message_insert")
+            do { let result = try body(); try execute("RELEASE message_insert"); return result }
+            catch { try? execute("ROLLBACK TO message_insert"); try? execute("RELEASE message_insert"); throw error }
+        }
         try execute("BEGIN IMMEDIATE")
         do { let result = try body(); try execute("COMMIT"); return result }
         catch { try? execute("ROLLBACK"); throw error }

@@ -813,6 +813,7 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         case .image: return "[图片]"
         case .video: return "[视频]"
         case .voice: return "[语音]"
+        case .file: return textContent ?? "[文件]"
         case .unknown: return "[其他消息]"
         }
     }

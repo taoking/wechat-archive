@@ -17,12 +17,19 @@ public struct WeChatArchiveV1Validator: Sendable {
         let schemaVersion = try database.schemaVersion()
         let media = try database.mediaRows()
         let avatars = schemaVersion >= 4 ? try database.avatarRows() : []
+        var verified = [String: String]()
+        func verifyOnce(path: String?, hash: String?) throws -> Bool {
+            if let path, let hash, let previous = verified[path] { return previous == hash }
+            let passed = try verify(path: path, hash: hash, below: root)
+            if passed, let path, let hash { verified[path] = hash }
+            return passed
+        }
         let mediaHashesPassed = try media.allSatisfy { row in
-            try verify(path: row.rawPath, hash: row.rawHash, below: root) &&
-            verify(path: row.decodedPath, hash: row.decodedHash, below: root)
+            try verifyOnce(path: row.rawPath, hash: row.rawHash) &&
+            verifyOnce(path: row.decodedPath, hash: row.decodedHash)
         }
         let avatarHashesPassed = try avatars.allSatisfy { row in
-            try verify(path: row.path, hash: row.hash, below: root)
+            try verifyOnce(path: row.path, hash: row.hash)
         }
         let expectedPaths = Set(
             media.flatMap { [$0.rawPath, $0.decodedPath] }.compactMap { $0 } +

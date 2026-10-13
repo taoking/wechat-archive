@@ -186,3 +186,27 @@ git diff --check
 ```
 
 测试仅使用随机密钥与合成 SQLCipher 数据库；不要将真实聊天记录、数据库、媒体或密钥加入项目。
+
+## 附件保存与重新归档
+
+最新源码创建 v5 归档，查看器可只读打开旧 v1–v4。旧归档不会自动补齐媒体；需用对应账号的普通 SQLite 和原账号媒体目录另建新归档。保持微信退出，原目录只读，输出必须是尚不存在的新目录。
+
+```zsh
+swift build -c release --product WeChatArchiveCLI
+CLI_DIR="$(swift build -c release --show-bin-path)"
+"$CLI_DIR/WeChatArchiveCLI" import-plain \
+  --db-dir /绝对路径/普通SQLite根目录 \
+  --account-root /绝对路径/微信账号根目录 \
+  --archive-output /绝对路径/新的归档目录 \
+  --report /绝对路径/新的结果.json
+```
+
+不要加 `--limit`，否则只生成样本。此入口无需数据库密钥，故结果 `keyCoverageChecked=false`、`completeCoverage=false`；它只核对归档，不重新证明普通 SQLite 的解密覆盖。图片密钥仍按本地元数据发现；发现失败会保留已关联 DAT，显示占位。
+
+检查结果 `status=completed`、`archiveCreated=true`，再看归档内 `metadata/import-report.json`：`mediaStatusCounts` 区分 `decoded`、`rawArchived`、`imageKeyUnavailable`、`decodeUnsupported`、`missing`、`resolutionConflict`、`resolutionFailed`、`rawCopyFailed` 和 `decodedCopyFailed`。统计通常按变体计数：一条图片可有原图、高清图、缩略图；原始与解码副本也不等于两条消息。`fileRawFound` 表示经大小和内容 MD5 校验后保留的文件。
+
+图片、视频、语音、普通文件会尽量保留本地可确定关联的内容。同名文件不能单独证明关联。尚未下载、已删除或缺少资源映射的附件无法恢复；表情和转发内嵌附件等未支持结构仍保留消息源字段，不能当作附件全部保存。归档结构与哈希校验通过，也不代表所有媒体都可播放。细节见 [ADR-016](docs/decisions/ADR-016-local-attachment-preservation.md)。
+
+文件附件在查看器可“在 Finder 中显示”，会话导出的 HTML、JSON 和 Markdown 会复制到 `media/files/`。分享前请检查附件内容；打开归档不会执行附件。
+
+大量小文件建议保存到 APFS 卷。ExFAT 的大分配单元会使实际占用远大于逻辑大小；可用“磁盘工具”在外置盘新建 APFS 稀疏磁盘映像，双击挂载后将新归档保存进去。只新建映像，保留已有盘内容。复制到另一台 Mac 时复制整个映像；打开时先挂载，再选择里面含 `archive.sqlite` 的目录。不要只复制数据库。

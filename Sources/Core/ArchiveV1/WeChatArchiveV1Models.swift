@@ -23,6 +23,7 @@ public enum ArchiveV1NormalizedType: String, Codable, Equatable, Sendable {
     case image
     case video
     case voice
+    case file
     case unknown
 }
 
@@ -44,6 +45,7 @@ public enum ArchiveV1MediaType: String, Codable, Equatable, Sendable {
     case image
     case video
     case voice
+    case file
 }
 
 public enum ArchiveV1MediaVariant: String, Codable, CaseIterable, Equatable, Sendable {
@@ -72,6 +74,7 @@ public enum ArchiveV1MediaStatus: String, Codable, Equatable, Sendable {
     case decodedUnknownFormat
     case unsupportedVersion
     case resolutionConflict
+    case resolutionFailed
     /// Legacy v3 status retained only so existing archives remain readable.
     case archiveCopyFailed
     case rawCopyFailed
@@ -132,6 +135,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
     public let imageCount: Int
     public let videoCount: Int
     public let voiceCount: Int
+    public let fileCount: Int
     public let unknownCount: Int
     public let conversationCount: Int
     public let contactCount: Int
@@ -143,6 +147,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
     public let rawVideoArchived: Int
     public let videoThumbnailsArchived: Int
     public let rawVoiceArchived: Int
+    public let rawFileArchived: Int
     public let decodedVoiceArchived: Int
     public let archivedMediaBytes: Int64
     public let missingLocalMedia: Int
@@ -158,6 +163,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         imageCount: Int,
         videoCount: Int,
         voiceCount: Int,
+        fileCount: Int = 0,
         unknownCount: Int,
         conversationCount: Int,
         contactCount: Int = 0,
@@ -169,6 +175,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         rawVideoArchived: Int,
         videoThumbnailsArchived: Int,
         rawVoiceArchived: Int,
+        rawFileArchived: Int = 0,
         decodedVoiceArchived: Int,
         archivedMediaBytes: Int64,
         missingLocalMedia: Int,
@@ -183,6 +190,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         self.imageCount = imageCount
         self.videoCount = videoCount
         self.voiceCount = voiceCount
+        self.fileCount = fileCount
         self.unknownCount = unknownCount
         self.conversationCount = conversationCount
         self.contactCount = contactCount
@@ -194,6 +202,7 @@ public struct ArchiveV1ImportSummary: Equatable, Sendable {
         self.rawVideoArchived = rawVideoArchived
         self.videoThumbnailsArchived = videoThumbnailsArchived
         self.rawVoiceArchived = rawVoiceArchived
+        self.rawFileArchived = rawFileArchived
         self.decodedVoiceArchived = decodedVoiceArchived
         self.archivedMediaBytes = archivedMediaBytes
         self.missingLocalMedia = missingLocalMedia

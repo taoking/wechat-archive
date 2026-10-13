@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,25 @@ INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES(1, 1, 1700000000, 'synth
         self.assertTrue((archive / "archive.sqlite").is_file())
         self.assertNotIn(self.key, self.report.read_text() + result.stdout + result.stderr)
         self.assertEqual(self.report.stat().st_mode & 0o777, 0o600)
+
+    def test_import_plain_preserves_source_and_does_not_claim_key_coverage(self):
+        plain = self.root / "Plain"
+        database = plain / "message/message_0.db"
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.executescript("CREATE TABLE Msg_0123456789abcdef0123456789abcdef (local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT); INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES (1, 1, 1700000000, 'plain fixture');")
+        original = database.read_bytes()
+        archive = self.root / "Archive"
+        result = subprocess.run([str(CLI), "import-plain", "--db-dir", str(plain), "--account-root", str(self.account), "--archive-output", str(archive), "--report", str(self.report)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(self.report.read_bytes())
+        self.assertTrue(report["archiveCreated"])
+        self.assertEqual(report["messagesImported"], 1)
+        self.assertFalse(report["keyCoverageChecked"])
+        self.assertFalse(report["completeCoverage"])
+        self.assertEqual(database.read_bytes(), original)
+        repeated = subprocess.run([str(CLI), "import-plain", "--db-dir", str(plain), "--account-root", str(self.account), "--archive-output", str(archive), "--report", str(self.root / "again.json")], capture_output=True)
+        self.assertNotEqual(repeated.returncode, 0)
 
     def test_missing_database_blocks_before_plaintext_export(self):
         missing = self.source / "migrate/old.db"

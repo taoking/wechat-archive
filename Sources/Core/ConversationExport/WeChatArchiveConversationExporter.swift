@@ -173,6 +173,7 @@ private final class ExportContext {
         if options.includeImages { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/images", isDirectory: true)) }
         if options.includeVideo { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/video", isDirectory: true)) }
         if options.includeVoice { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/voice", isDirectory: true)) }
+        if options.includeFiles { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("media/files", isDirectory: true)) }
         if options.includeAvatars { try WeChatArchiveConversationExporter.createPrivateDirectory(stagingRoot.appendingPathComponent("avatars", isDirectory: true)) }
     }
 
@@ -202,6 +203,11 @@ private final class ExportContext {
 
     private func exportMedia(for message: ArchiveViewerMessage) throws -> [ExportedMedia] {
         var result = [ExportedMedia]()
+        if message.normalizedType == .file {
+            if options.includeFiles, let media = message.media.first(where: { $0.mediaType == .file }), let path = try copy(media: media, kind: "files", preferDecoded: false) {
+                result.append(.init(type: .file, path: path, available: true, width: nil, height: nil, duration: nil))
+            } else { result.append(.init(type: .file, path: nil, available: false, width: nil, height: nil, duration: nil)) }
+        }
         if message.normalizedType == .image {
             if options.includeImages, let media = ArchiveViewerMediaSelector.preferredImage(in: message.media), let path = try copy(media: media, kind: "images", preferDecoded: true) {
                 result.append(.init(type: .image, path: path, available: true, width: media.width, height: media.height, duration: nil))
@@ -391,6 +397,10 @@ private struct HTMLConversationExportWriter: ConversationExportWriter {
             }
             return htmlEscape(ArchiveMessagePresentationFormatter.displayText(for: prepared.message.textContent) ?? "")
         case .unknown: return "<span class=\"unknown\">[暂不支持的消息]</span>"
+        case .file:
+            let title = htmlEscape(prepared.message.textContent ?? "[文件]")
+            guard let media = prepared.media.first, media.available, let path = media.path else { return "\(title)<span class=\"missing\">[附件不可用]</span>" }
+            return "<a download href=\"\(htmlAttribute(path))\">\(title)</a>"
         case .image:
             guard let media = prepared.media.first, media.available, let path = media.path else { return "<span class=\"missing\">[图片文件不可用]</span>" }
             return "<a href=\"\(htmlAttribute(path))\" target=\"_blank\" rel=\"noopener\"><img class=\"media-image\" src=\"\(htmlAttribute(path))\" alt=\"图片\" loading=\"lazy\"></a>"
@@ -483,6 +493,7 @@ private struct MarkdownConversationExportWriter: ConversationExportWriter {
             }
             return header + markdownEscape(ArchiveMessagePresentationFormatter.displayText(for: message.textContent) ?? "") + "\n"
         case .unknown: return header + "> 暂不支持的消息\n"
+        case .file: return header + mediaLine(prepared.media.first, image: false, label: message.textContent ?? "文件")
         case .image: return header + mediaLine(prepared.media.first, image: true, label: "图片")
         case .video: return header + mediaLine(prepared.media.first, image: false, label: "视频")
         case .voice:
@@ -520,7 +531,7 @@ private struct JSONConversationMessage: Encodable {
         direction = prepared.message.direction.rawValue
         sender = prepared.message.direction == .outgoing ? "我" : prepared.message.senderDisplayName
         type = prepared.message.normalizedType.rawValue
-        text = prepared.message.normalizedType == .text ? ArchiveMessagePresentationFormatter.displayText(for: prepared.message.textContent) : nil
+        text = [.text, .file].contains(prepared.message.normalizedType) ? ArchiveMessagePresentationFormatter.displayText(for: prepared.message.textContent) : nil
         media = prepared.media
         rawLocalType = technical ? prepared.message.rawLocalType : nil
     }

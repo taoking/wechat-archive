@@ -4,6 +4,28 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ConversationExportTests: XCTestCase {
+    func testFileAttachmentsExportAcrossFormatsAndCanBeExcluded() throws {
+        let fixture = try makeFixture(messageCount: 1, fileMessage: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root.deletingLastPathComponent()) }
+        let destination = fixture.root.deletingLastPathComponent().appending(path: "Exports")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let original = try Data(contentsOf: fixture.root.appending(path: "media/files/fixture.txt"))
+        let exporter = WeChatArchiveConversationExporter()
+        for format in [ConversationExportFormat.html, .json, .markdown] {
+            let result = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: format)
+            let text = try String(contentsOf: result.primaryFileURL, encoding: .utf8)
+            XCTAssertTrue(text.contains("media/files/"))
+            let copied = try FileManager.default.contentsOfDirectory(at: result.outputRoot.appending(path: "media/files"), includingPropertiesForKeys: nil)
+            XCTAssertEqual(copied.count, 1)
+            XCTAssertEqual(try Data(contentsOf: copied[0]), original)
+            if format == .html { XCTAssertTrue(text.contains("&lt;script&gt;")); XCTAssertFalse(text.contains("<script>")) }
+        }
+        let excluded = try exporter.export(archiveRoot: fixture.root, conversationID: fixture.conversationID, destinationRoot: destination, format: .html, options: .init(includeFiles: false))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: excluded.outputRoot.appending(path: "media/files").path()))
+        XCTAssertTrue(try String(contentsOf: excluded.primaryFileURL, encoding: .utf8).contains("附件不可用"))
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appending(path: "media/files/fixture.txt")), original)
+    }
+
     func testCancellableFileCopierReportsChunkProgressAndRemovesPartialFile() throws {
         let parent = FileManager.default.temporaryDirectory.appending(path: "CancellableCopy-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: parent) }
@@ -707,7 +729,8 @@ final class ConversationExportTests: XCTestCase {
         largeVideoBytes: Int? = nil,
         sameTimestamp: Bool = false,
         timestamps: [Int64]? = nil,
-        textContent: String? = nil
+        textContent: String? = nil,
+        fileMessage: Bool = false
     ) throws -> ConversationExportFixture {
         let parent = FileManager.default.temporaryDirectory.appending(path: "ConversationExport-\(UUID().uuidString)")
         let root = parent.appending(path: "WeChatArchive")
@@ -717,6 +740,7 @@ final class ConversationExportTests: XCTestCase {
         try database.setAccount(sourceIdentity: "fixture-owner", displayName: "Fixture owner")
         let conversationID = try database.upsertConversation(sourceIdentity: "fixture-conversation", type: .group, displayName: conversationTitle, contactID: contactID)
         let base = root.appending(path: "media")
+        if fileMessage { try writePrivate(Data("fixture file bytes".utf8), to: base.appending(path: "files/fixture.txt")) }
         try writePrivate(Data([0x89, 0x50, 0x4E, 0x47]), to: base.appending(path: "images/decoded/image-asset.png"))
         let videoData = largeVideoBytes.map { Data(repeating: 0x66, count: $0) } ?? Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])
         try writePrivate(videoData, to: base.appending(path: "video/play/video-asset.mp4"))
@@ -730,7 +754,7 @@ final class ConversationExportTests: XCTestCase {
 
         for index in 0..<messageCount {
             let types: [ArchiveV1NormalizedType] = [.text, .image, .voice, .video, .unknown]
-            let type = messageCount > 5 ? .text : types[index % types.count]
+            let type = fileMessage ? .file : (messageCount > 5 ? .text : types[index % types.count])
             let message = try database.insertMessage(
                 conversationID: conversationID,
                 sourceDatabase: "sensitive-source.db",
@@ -743,7 +767,7 @@ final class ConversationExportTests: XCTestCase {
                 receiverSourceID: nil,
                 rawLocalType: Int64(index + 1),
                 normalizedType: type,
-                textContent: type == .text ? (textContent ?? "今天去深圳湾喝咖啡。Hello\n# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀") : nil,
+                textContent: type == .file ? "[文件] <script> & fixture.txt" : (type == .text ? (textContent ?? "今天去深圳湾喝咖啡。Hello\n# [not a heading] <script>alert('x')</script> & \"quoted\"\nemoji 😀") : nil),
                 replySourceID: nil,
                 sourceSequence: Int64(index),
                 sourceValues: ["private_blob": .blob(Data([0xAA]))],
@@ -758,6 +782,9 @@ final class ConversationExportTests: XCTestCase {
                 _ = try database.insertMediaAsset(messageID: message.id, assetID: "voice-asset", mediaType: .voice, variant: .playback, status: .decoded, sourceFormat: "silk", decodedFormat: "wav", rawArchivePath: nil, decodedArchivePath: "media/voice/decoded/voice-asset.wav", rawSize: nil, decodedSize: 16, width: nil, height: nil, duration: 8, rawSHA256: nil, decodedSHA256: ArchiveCryptography.sha256(Data("RIFF----WAVEfmt ".utf8)), sourceFileBase: "private")
             case .video:
                 _ = try database.insertMediaAsset(messageID: message.id, assetID: "video-asset", mediaType: .video, variant: .play, status: .rawArchived, sourceFormat: "mp4", decodedFormat: nil, rawArchivePath: "media/video/play/video-asset.mp4", decodedArchivePath: nil, rawSize: Int64(videoData.count), decodedSize: nil, width: 2, height: 2, duration: 9, rawSHA256: ArchiveCryptography.sha256(videoData), decodedSHA256: nil, sourceFileBase: "private")
+            case .file:
+                let bytes = Data("fixture file bytes".utf8)
+                _ = try database.insertMediaAsset(messageID: message.id, assetID: "file-asset", mediaType: .file, variant: .raw, status: .rawArchived, sourceFormat: "txt", decodedFormat: nil, rawArchivePath: "media/files/fixture.txt", decodedArchivePath: nil, rawSize: Int64(bytes.count), decodedSize: nil, width: nil, height: nil, rawSHA256: ArchiveCryptography.sha256(bytes), decodedSHA256: nil, sourceFileBase: nil)
             case .text, .unknown: break
             }
         }

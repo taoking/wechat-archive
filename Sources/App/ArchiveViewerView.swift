@@ -686,6 +686,14 @@ private struct ArchiveTimelineMessageRow: View {
         case .image: imageContent
         case .video: videoContent
         case .voice: voiceContent
+        case .file:
+            VStack(alignment: .leading, spacing: 8) {
+                Label(message.textContent ?? "[文件]", systemImage: "doc")
+                if let media = message.media.first(where: { $0.mediaType == .file }),
+                   let viewer, let url = viewer.mediaURL(for: media, preferDecoded: false) {
+                    Button("在 Finder 中显示附件") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                } else { Text("附件未在本地找到或校验未通过").foregroundStyle(.secondary) }
+            }
         case .unknown:
             Text("[暂不支持的消息]").foregroundStyle(.secondary)
         }
@@ -808,6 +816,7 @@ private struct ArchiveTimelineMessageRow: View {
         case .image: preferredImage
         case .video: preferredVideo
         case .voice: message.media.first { $0.mediaType == .voice && ($0.decodedRelativePath != nil || $0.rawRelativePath != nil) }
+        case .file: message.media.first { $0.mediaType == .file && $0.rawRelativePath != nil }
         case .text, .unknown: nil
         }
     }
@@ -838,6 +847,7 @@ private struct ArchiveTimelineMessageRow: View {
         case .image: prefix = "image"
         case .video: prefix = "video"
         case .voice: prefix = "voice"
+        case .file: prefix = "file"
         }
         return "\(prefix)-\(stamp).\(url.pathExtension.isEmpty ? "bin" : url.pathExtension)"
     }
@@ -1352,6 +1362,7 @@ private struct CoverageReportSheet: View {
         case .image: "图片"
         case .video: "视频"
         case .voice: "语音"
+        case .file: "文件"
         case .unknown: "未识别"
         }
     }
@@ -1361,6 +1372,7 @@ private struct CoverageReportSheet: View {
         case .image: "图片"
         case .video: "视频"
         case .voice: "语音"
+        case .file: "文件"
         }
     }
 
@@ -1378,6 +1390,7 @@ private struct CoverageReportSheet: View {
         case .decodedUnknownFormat: "解码后格式未知"
         case .unsupportedVersion: "版本不支持"
         case .resolutionConflict: "定位冲突"
+        case .resolutionFailed: "读取或关联失败"
         case .archiveCopyFailed: "归档复制失败"
         case .rawCopyFailed: "原始文件复制失败"
         case .decodedCopyFailed: "解码文件复制失败"

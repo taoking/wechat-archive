@@ -88,7 +88,8 @@ struct WeChatCompressedTextMessageAdapter: Sendable {
             )
             return "引用「\(quotedFrom)」：\(summary)\n\(title)"
         }
-        return "[\(appMessageLabel(subtype: subtype))] \(title)"
+        let xmlSubtype = document.text(atPath: ["msg", "appmsg", "type"]).flatMap(UInt64.init)
+        return "[\(appMessageLabel(subtype: xmlSubtype ?? subtype))] \(title)"
     }
 
     private func appMessageLabel(subtype: UInt64?) -> String {
@@ -113,9 +114,13 @@ struct WeChatCompressedTextMessageAdapter: Sendable {
 enum WeChatMessagePayloadDecoder {
     static func decodedPayload(from values: [String: ArchivedSQLiteValue]) -> String? {
         for column in ["message_content", "compress_content"] {
-            guard let blob = values.blob(named: [column]),
-                  let decompressed = ZstdPayloadDecompressor.decompress(blob),
-                  var text = String(data: decompressed, encoding: .utf8) else { continue }
+            var text: String
+            if let plain = values.text(named: [column]), !plain.isEmpty, plain.utf8.count <= 8 * 1_024 * 1_024 {
+                text = plain
+            } else if let blob = values.blob(named: [column]), blob.count <= 8 * 1_024 * 1_024,
+                      let decoded = ZstdPayloadDecompressor.decompress(blob) ?? (blob.starts(with: [0x28, 0xb5, 0x2f, 0xfd]) ? nil : blob),
+                      let plain = String(data: decoded, encoding: .utf8) { text = plain }
+            else { continue }
             if let newline = text.firstIndex(of: "\n") {
                 let prefix = text[text.startIndex..<newline]
                 if prefix.hasSuffix(":"), prefix.count <= 64, !prefix.dropLast().contains(where: { $0.isWhitespace }) {
@@ -128,17 +133,10 @@ enum WeChatMessagePayloadDecoder {
     }
 }
 
-/// Decompresses WeChat's zstd-compressed message payloads via the local
-/// `zstd` CLI (installed by this project's `Brewfile`, matching the same
-/// external-tool boundary already established by `SilkProcessVoiceDecoder`
-/// for Silk voice). Apple's system `Compression` framework does **not**
-/// support Zstandard (verified against the macOS SDK's `compression.h`:
-/// only LZ4/ZLIB/LZMA/LZFSE/LZBITMAP/BROTLI are defined), so unlike Silk
-/// decoding this is not yet bundled into the Release `.app` by
-/// `build-app.sh` — see DEVELOPMENT.md. When the CLI is unavailable,
-/// `decompress` returns nil and the caller leaves the message `.unknown`
-/// exactly as it already does today; this can only add coverage, never
-/// regress it.
+/// Decompresses bounded payloads in memory through a bundled/Homebrew zstd
+/// runtime. An explicit operator CLI override or unavailable library retains
+/// the optional subprocess fallback. No plaintext temporary file is needed
+/// for the normal native path.
 enum ZstdPayloadDecompressor {
     private static let magic: [UInt8] = [0x28, 0xB5, 0x2F, 0xFD]
     private static let maximumCompressedBytes = 4 * 1_024 * 1_024
@@ -147,6 +145,7 @@ enum ZstdPayloadDecompressor {
 
     static func decompress(_ data: Data) -> Data? {
         guard data.count >= magic.count, data.count <= maximumCompressedBytes, data.starts(with: magic) else { return nil }
+        if ProcessInfo.processInfo.environment["WECHAT_ARCHIVE_ZSTD_DECODER"] == nil, let runtime = NativeZstdPayloadRuntime.shared { return runtime.decompress(data) }
         guard let executableURL = defaultExecutableURL() else { return nil }
         let directory = FileManager.default.temporaryDirectory.appending(path: "WeChatArchive-Zstd-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -216,7 +215,8 @@ final class WeChatMessageXMLDocument: NSObject, XMLParserDelegate {
     private var currentPath: [String] = []
 
     init?(xml: String) {
-        guard let data = xml.data(using: .utf8) else { return nil }
+        guard xml.utf8.count <= 8 * 1_024 * 1_024, !xml.contains("<!DOCTYPE"), !xml.contains("<!ENTITY"),
+              let data = xml.data(using: .utf8) else { return nil }
         super.init()
         let parser = XMLParser(data: data)
         parser.shouldResolveExternalEntities = false
@@ -329,6 +329,7 @@ typealias ArchiveV1ImageVariantInput = ArchiveV1MediaInput
 /// unsupported or fails.
 struct WeChatImageMessageAdapter {
     let keyProvider: any WeChatImageKeyProvider
+    var resourceResolver = WeChatMessageResourceFileBaseResolver()
     private let maximumDATBytes = 128 * 1_024 * 1_024
 
     func variants(
@@ -350,7 +351,7 @@ struct WeChatImageMessageAdapter {
             identity: SourceMessageIdentity(databaseRelativePath: message.sourceDatabase, tableName: message.sourceTable, rowIdentifier: String(message.sourceSQLiteRowID)),
             values: sourceValues
         )
-        let resolved = try WeChatImageMessageResolver().resolve(
+        let resolved = try WeChatImageMessageResolver(resourceResolver: resourceResolver).resolve(
             message: source,
             candidate: candidate,
             exportRoot: exportRoot,
@@ -376,11 +377,21 @@ struct WeChatImageMessageAdapter {
                 results.append(.init(variant: variant, status: .missing, sourceFormat: resolved.datVersion.rawValue, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: fileBase))
                 continue
             }
-            let raw = try readDAT(url)
+            let raw: Data
+            do { raw = try readDAT(url) }
+            catch {
+                // Large or unreadable decode inputs are still eligible for
+                // streaming raw preservation; copy failures remain explicit.
+                results.append(.init(variant: variant, status: .decodeUnsupported, sourceFormat: nil,
+                    decodedFormat: nil, rawData: nil, rawFileURL: url, decodedData: nil, width: nil, height: nil, sourceFileBase: fileBase))
+                continue
+            }
             let version = decoder.version(for: raw)
             switch version {
             case .v2:
-                if cachedKeys == nil { cachedKeys = try keyProvider.keyCandidates(accountRoot: accountRoot) }
+                // Key discovery may require access outside the selected media
+                // directory. Losing that access must never discard raw DATs.
+                if cachedKeys == nil { cachedKeys = (try? keyProvider.keyCandidates(accountRoot: accountRoot)) ?? [] }
                 guard let keys = cachedKeys, !keys.isEmpty else {
                     results.append(.init(variant: variant, status: .imageKeyUnavailable, sourceFormat: version.rawValue, decodedFormat: nil, rawData: raw, decodedData: nil, width: nil, height: nil, sourceFileBase: fileBase))
                     continue
@@ -450,6 +461,7 @@ struct WeChatImageMessageAdapter {
 /// The resource index supplies the same file-base evidence used for images;
 /// no recursive video scan or content hash search is performed.
 struct WeChatVideoMessageAdapter {
+    var resourceResolver = WeChatMessageResourceFileBaseResolver()
     func variants(
         message: ArchiveV1SourceMessage,
         exportRoot: URL,
@@ -462,7 +474,7 @@ struct WeChatVideoMessageAdapter {
             score: 0,
             columns: message.values.keys.sorted()
         )
-        let resolution = try WeChatMessageResourceFileBaseResolver().resolve(
+        let resolution = try resourceResolver.resolve(
             message: archiveSourceMessageRecord(message),
             candidate: candidate,
             exportRoot: exportRoot

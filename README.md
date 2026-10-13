@@ -31,10 +31,11 @@ WeChat chat history export, backup and offline viewer for macOS. The latest sour
 - 使用项目内取钥模块，串联数据库密钥导出、验证、解密和一次性归档。
 - 将用户主动选择的微信 SQLCipher 数据库导出为普通 SQLite。
 - 一次性创建完整、私有的 `WeChatArchive`，保存全部消息源字段与 BLOB。
-- 在只读归档查看器中浏览私聊和群聊：文本、图片、视频、WAV 语音，以及未支持消息的安全占位。
+- 在只读归档查看器中浏览私聊和群聊：文本、图片、视频、WAV 语音、已关联文件附件，以及未支持消息的安全占位。
 - 显示已恢复的联系人、群成员和头像；本地没有头像时使用占位图。
 - 在本机派生的可删除搜索索引中全文搜索消息，并按日期跳转、双向浏览长会话。
 - 为一个会话生成可独立保存的离线 HTML、JSON 或 Markdown，并复制可播放/可显示的媒体。
+- 原始图片解码失败时仍保留 DAT；按内容去重媒体，并提供按类型和状态统计的附件报告。
 - 记住非敏感的工作目录和最近打开的归档；不会保存数据库密钥、图片密钥或聊天正文到偏好设置。
 
 ## 快速开始
@@ -165,3 +166,5 @@ git diff --check
 微信聊天记录导出、微信聊天记录备份、微信聊天记录归档、Mac 微信、macOS 微信、微信数据库密钥、SQLCipher 解密、本地聊天记录搜索、离线聊天查看器、微信聊天记录导出 HTML / JSON / Markdown、归档文件迁移（不写回微信）。
 
 WeChat Archive · WeChat chat history export · WeChat backup · WeChat database key extraction · SQLCipher · macOS · offline chat viewer · local-first · privacy · SwiftUI · HTML export · JSON export · Markdown export.
+
+最新源码的附件覆盖与从普通 SQLite 重新归档说明见 [附件保存与重新归档](USAGE.md#附件保存与重新归档)。新归档使用 v5，旧发布版 App 可能无法打开；请用最新源码构建的 App。

@@ -539,6 +539,8 @@ struct WeChatMessageResourceFileBaseResolution: Sendable {
 /// resource evidence rather than treating a 32-hex payload candidate as a
 /// standalone filename.
 struct WeChatMessageResourceFileBaseResolver: Sendable {
+    private let session = MessageResourceSession()
+    init() {}
     func resolve(
         message: SourceMessageRecord,
         candidate: MessageTableCandidate,
@@ -553,49 +555,50 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
         guard let resourceURL = try resourceDatabaseURL(below: exportRoot) else {
             return unresolved(.resourceDatabaseMissing)
         }
-        let database = try MessageResourceDatabase(url: resourceURL)
-        guard database.isSupportedSchema else { return unresolved(.resourceSchemaUnsupported) }
-        guard let chatID = try database.chatID(matchingConversationDigest: conversation.chatDirectoryComponent) else {
-            return unresolved(.conversationIdentityNotFound)
-        }
-        guard let resource = try database.resource(
-            chatID: chatID,
-            localID: messageFields.localID,
-            serverID: messageFields.serverID,
-            localType: messageFields.localType,
-            createTime: messageFields.createTime
-        ) else {
-            return unresolved(.messageResourceNotFound)
-        }
-        let parser = MessageResourcePackedInfoParser()
-        let resourceBase = resource.packedInfo.flatMap { parser.parse($0, source: .messageResourcePackedInfo) }
-        let messageBase = messageFields.packedInfo.flatMap { parser.parse($0, source: .messagePackedInfoData) }
-        let selected = selectFileBase(message: messageBase, resource: resourceBase, resourceMatch: resource.match)
-        guard let fileBase = selected.fileBase else {
-            var diagnostics: [WeChatImageResolutionDiagnostic] = []
-            if resource.packedInfo == nil && messageFields.packedInfo == nil { diagnostics.append(.packedInfoMissing) }
-            diagnostics.append(selected.evidence == .conflict ? .fileBaseConflict : .fileBaseNotFound)
+        return try session.withDatabase(url: resourceURL) { database in
+            guard database.isSupportedSchema else { return unresolved(.resourceSchemaUnsupported) }
+            guard let chatID = try database.chatID(matchingConversationDigest: conversation.chatDirectoryComponent) else {
+                return unresolved(.conversationIdentityNotFound)
+            }
+            guard let resource = try database.resource(
+                chatID: chatID,
+                localID: messageFields.localID,
+                serverID: messageFields.serverID,
+                localType: messageFields.localType,
+                createTime: messageFields.createTime
+            ) else {
+                return unresolved(.messageResourceNotFound)
+            }
+            let parser = MessageResourcePackedInfoParser()
+            let resourceBase = resource.packedInfo.flatMap { parser.parse($0, source: .messageResourcePackedInfo) }
+            let messageBase = messageFields.packedInfo.flatMap { parser.parse($0, source: .messagePackedInfoData) }
+            let selected = selectFileBase(message: messageBase, resource: resourceBase, resourceMatch: resource.match)
+            guard let fileBase = selected.fileBase else {
+                var diagnostics: [WeChatImageResolutionDiagnostic] = []
+                if resource.packedInfo == nil && messageFields.packedInfo == nil { diagnostics.append(.packedInfoMissing) }
+                diagnostics.append(selected.evidence == .conflict ? .fileBaseConflict : .fileBaseNotFound)
+                return .init(
+                    conversation: conversation,
+                    createTime: messageFields.createTime,
+                    resourceDatabaseFound: true,
+                    resourceMatch: resource.match,
+                    resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
+                    fileBase: nil,
+                    fileBaseEvidence: selected.evidence,
+                    diagnostics: diagnostics
+                )
+            }
             return .init(
                 conversation: conversation,
                 createTime: messageFields.createTime,
                 resourceDatabaseFound: true,
                 resourceMatch: resource.match,
                 resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
-                fileBase: nil,
+                fileBase: fileBase,
                 fileBaseEvidence: selected.evidence,
-                diagnostics: diagnostics
+                diagnostics: []
             )
         }
-        return .init(
-            conversation: conversation,
-            createTime: messageFields.createTime,
-            resourceDatabaseFound: true,
-            resourceMatch: resource.match,
-            resourceDetailsFound: try database.hasDetails(messageID: resource.messageID),
-            fileBase: fileBase,
-            fileBaseEvidence: selected.evidence,
-            diagnostics: []
-        )
     }
 
     private func selectFileBase(
@@ -688,7 +691,9 @@ struct WeChatMessageResourceFileBaseResolver: Sendable {
 /// resource chain and bounded deterministic image attachment paths. No broad
 /// attachment scan is performed here.
 public struct WeChatImageMessageResolver: Sendable {
-    public init() {}
+    private let resourceResolver: WeChatMessageResourceFileBaseResolver
+    public init() { resourceResolver = .init() }
+    init(resourceResolver: WeChatMessageResourceFileBaseResolver) { self.resourceResolver = resourceResolver }
 
     public func resolve(
         message: SourceMessageRecord,
@@ -697,7 +702,7 @@ public struct WeChatImageMessageResolver: Sendable {
         accountRoot: URL,
         calendar: Calendar = .current
     ) throws -> WeChatImageMessageResolution {
-        let resource = try WeChatMessageResourceFileBaseResolver().resolve(message: message, candidate: candidate, exportRoot: exportRoot)
+        let resource = try resourceResolver.resolve(message: message, candidate: candidate, exportRoot: exportRoot)
         guard resource.fileBaseEvidence.allowsMediaBinding,
               let conversation = resource.conversation,
               let createTime = resource.createTime,
@@ -788,7 +793,21 @@ private struct ResourceRecord: Sendable {
     let match: WeChatImageResourceMatch
 }
 
+private final class MessageResourceSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var databases = [URL: MessageResourceDatabase]()
+    func withDatabase<T>(url: URL, _ body: (MessageResourceDatabase) throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        let database: MessageResourceDatabase
+        if let cached = databases[url] { database = cached }
+        else { database = try MessageResourceDatabase(url: url); databases[url] = database }
+        return try body(database)
+    }
+}
+
 private final class MessageResourceDatabase {
+    private var chatIDs: [String: Int64]?
     private var handle: OpaquePointer?
 
     init(url: URL) throws {
@@ -811,15 +830,16 @@ private final class MessageResourceDatabase {
     }
 
     func chatID(matchingConversationDigest digest: String) throws -> Int64? {
-        let sql = "SELECT rowid, user_name FROM \"ChatName2Id\" LIMIT 10000"
+        if let chatIDs { return chatIDs[digest] }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(requireHandle(), sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw ArchiveError.databaseFailure }
+        guard sqlite3_prepare_v2(requireHandle(), "SELECT rowid, user_name FROM \"ChatName2Id\"", -1, &statement, nil) == SQLITE_OK, let statement else { throw ArchiveError.databaseFailure }
         defer { sqlite3_finalize(statement) }
+        var result = [String: Int64]()
         while true {
             let status = sqlite3_step(statement)
-            if status == SQLITE_DONE { return nil }
+            if status == SQLITE_DONE { chatIDs = result; return result[digest] }
             guard status == SQLITE_ROW, let userName = text(statement, index: 1) else { throw ArchiveError.databaseFailure }
-            if md5Hex(userName) == digest { return sqlite3_column_int64(statement, 0) }
+            result[md5Hex(userName)] = sqlite3_column_int64(statement, 0)
         }
     }
 
