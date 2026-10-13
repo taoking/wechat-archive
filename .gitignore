@@ -26,3 +26,9 @@ checksums/
 decrypted_*
 *.xcarchive
 .DS_Store
+/wechat/
+__pycache__/
+*.pyc
+/tools/wechat_keys/native/target/
+**/all_keys.json
+**/hook-candidates.json

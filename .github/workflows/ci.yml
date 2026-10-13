@@ -22,6 +22,14 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Test local workflow
+        run: python3 -m unittest discover -s tools/wechat_keys/tests -v
+      - name: Check command entry points
+        run: zsh -n scripts/extract-keys.command scripts/archive-wechat.command
+      - name: Test native key verifier
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then brew install rust; fi
+          cargo test --locked --manifest-path tools/wechat_keys/native/Cargo.toml
       - name: Check whitespace errors
         run: |
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then

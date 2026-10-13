@@ -15,6 +15,8 @@
 ```text
 Sources/Core/     可移植归档、索引、导入、导出和微信边界
 Sources/App/      SwiftUI 展示层
+Sources/CLI/      复用 Core 的一次性验证／导出／归档入口
+tools/wechat_keys/ 本地取钥、LLDB helper 与独立 Rust 扫描器
 Tests/            合成且不含私有数据的测试
 docs/decisions/   架构决策记录
 ```
@@ -25,6 +27,8 @@ Core 测试有意全部使用合成数据：不允许真实微信记录、图片
 
 ```bash
 swift test
+python3 -m unittest discover -s tools/wechat_keys/tests -v
+cargo test --locked --manifest-path tools/wechat_keys/native/Cargo.toml
 ```
 
 测试套件涵盖模型序列化、NDJSON 分区、SHA-256 媒体去重、增量导入、SQLite FTS 筛选、离线导出转义、归档验证、SQLCipher 正确密钥／错误密钥／普通 SQLite 导出行为、wx-cli key map 解析、相对路径匹配、顺序批量验证／导出、`-wal`／`-shm` 快照复制、变更拒绝、受保护权限、目标不覆盖行为和普通 SQLite sidecar 清理。每次行为变更前先添加测试。

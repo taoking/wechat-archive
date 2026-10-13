@@ -194,12 +194,16 @@ public struct WeChatDatabaseScanner: Sendable {
             throw ArchiveError.invalidInput
         }
 
+        // Force a real root read. An inaccessible container must not appear empty.
+        _ = try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        var traversalFailed = false
+
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
         guard let enumerator = manager.enumerator(
             at: root,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles, .skipsPackageDescendants],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, _ in traversalFailed = true; return false }
         ) else {
             throw ArchiveError.ioFailure
         }
@@ -217,6 +221,7 @@ public struct WeChatDatabaseScanner: Sendable {
                 matchedKey: keyMap.key(forRelativePath: relativePath)
             ))
         }
+        guard !traversalFailed else { throw ArchiveError.ioFailure }
         return databases.sorted { $0.relativePath < $1.relativePath }
     }
 
@@ -344,7 +349,9 @@ public struct WeChatDatabaseExportCoordinator: Sendable {
         defer { try? manager.removeItem(at: staging) }
 
         let plaintext = try decryptor.decrypt(databaseURL: database.absoluteURL, key: key, into: staging)
-        guard plaintext.deletingLastPathComponent().standardizedFileURL == staging.standardizedFileURL else {
+        let returnedParent = (plaintext.deletingLastPathComponent().resolvingSymlinksInPath().path(percentEncoded: false) as NSString).standardizingPath
+        let expectedParent = (staging.resolvingSymlinksInPath().path(percentEncoded: false) as NSString).standardizingPath
+        guard returnedParent == expectedParent else {
             throw ArchiveError.ioFailure
         }
         try verifyPlaintextSQLite(at: plaintext)

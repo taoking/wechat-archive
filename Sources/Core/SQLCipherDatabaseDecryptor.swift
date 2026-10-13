@@ -191,7 +191,11 @@ public struct SQLCipherDatabaseDecryptor: WeChatDatabaseDecryptor, @unchecked Se
         }
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: workingDirectory.path())
         let destination = workingDirectory.appending(path: "decrypted-\(UUID().uuidString).sqlite")
-        guard destination.deletingLastPathComponent().standardizedFileURL == workingDirectory.standardizedFileURL else {
+        // URL equality also compares directory hints; CLI-created file URLs can
+        // differ from picker URLs even when they name the same physical directory.
+        let parent = (destination.deletingLastPathComponent().resolvingSymlinksInPath().path(percentEncoded: false) as NSString).standardizingPath
+        let expected = (workingDirectory.resolvingSymlinksInPath().path(percentEncoded: false) as NSString).standardizingPath
+        guard parent == expected else {
             throw ArchiveError.invalidInput
         }
         return destination

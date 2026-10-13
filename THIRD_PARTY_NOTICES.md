@@ -1,5 +1,9 @@
 # 第三方声明
 
+## 本地密钥获取模块
+
+`tools/wechat_keys/native/src/scanner.rs` 衍生自 [hum0r23/wx-cli](https://github.com/hum0r23/wx-cli) 的 macOS 扫描器，采用 Apache License 2.0。固定提交、修改范围及完整许可证见 [NOTICE](tools/wechat_keys/NOTICE.md) 和 [LICENSE](tools/wechat_keys/LICENSE)。此工具由用户本机单独编译；不随 App 分发微信、真实密钥或数据库。
+
 ## 随 App 打包的 SQLCipher runtime
 
 macOS Release App 内置了本地数据库导出所需的 SQLCipher runtime。SQLCipher 以 BSD 3-Clause License 发布。随包二进制的完整许可证文本位于 App 内：`Contents/Resources/ThirdPartyNotices/SQLCipher-LICENSE.txt`。

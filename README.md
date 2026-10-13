@@ -40,6 +40,18 @@ brew install sqlcipher
 
 ### 3. 创建一次性完整归档
 
+也可以从取钥开始，用项目内的统一入口完成验证、解密和完整归档：
+
+```zsh
+brew install rust  # 首次取钥编译本地工具需要
+./scripts/archive-wechat.command --prepare-copy --open-viewer
+```
+
+先在官方微信登录要归档的账号；等待终端提示后在临时副本点击“进入微信”。官方应用保持原签名，运行数据全部在被 Git 忽略的 `wechat/`。缺少密钥默认停止，只有逐项明确指定的数据库可以排除。
+仅导出密钥使用 `./scripts/extract-keys.command --prepare-copy`。已有密钥复用、保留选项、权限和限制见 [取钥与全流程说明](tools/wechat_keys/README.md)。
+
+桌面应用逐步操作方式仍然可用：
+
 1. **完全退出微信**，避免尚未写入数据库的 WAL 数据遗漏。
 2. 在“高级工具 → 数据库导出”中选择自己的 `db_storage` 目录及 wx-cli 生成的 `all_keys.json`，扫描、验证并导出普通 SQLite。
 3. 在“完整导出”中选择普通 SQLite 根目录、自己的微信账号数据根目录和一个新的空归档目录。
@@ -75,6 +87,7 @@ brew install sqlcipher
 - 只处理用户本人明确选择的本地数据。
 - 原始微信数据库、媒体和普通 SQLite 均以只读方式使用。
 - `all_keys.json` 仅在执行扫描时读入内存；不会复制进 Archive、导出目录、日志、Git 或 UserDefaults。
+- 新增取钥模块在明确导出密钥时创建私有 JSON；完整归档流程默认清理本次临时密钥。代码和私有运行输出分离，详见模块说明。
 - Archive 与会话导出分别使用私有目录/文件权限。
 - HTML 导出会转义聊天文本，不会执行聊天内容中的 HTML 或脚本。
 

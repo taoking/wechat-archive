@@ -7,6 +7,41 @@ import XCTest
 
 final class ArchiveCoreTests: XCTestCase {
 
+    func testOneTimeWorkflowDecryptsAndImportsSyntheticEncryptedMessage() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appending(path: "Source")
+        let account = directory.appending(path: "Account")
+        let plain = directory.appending(path: "Plain")
+        let archive = directory.appending(path: "Archive")
+        let database = source.appending(path: "message/message_0.db")
+        try FileManager.default.createDirectory(at: database.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: account, withIntermediateDirectories: true)
+        let key = randomKeyHex()
+        try runSQLCipher(databaseURL: database, script: """
+            .bail on
+            PRAGMA key = "x'\(key)'";
+            CREATE TABLE Msg_0123456789abcdef0123456789abcdef
+              (local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT);
+            INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES (1, 1, 1700000000, 'synthetic workflow text');
+            """)
+        let hashBefore = try sha256Hex(of: database)
+        let map = directory.appending(path: "fixture-keys.json")
+        try JSONSerialization.data(withJSONObject: ["message/message_0.db": ["enc_key": key]]).write(to: map)
+        let coordinator = WeChatDatabaseExportCoordinator(decryptor: try SQLCipherDatabaseDecryptor())
+        let scanned = try WeChatDatabaseScanner().scan(databaseRoot: source, keyMap: WXCLIKeyMapProvider(url: map))
+        let validated = coordinator.validateAll(scanned)
+        try DatabaseExportCoveragePolicy().check(validated)
+        let exported = try coordinator.exportValidatedDatabases(validated, to: plain)
+        XCTAssertEqual(exported.first?.exportStatus, .exported)
+        let summary = try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(
+            plainSQLiteRoot: plain, accountRoot: account, destinationRoot: archive, options: .all)
+        XCTAssertEqual(summary.messagesImported, 1)
+        XCTAssertEqual(summary.status, .completed)
+        XCTAssertTrue(try WeChatArchiveV1Validator().validate(at: archive).passed)
+        XCTAssertEqual(hashBefore, try sha256Hex(of: database))
+    }
+
     func testArchiveV1DatabaseCreatesVersionedLosslessSchema() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
