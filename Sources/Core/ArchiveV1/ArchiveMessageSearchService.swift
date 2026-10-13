@@ -302,6 +302,9 @@ public final class ArchiveMessageSearchService: @unchecked Sendable {
     }
 
     private func open(_ url: URL, flags: Int32) throws -> OpaquePointer {
+        if flags & SQLITE_OPEN_READONLY != 0, url.standardizedFileURL == archiveRoot.appending(path: "archive.sqlite").standardizedFileURL {
+            return try ArchiveReadOnlySQLite.open(url)
+        }
         var database: OpaquePointer?
         guard sqlite3_open_v2(url.path, &database, flags, nil) == SQLITE_OK, let database else {
             if let database { sqlite3_close(database) }

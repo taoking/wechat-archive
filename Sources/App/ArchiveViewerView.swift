@@ -373,7 +373,16 @@ struct ArchiveViewerView: View {
             messages = []
             timelinePaging = TimelinePagingState()
             videoPlayback.stop()
-            status = "无法打开有效的 WeChatArchive 文件夹。"
+            switch error as? ArchiveError {
+            case .databaseInUse:
+                status = "归档仍有未写回的数据库日志。请等待归档完成并关闭正在写入的软件，再重新打开。"
+            case .databaseFailure:
+                status = "无法读取归档数据库。请确认移动硬盘连接正常，或将完整归档复制到本机后重试。"
+            case .invalidArchive:
+                status = "归档结构或版本不受支持。请选择包含 archive.sqlite 的完整 WeChatArchive 文件夹。"
+            default:
+                status = "无法访问归档文件夹。请检查路径、读取权限和移动硬盘连接。"
+            }
         }
     }
 

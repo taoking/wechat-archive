@@ -113,12 +113,7 @@ private final class ArchiveV1ValidationDatabase {
     init(url: URL) throws {
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true else { throw ArchiveError.invalidArchive }
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(url.path(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let database else {
-            if let database { sqlite3_close(database) }
-            throw ArchiveError.databaseFailure
-        }
-        handle = database
+        handle = try ArchiveReadOnlySQLite.open(url)
     }
 
     deinit { if let handle { sqlite3_close(handle) } }

@@ -163,11 +163,7 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         let databaseURL = root.appending(path: "archive.sqlite")
         let databaseMetadata = try databaseURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard databaseMetadata.isRegularFile == true, databaseMetadata.isSymbolicLink != true else { throw ArchiveError.invalidArchive }
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path(), &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let database else {
-            if let database { sqlite3_close(database) }
-            throw ArchiveError.databaseFailure
-        }
+        let database = try ArchiveReadOnlySQLite.open(databaseURL)
         handle = database
         let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
         self.archiveRoot = resolvedRoot
@@ -237,29 +233,28 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         case .identifier: searchClause = "WHERE c.id = ?"
         }
         let statement = try prepare("""
-            WITH filtered_conversations AS (
-                SELECT c.id, c.display_name, c.conversation_type, c.created_at, c.contact_id
+            WITH conversation_page AS (
+                SELECT c.id, c.display_name, c.conversation_type, c.created_at, c.contact_id,
+                       (SELECT m.timestamp FROM messages m WHERE m.conversation_id = c.id
+                        ORDER BY m.timestamp DESC LIMIT 1) AS last_message_timestamp
                 FROM conversations c
                 \(searchClause)
-            ), latest_messages AS (
-                SELECT m.conversation_id, m.timestamp, m.normalized_type, m.text_content,
-                       COUNT(*) OVER (PARTITION BY m.conversation_id) AS message_count,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY m.conversation_id
-                           ORDER BY m.timestamp DESC, m.source_sequence DESC, m.source_database DESC, m.source_table DESC, m.\(sourceRowIDColumn) DESC
-                       ) AS timeline_rank
-                FROM messages m
-                JOIN filtered_conversations c ON c.id = m.conversation_id
+                ORDER BY COALESCE(last_message_timestamp, c.created_at, 0) DESC, c.id ASC
+                LIMIT ? OFFSET ?
             )
-            SELECT c.id, c.display_name, c.conversation_type, latest.timestamp, COALESCE(latest.message_count, 0),
+            SELECT c.id, c.display_name, c.conversation_type, latest.timestamp,
+                   (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
                    latest.normalized_type, latest.text_content,
                    \(archiveSchemaVersion >= 3 ? "(SELECT COUNT(*) FROM group_members gm WHERE gm.conversation_id = c.id)" : "0")
                    \(avatarColumns)
-            FROM filtered_conversations c
-            LEFT JOIN latest_messages latest ON latest.conversation_id = c.id AND latest.timeline_rank = 1
+            FROM conversation_page c
+            LEFT JOIN messages latest ON latest.id = (
+                SELECT m.id FROM messages m WHERE m.conversation_id = c.id
+                ORDER BY m.timestamp DESC, m.source_sequence DESC, m.source_database DESC,
+                         m.source_table DESC, m.\(sourceRowIDColumn) DESC LIMIT 1
+            )
             \(avatarJoin)
             ORDER BY COALESCE(latest.timestamp, c.created_at, 0) DESC, c.id ASC
-            LIMIT ? OFFSET ?
             """)
         defer { sqlite3_finalize(statement) }
         var bindIndex: Int32 = 1
@@ -275,7 +270,8 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
         try bind(Int64(pageSize + 1), at: bindIndex, to: statement)
         try bind(Int64(max(offset, 0)), at: bindIndex + 1, to: statement)
         var conversations = [ArchiveViewerConversation]()
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
             guard let id = text(statement, 0) else { throw ArchiveError.invalidArchive }
             let ordinal = offset + conversations.count + 1
             let type = text(statement, 2).flatMap(ArchiveV1ConversationType.init(rawValue:)) ?? .unknown
@@ -291,7 +287,9 @@ public final class WeChatArchiveViewerDatabase: @unchecked Sendable {
                 memberCount: Int(sqlite3_column_int64(statement, 7)),
                 avatar: avatar(statement, idIndex: 8, pathIndex: 9, widthIndex: 10, heightIndex: 11)
             ))
+            result = sqlite3_step(statement)
         }
+        guard result == SQLITE_DONE else { throw ArchiveError.databaseFailure }
         let hasMore = conversations.count > pageSize
         if hasMore { conversations.removeLast() }
         return .init(items: conversations, hasMore: hasMore)
