@@ -17,6 +17,7 @@ enum WeChatArchiveCLI {
         let allowedMissing: Set<String>
         let limit: Int?
         let configureViewer: Bool
+        let resume: Bool
 
         init(_ arguments: [String]) throws {
             guard let action = arguments.first, ["validate", "archive", "import-plain"].contains(action) else {
@@ -26,9 +27,14 @@ enum WeChatArchiveCLI {
             var values: [String: String] = [:]
             var missing = Set<String>()
             var configure = false
+            var resume = false
             var index = 1
             while index < arguments.count {
                 let name = arguments[index]
+                if name == "--resume" {
+                    guard !resume else { throw ArchiveError.invalidInput }
+                    resume = true; index += 1; continue
+                }
                 if name == "--configure-viewer" {
                     guard !configure else { throw ArchiveError.invalidInput }
                     configure = true; index += 1; continue
@@ -60,10 +66,13 @@ enum WeChatArchiveCLI {
             report = try url("--report")
             allowedMissing = missing
             configureViewer = configure
+            self.resume = resume
+            guard !resume || action == "import-plain" else { throw ArchiveError.invalidInput }
             if let value = values["--limit"] {
                 guard let count = Int(value), count > 0 else { throw ArchiveError.invalidInput }
                 limit = count
             } else { limit = nil }
+            guard !resume || limit == nil else { throw ArchiveError.invalidInput }
             if action == "archive" || action == "import-plain" {
                 output = action == "archive" ? try url("--output") : nil
                 account = try LocalDatabaseDirectoryPath.resolve(url("--account-root").path())
@@ -122,7 +131,7 @@ enum WeChatArchiveCLI {
         guard CommandLine.arguments.count > 1, CommandLine.arguments[1] != "--help" else {
             print("WeChatArchiveCLI validate --db-dir DIR --keys FILE --report FILE [--allow-missing RELATIVE.db]")
             print("WeChatArchiveCLI archive ... --output DIR --account-root DIR --archive-output DIR [--limit N]")
-            print("WeChatArchiveCLI import-plain --db-dir PLAIN_ROOT --account-root DIR --archive-output NEW_DIR --report NEW_FILE [--limit N] [--configure-viewer]")
+            print("WeChatArchiveCLI import-plain --db-dir PLAIN_ROOT --account-root DIR --archive-output DIR --report NEW_FILE [--limit N | --resume] [--configure-viewer]")
             return
         }
         umask(0o077)
@@ -184,11 +193,11 @@ enum WeChatArchiveCLI {
         if options.action == "import-plain" {
             guard let account = options.account, let archive = options.archive,
                   disjoint(archive, options.source), disjoint(archive, account),
-                  !FileManager.default.fileExists(atPath: archive.path()) else { throw ArchiveError.invalidInput }
+                  options.resume || !FileManager.default.fileExists(atPath: archive.path()) else { throw ArchiveError.invalidInput }
             report.stage = "import"
             let summary = try WeChatArchiveV1Importer(imageKeyProvider: WeChatKVCommImageKeyProvider()).importArchive(
                 plainSQLiteRoot: options.source, accountRoot: account, destinationRoot: archive,
-                options: options.limit.map { ArchiveV1ImportOptions(limit: $0) } ?? .all,
+                options: .init(limit: options.limit, resumeIncomplete: options.resume),
                 progress: { value in
                     if value.messagesImported.isMultiple(of: 10_000) {
                         print("已导入 \(value.messagesImported) 条；图片原始变体 \(value.imagesResolved)；媒体写入 \(value.mediaBytesCopied) 字节。")

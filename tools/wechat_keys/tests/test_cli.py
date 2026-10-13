@@ -80,6 +80,11 @@ INSERT INTO Msg_0123456789abcdef0123456789abcdef VALUES(1, 1, 1700000000, 'synth
         self.assertEqual(database.read_bytes(), original)
         repeated = subprocess.run([str(CLI), "import-plain", "--db-dir", str(plain), "--account-root", str(self.account), "--archive-output", str(archive), "--report", str(self.root / "again.json")], capture_output=True)
         self.assertNotEqual(repeated.returncode, 0)
+        archived_database = (archive / "archive.sqlite").read_bytes()
+        resumed = subprocess.run([str(CLI), "import-plain", "--db-dir", str(plain), "--account-root", str(self.account), "--archive-output", str(archive), "--report", str(self.root / "resume.json"), "--resume"], capture_output=True)
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertEqual((archive / "archive.sqlite").read_bytes(), archived_database)
+        self.assertEqual(database.read_bytes(), original)
 
     def test_missing_database_blocks_before_plaintext_export(self):
         missing = self.source / "migrate/old.db"

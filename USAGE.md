@@ -139,7 +139,7 @@ brew install rust  # 首次构建取钥工具需要
 
 归档包含 `archive.sqlite`、`archive-manifest.json`、`metadata/import-report.json` 和媒体目录。文本、已恢复图片、标准 MP4 视频和未知消息可离线查看；图片原始 DAT、视频原文件和语音原始 Silk 会同时保存。没有本地文件的图片／视频／语音仍保留其消息和 `missing` 媒体记录。macOS 可直接播放归档 MP4。安装兼容的 `silk_v3_decoder` 后，Silk 语音会转换为 WAV 并可在查看器中播放；未安装时仍会保留原始 Silk。
 
-一部分较新微信版本会把撤回通知、位置分享、链接/小程序/引用回复等消息的正文压缩存储；安装 `zstd`（`brew bundle` 已包含）后，导出时会自动尝试解压并显示为普通文本。没有安装 `zstd` 时，这些消息仍会按原始 SQLite 值完整保留在归档里，只是在查看器中显示为未识别消息，不会丢失数据，也不会导致导出失败。
+一部分较新微信版本会把撤回通知、位置分享、链接/小程序/引用回复等消息的正文压缩存储。最新构建的 App 内置 Zstandard 运行库，导入时会在有大小限制的内存中尝试解压并显示为文本；源码用户通过 `brew bundle` 准备该库。找不到兼容运行库或解压失败时，消息仍按原始 SQLite 值完整保存，在查看器显示为未识别消息，不影响其余数据的归档。
 
 ## 归档查看器：搜索、日期与恢复统计
 
@@ -203,10 +203,16 @@ CLI_DIR="$(swift build -c release --show-bin-path)"
 
 不要加 `--limit`，否则只生成样本。此入口无需数据库密钥，故结果 `keyCoverageChecked=false`、`completeCoverage=false`；它只核对归档，不重新证明普通 SQLite 的解密覆盖。图片密钥仍按本地元数据发现；发现失败会保留已关联 DAT，显示占位。
 
-检查结果 `status=completed`、`archiveCreated=true`，再看归档内 `metadata/import-report.json`：`mediaStatusCounts` 区分 `decoded`、`rawArchived`、`imageKeyUnavailable`、`decodeUnsupported`、`missing`、`resolutionConflict`、`resolutionFailed`、`rawCopyFailed` 和 `decodedCopyFailed`。统计通常按变体计数：一条图片可有原图、高清图、缩略图；原始与解码副本也不等于两条消息。`fileRawFound` 表示经大小和内容 MD5 校验后保留的文件。
+检查结果 `status=completed`、`archiveCreated=true`，再看归档内 `metadata/import-report.json`：`mediaStatusCounts` 区分 `decoded`、`rawArchived`、`imageKeyUnavailable`、`decodeUnsupported`、`missing`、`resolutionConflict`、`resolutionFailed`、`rawCopyFailed` 和 `decodedCopyFailed`。统计通常按变体计数：一条图片可有原图、高清图、缩略图；原始与解码副本也不等于两条消息。`fileRawFound` 表示经大小和内容 MD5 校验后保留的普通文件；`emoticonRawFound` 单独统计原始表情缓存变体。表情通过消息 XML 的 MD5、表情数据库身份及同账号缓存三段关联，保存密文字节与消息关系，目前只显示表情标记，不能声称已经可显示。
 
 图片、视频、语音、普通文件会尽量保留本地可确定关联的内容。同名文件不能单独证明关联。尚未下载、已删除或缺少资源映射的附件无法恢复；表情和转发内嵌附件等未支持结构仍保留消息源字段，不能当作附件全部保存。归档结构与哈希校验通过，也不代表所有媒体都可播放。细节见 [ADR-016](docs/decisions/ADR-016-local-attachment-preservation.md)。
 
 文件附件在查看器可“在 Finder 中显示”，会话导出的 HTML、JSON 和 Markdown 会复制到 `media/files/`。分享前请检查附件内容；打开归档不会执行附件。
 
 大量小文件建议保存到 APFS 卷。ExFAT 的大分配单元会使实际占用远大于逻辑大小；可用“磁盘工具”在外置盘新建 APFS 稀疏磁盘映像，双击挂载后将新归档保存进去。只新建映像，保留已有盘内容。复制到另一台 Mac 时复制整个映像；打开时先挂载，再选择里面含 `archive.sqlite` 的目录。不要只复制数据库。
+
+### 中断后续跑
+
+只对本次未完成的 v5 归档使用续跑；已完成归档与旧版本会被拒绝。仍用同一普通 SQLite、同一账号目录和同一未完成输出，另选一个新的报告文件，在上面的 `import-plain` 命令末尾加 `--resume`。不能同时用 `--limit`。
+
+续跑会先逐条比对已归档消息的完整源字段，确认账号绑定；来源改变、已保存消息找不到或另一进程正在导入时会停止。只清理该未完成归档内未被数据库引用的受控哈希文件与暂存文件，再跳过已保存消息、补充表情缓存并继续导入。报告的 `messagesImported` 为归档内总数，`messagesSkipped` 为本次跳过的已保存记录。成功仍须通过最终完整校验；不能把中断时已有的目录当作完成。整个归档在完成后才适合迁移。

@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import SQLite3
 
 struct ArchiveV1Manifest: Codable {
     let format: String
@@ -20,6 +22,7 @@ struct ArchiveV1Manifest: Codable {
     let videoMediaCount: Int
     let voiceMediaCount: Int
     let avatarAssetCount: Int?
+    let emoticonMediaCount: Int?
     let fileCount: Int?
     let fileMediaCount: Int?
 }
@@ -51,6 +54,7 @@ private struct ArchiveV1ImportReport: Codable {
     let fileCount: Int
     let fileRawFound: Int
     let mediaStatusCounts: [String: Int]
+    let emoticonRawFound: Int
 }
 
 public struct ArchiveV1ImportProgress: Equatable, Sendable {
@@ -124,20 +128,30 @@ public struct WeChatArchiveV1Importer: Sendable {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         progress: (@Sendable (ArchiveV1ImportProgress) -> Void)? = nil
     ) throws -> ArchiveV1ImportSummary {
+        guard !options.resumeIncomplete || options.limit == nil else { throw ArchiveError.invalidInput }
         try validateImportRoots(
             plainSQLiteRoot: plainSQLiteRoot,
             accountRoot: accountRoot,
             destinationRoot: destinationRoot
         )
-        let destination = try prepareArchiveRoot(destinationRoot)
+        let destination = try prepareArchiveRoot(destinationRoot, resume: options.resumeIncomplete)
+        let importLock = try ArchiveV1ImportLock(root: destination)
+        defer { withExtendedLifetime(importLock) {} }
         let mediaStore = try mediaStoreFactory(destination)
         let resourceResolver = WeChatMessageResourceFileBaseResolver()
         let cachedKeys = ArchiveImageKeyCache(provider: imageKeyProvider)
+        let emoticons = try? WeChatLocalEmoticonIndex(plainRoot: plainSQLiteRoot, accountRoot: accountRoot)
         let database = try WeChatArchiveV1Database(url: destination.appending(path: "archive.sqlite"))
         defer { database.close() }
 
+        if options.resumeIncomplete {
+            try verifyResumeSource(database: database, plainRoot: plainSQLiteRoot, accountRoot: accountRoot, destination: destination)
+            try removeInterruptedMedia(database: database, destination: destination)
+        } else { try writeResumeBinding(accountRoot: accountRoot, destination: destination) }
+
         let runID = try database.createImportRun()
         var state = ImportState(runID: runID)
+        if options.resumeIncomplete { try restoreCommittedState(database: database, destination: destination, state: &state) }
         var sourceDatabaseCount = 0
         do {
             let contactImport = try WeChatContactAdapter().read(plainSQLiteRoot: plainSQLiteRoot, accountRoot: accountRoot)
@@ -156,7 +170,7 @@ public struct WeChatArchiveV1Importer: Sendable {
                     state.status = .cancelled
                     return false
                 }
-                try process(
+                try autoreleasepool { try process(
                     message: message,
                     database: database,
                     mediaStore: mediaStore,
@@ -165,10 +179,11 @@ public struct WeChatArchiveV1Importer: Sendable {
                     identities: archivedContacts.identities,
                     resourceResolver: resourceResolver,
                     cachedKeys: cachedKeys,
+                    emoticons: emoticons,
                     shouldCancel: shouldCancel,
                     state: &state
-                )
-                if state.messagesRead.isMultiple(of: 500) {
+                ) }
+                if state.messagesRead.isMultiple(of: options.batchSize) {
                     try database.finishImportBatch()
                     try database.beginImportBatch()
                 }
@@ -223,6 +238,7 @@ public struct WeChatArchiveV1Importer: Sendable {
         identities: ArchiveV1IdentityIndex,
         resourceResolver: WeChatMessageResourceFileBaseResolver,
         cachedKeys: ArchiveImageKeyCache,
+        emoticons: WeChatLocalEmoticonIndex?,
         shouldCancel: @escaping @Sendable () -> Bool,
         state: inout ImportState
     ) throws {
@@ -311,6 +327,18 @@ public struct WeChatArchiveV1Importer: Sendable {
         state.messagesRead += 1
         guard inserted.inserted else {
             state.messagesSkipped += 1
+            if rawTypeLow32(rawType) == 47, normalizedType == .text {
+                let former = try database.refreshEmoticonPresentation(messageID: inserted.id)
+                if former != .text {
+                    if former == .unknown { state.unknownCount -= 1 }
+                    state.textCount += 1
+                }
+                for input in emoticons?.variants(values: message.values) ?? [] {
+                    if try !database.hasMedia(messageID: inserted.id, type: input.mediaType, variant: input.variant) {
+                        try archiveMedia(input, messageID: inserted.id, mediaStore: mediaStore, database: database, state: &state)
+                    }
+                }
+            }
             return
         }
         state.messagesImported += 1
@@ -358,6 +386,8 @@ public struct WeChatArchiveV1Importer: Sendable {
                 inputs = [.init(mediaType: .file, variant: .raw, status: .resolutionFailed, sourceFormat: nil, decodedFormat: nil, rawData: nil, decodedData: nil, width: nil, height: nil, sourceFileBase: nil)]
                 state.mediaErrors["fileResolution", default: 0] += 1
             }
+        case .text where rawTypeLow32(rawType) == 47:
+            inputs = emoticons?.variants(values: message.values) ?? []
         case .text, .unknown:
             inputs = []
         }
@@ -455,7 +485,7 @@ public struct WeChatArchiveV1Importer: Sendable {
                         status: .archived
                     )
                     state.avatarAssetsArchived += 1
-                    state.archivedMediaBytes += copied.size
+                    state.archivedMediaBytes += copied.reused ? 0 : copied.size
                 } catch {
                     if let stored { mediaStore.removeStoredMedia(stored) }
                     assetID = try database.upsertAvatarAsset(
@@ -622,7 +652,10 @@ public struct WeChatArchiveV1Importer: Sendable {
             if raw != nil { state.rawVoiceArchived += 1 }
             if decoded != nil { state.decodedVoiceArchived += 1 }
         case .file:
-            if raw != nil { state.rawFileArchived += 1 }
+            if raw != nil {
+                if input.sourceFormat?.hasPrefix("emoticon-cipher-") == true { state.rawEmoticonArchived += 1 }
+                else { state.rawFileArchived += 1 }
+            }
         }
     }
 
@@ -678,6 +711,7 @@ public struct WeChatArchiveV1Importer: Sendable {
             videoMediaCount: summary.rawVideoArchived + summary.videoThumbnailsArchived,
             voiceMediaCount: summary.rawVoiceArchived + summary.decodedVoiceArchived,
             avatarAssetCount: summary.avatarAssetCount,
+            emoticonMediaCount: state.rawEmoticonArchived,
             fileCount: summary.fileCount,
             fileMediaCount: summary.rawFileArchived
         )
@@ -710,7 +744,8 @@ public struct WeChatArchiveV1Importer: Sendable {
             errorsByCategory: errors,
             fileCount: summary.fileCount,
             fileRawFound: summary.rawFileArchived,
-            mediaStatusCounts: state.mediaStatusCounts
+            mediaStatusCounts: state.mediaStatusCounts,
+            emoticonRawFound: state.rawEmoticonArchived
         )
         try writePrivateJSON(manifest, to: destination.appending(path: "archive-manifest.json"))
         let metadata = destination.appending(path: "metadata")
@@ -718,14 +753,117 @@ public struct WeChatArchiveV1Importer: Sendable {
         try writePrivateJSON(report, to: metadata.appending(path: "import-report.json"))
     }
 
-    private func prepareArchiveRoot(_ url: URL) throws -> URL {
+    private struct ResumeBinding: Codable { let accountFingerprint: String }
+
+    private func writeResumeBinding(accountRoot: URL, destination: URL) throws {
+        let folder = destination.appending(path: "metadata")
+        try createProtectedDirectory(folder, below: destination)
+        let hash = ArchiveCryptography.sha256(Data(accountRoot.resolvingSymlinksInPath().path().utf8))
+        try writePrivateJSON(ResumeBinding(accountFingerprint: hash), to: folder.appending(path: "resume-binding.json"))
+    }
+
+    private func verifyResumeSource(database: WeChatArchiveV1Database, plainRoot: URL, accountRoot: URL, destination: URL) throws {
+        let binding = destination.appending(path: "metadata/resume-binding.json")
+        if FileManager.default.fileExists(atPath: binding.path()) {
+            let info = try binding.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard info.isRegularFile == true, info.isSymbolicLink != true else { throw ArchiveError.invalidArchive }
+            let value = try JSONDecoder().decode(ResumeBinding.self, from: Data(contentsOf: binding))
+            guard value.accountFingerprint == ArchiveCryptography.sha256(Data(accountRoot.resolvingSymlinksInPath().path().utf8)) else { throw ArchiveError.invalidArchive }
+        }
+        let rows = try database.importedRowsByTable()
+        let expected = try database.messageCount()
+        var verified = 0
+        _ = try sourceReader.stream(exportRoot: plainRoot, limit: nil) { message in
+            guard rows[message.sourceDatabase]?[message.sourceTable]?.contains(message.sourceSQLiteRowID) == true else { return true }
+            return try autoreleasepool {
+                let saved = try database.sourceValues(sourceDatabase: message.sourceDatabase, sourceTable: message.sourceTable, sourceSQLiteRowID: message.sourceSQLiteRowID)
+                guard saved == message.values else { throw ArchiveError.invalidArchive }
+                verified += 1
+                return true
+            }
+        }
+        guard verified == expected else { throw ArchiveError.invalidArchive }
+        try writeResumeBinding(accountRoot: accountRoot, destination: destination)
+    }
+
+    private func removeInterruptedMedia(database: WeChatArchiveV1Database, destination: URL) throws {
+        let registered = try database.registeredMediaPaths()
+        let root = destination.appending(path: "media")
+        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { throw ArchiveError.invalidArchive }
+        let prefix = destination.path().hasSuffix("/") ? destination.path() : destination.path() + "/"
+        for case let url as URL in files {
+            let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard info.isSymbolicLink != true else { throw ArchiveError.invalidArchive }
+            guard info.isRegularFile == true else { continue }
+            let path = url.resolvingSymlinksInPath().path()
+            guard path.hasPrefix(prefix) else { throw ArchiveError.invalidArchive }
+            guard !registered.contains(String(path.dropFirst(prefix.count))) else { continue }
+            let stem = url.deletingPathExtension().lastPathComponent
+            let managed = stem.utf8.count == 64 && stem.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            let name = url.lastPathComponent
+            let staging = name.hasPrefix(".") && name.hasSuffix(".staging") && UUID(uuidString: String(name.dropFirst().dropLast(".staging".count))) != nil
+            guard managed || staging else { throw ArchiveError.invalidArchive }
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func restoreCommittedState(database: WeChatArchiveV1Database, destination: URL, state: inout ImportState) throws {
+        state.messagesImported = try database.messageCount()
+        let types = try database.recoveryTypeCounts()
+        state.textCount = types["text", default: 0]; state.imageCount = types["image", default: 0]
+        state.videoCount = types["video", default: 0]; state.voiceCount = types["voice", default: 0]
+        state.fileCount = types["file", default: 0]; state.unknownCount = types["unknown", default: 0]
+        for row in try database.recoveryMediaGroups() {
+            state.mediaStatusCounts[row.type + ":" + row.status, default: 0] += row.count
+            if row.status == "missing" { state.missingLocalMedia += row.count }
+            if row.status == "rawCopyFailed" { state.decodeFailures += row.count; state.mediaErrors[row.type + "RawCopy", default: 0] += row.count }
+            if row.status == "decodedCopyFailed" { state.mediaErrors[row.type + "DecodedCopy", default: 0] += row.count }
+            if row.status == "resolutionFailed" { state.mediaErrors[row.type + "Resolution", default: 0] += row.count }
+            switch row.type {
+            case "image":
+                if row.raw { state.rawDATArchived += row.count; state.imageVariantsResolved += row.count }
+                if row.decoded && row.status == "decoded" { state.decodedImages += row.count }
+                if row.raw && !row.decoded && row.status != "missing" { state.rawOnlyImages += row.count; state.decodeFailures += row.count }
+            case "video":
+                if row.raw && row.variant == "thumbnail" { state.videoThumbnailsArchived += row.count }
+                else if row.raw { state.rawVideoArchived += row.count }
+            case "voice":
+                if row.raw { state.rawVoiceArchived += row.count }
+                if row.decoded { state.decodedVoiceArchived += row.count }
+            case "file":
+                if row.raw && row.format?.hasPrefix("emoticon-cipher-") == true { state.rawEmoticonArchived += row.count }
+                else if row.raw { state.rawFileArchived += row.count }
+            default: throw ArchiveError.invalidArchive
+            }
+        }
+        for path in try database.registeredMediaPaths() {
+            guard !path.hasPrefix("/"), !path.split(separator: "/").contains("..") else { throw ArchiveError.invalidArchive }
+            let info = try destination.appending(path: path).resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+            guard info.isRegularFile == true, info.isSymbolicLink != true else { throw ArchiveError.invalidArchive }
+            state.archivedMediaBytes += Int64(info.fileSize ?? 0)
+        }
+    }
+
+    private func prepareArchiveRoot(_ url: URL, resume: Bool) throws -> URL {
         let root = url.standardizedFileURL
         let manager = FileManager.default
         if manager.fileExists(atPath: root.path()) {
             let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true else { throw ArchiveError.invalidInput }
-            guard try manager.contentsOfDirectory(atPath: root.path()).isEmpty else { throw ArchiveError.invalidArchive }
+            if resume {
+                let handle = try ArchiveReadOnlySQLite.open(root.appending(path: "archive.sqlite"))
+                defer { sqlite3_close(handle) }
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "SELECT status FROM import_runs ORDER BY started_at DESC LIMIT 1", -1, &statement, nil) == SQLITE_OK else { throw ArchiveError.invalidArchive }
+                defer { sqlite3_finalize(statement) }
+                guard sqlite3_step(statement) == SQLITE_ROW, let status = sqlite3_column_text(statement, 0), String(cString: status) != "completed" else { throw ArchiveError.invalidArchive }
+                var version: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "PRAGMA user_version", -1, &version, nil) == SQLITE_OK else { throw ArchiveError.invalidArchive }
+                defer { sqlite3_finalize(version) }
+                guard sqlite3_step(version) == SQLITE_ROW, sqlite3_column_int(version, 0) == WeChatArchiveV1Database.schemaVersion else { throw ArchiveError.invalidArchive }
+            } else { guard try manager.contentsOfDirectory(atPath: root.path()).isEmpty else { throw ArchiveError.invalidArchive } }
         } else {
+            guard !resume else { throw ArchiveError.invalidArchive }
             try manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path())
@@ -792,6 +930,7 @@ private struct ImportState {
     var videoThumbnailsArchived = 0
     var rawVoiceArchived = 0
     var rawFileArchived = 0
+    var rawEmoticonArchived = 0
     var mediaErrors = [String: Int]()
     var mediaStatusCounts = [String: Int]()
     var decodedVoiceArchived = 0
@@ -946,4 +1085,15 @@ private final class ArchiveImageKeyCache: WeChatImageKeyProvider, @unchecked Sen
         values[accountRoot] = keys
         return keys
     }
+}
+
+private final class ArchiveV1ImportLock {
+    private let descriptor: Int32
+    init(root: URL) throws {
+        let fd = open(root.appending(path: ".import.lock").path(), O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw ArchiveError.ioFailure }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); throw ArchiveError.invalidArchive }
+        descriptor = fd
+    }
+    deinit { flock(descriptor, LOCK_UN); close(descriptor) }
 }

@@ -53,6 +53,73 @@ public final class WeChatArchiveV1Database: @unchecked Sendable {
         if sqlite3_get_autocommit(requireHandle()) == 0 { try execute("COMMIT") }
     }
 
+    func importedRowsByTable() throws -> [String: [String: Set<Int64>]] {
+        let statement = try prepare("SELECT source_database, source_table, source_sqlite_rowid FROM messages")
+        defer { sqlite3_finalize(statement) }
+        var result = [String: [String: Set<Int64>]]()
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            guard let source = columnText(statement, 0), let table = columnText(statement, 1) else { throw ArchiveError.invalidArchive }
+            result[source, default: [:]][table, default: []].insert(sqlite3_column_int64(statement, 2))
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return result
+    }
+
+    func recoveryTypeCounts() throws -> [String: Int] {
+        let statement = try prepare("SELECT normalized_type, COUNT(*) FROM messages GROUP BY normalized_type")
+        defer { sqlite3_finalize(statement) }
+        var result = [String: Int]()
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            if let key = columnText(statement, 0) { result[key] = Int(sqlite3_column_int64(statement, 1)) }
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return result
+    }
+
+    func recoveryMediaGroups() throws -> [(type: String, variant: String, status: String, format: String?, raw: Bool, decoded: Bool, count: Int)] {
+        let statement = try prepare("SELECT media_type,variant,status,source_format,raw_archive_path IS NOT NULL,decoded_archive_path IS NOT NULL,COUNT(*) FROM media_assets GROUP BY 1,2,3,4,5,6")
+        defer { sqlite3_finalize(statement) }
+        var result = [(String, String, String, String?, Bool, Bool, Int)]()
+        var step = sqlite3_step(statement)
+        while step == SQLITE_ROW {
+            guard let type = columnText(statement, 0), let variant = columnText(statement, 1), let status = columnText(statement, 2) else { throw ArchiveError.invalidArchive }
+            result.append((type, variant, status, columnText(statement, 3), sqlite3_column_int(statement, 4) != 0, sqlite3_column_int(statement, 5) != 0, Int(sqlite3_column_int64(statement, 6))))
+            step = sqlite3_step(statement)
+        }
+        guard step == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return result
+    }
+
+    func registeredMediaPaths() throws -> Set<String> {
+        let statement = try prepare("SELECT raw_archive_path FROM media_assets WHERE raw_archive_path IS NOT NULL UNION SELECT decoded_archive_path FROM media_assets WHERE decoded_archive_path IS NOT NULL UNION SELECT archive_path FROM avatar_assets WHERE archive_path IS NOT NULL")
+        defer { sqlite3_finalize(statement) }
+        var result = Set<String>()
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            if let path = columnText(statement, 0) { result.insert(path) }
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return result
+    }
+
+    func hasMedia(messageID: String, type: ArchiveV1MediaType, variant: ArchiveV1MediaVariant) throws -> Bool {
+        try scalarString("SELECT id FROM media_assets WHERE source_key = ?", binding: "\(messageID):\(type.rawValue):\(variant.rawValue)") != nil
+    }
+
+    func refreshEmoticonPresentation(messageID: String) throws -> ArchiveV1NormalizedType {
+        guard let former = try scalarString("SELECT normalized_type FROM messages WHERE id = ?", binding: messageID).flatMap(ArchiveV1NormalizedType.init(rawValue:)) else { throw ArchiveError.invalidArchive }
+        let statement = try prepare("UPDATE messages SET normalized_type='text',text_content='[表情]' WHERE id=? AND (raw_local_type & 4294967295)=47")
+        defer { sqlite3_finalize(statement) }
+        try bind(messageID, at: 1, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw ArchiveError.databaseFailure }
+        return former
+    }
+
     public func requiredTables() throws -> Set<String> {
         let expected: Set<String> = ["import_runs", "account", "contacts", "conversations", "group_members", "messages", "message_source_values", "media_assets", "message_media_links", "avatar_assets", "avatar_owner_links"]
         let names = try tableNames()

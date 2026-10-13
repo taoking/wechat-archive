@@ -48,6 +48,7 @@ struct WeChatCompressedTextMessageAdapter: Sendable {
         }
         guard trimmed.utf8.count <= maximumXMLBytes, let document = WeChatMessageXMLDocument(xml: trimmed) else { return nil }
         switch low32 {
+        case 47: return WeChatLocalEmoticonIndex.messageMD5(values) == nil ? nil : "[表情]"
         case 10_000: return systemMessageText(document)
         case 48: return locationMessageText(document)
         case 49: return appMessageText(document, subtype: rawTypeHigh32(rawType))

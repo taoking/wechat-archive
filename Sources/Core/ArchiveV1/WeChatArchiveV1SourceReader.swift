@@ -45,9 +45,16 @@ public struct WeChatArchiveV1SourceReader: Sendable {
     ) throws -> Int {
         let tables = try messageTables(exportRoot: exportRoot)
         var delivered = 0
+        var sessions = [URL: (ReadOnlyArchiveV1SourceDatabase, ArchiveV1MessageIdentityMap)]()
         for table in tables {
-            let database = try ReadOnlyArchiveV1SourceDatabase(url: table.databaseURL)
-            let identities = try database.identityMap()
+            let database: ReadOnlyArchiveV1SourceDatabase
+            let identities: ArchiveV1MessageIdentityMap
+            if let cached = sessions[table.databaseURL] { (database, identities) = cached }
+            else {
+                database = try ReadOnlyArchiveV1SourceDatabase(url: table.databaseURL)
+                identities = try database.identityMap()
+                sessions[table.databaseURL] = (database, identities)
+            }
             let conversationSourceIdentity = identities.conversationSourceIdentity(for: table.tableName)
             let shouldContinue = try database.stream(tableName: table.tableName) { rowid, values in
                 guard limit.map({ delivered < $0 }) ?? true else { return false }
@@ -231,16 +238,23 @@ private final class ReadOnlyArchiveV1SourceDatabase {
 
 private struct ArchiveV1MessageIdentityMap: Sendable {
     let sourceIdentitiesByRowID: [Int64: String]
+    private let identitiesByDigest: [String: String]
+
+    init(sourceIdentitiesByRowID: [Int64: String]) {
+        self.sourceIdentitiesByRowID = sourceIdentitiesByRowID
+        var digests = [String: String]()
+        for identity in sourceIdentitiesByRowID.values {
+            let digest = Insecure.MD5.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+            digests[digest] = identity
+        }
+        identitiesByDigest = digests
+    }
 
     func sourceIdentity(for rowID: Int64) -> String? { sourceIdentitiesByRowID[rowID] }
 
     func conversationSourceIdentity(for tableName: String) -> String? {
         guard let digest = WeChatConversationTableIdentity(tableName: tableName)?.chatDirectoryComponent else { return nil }
-        return sourceIdentitiesByRowID.values.first { sourceIdentity in
-            Insecure.MD5.hash(data: Data(sourceIdentity.utf8))
-                .map { String(format: "%02x", $0) }
-                .joined() == digest
-        }
+        return identitiesByDigest[digest]
     }
 }
 

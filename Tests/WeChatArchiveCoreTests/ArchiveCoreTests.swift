@@ -6,6 +6,19 @@ import XCTest
 @testable import WeChatArchiveCore
 
 final class ArchiveCoreTests: XCTestCase {
+    func testResumeRejectsChangedSourceBeforeAddingMessages() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try makeArchiveV1SourceFixture(in: directory)
+        let archive = directory.appending(path: "Archive")
+        let cancellation = TestCancellation(afterChecks: 1)
+        let importer = WeChatArchiveV1Importer(imageKeyProvider: UnavailableImageKeyProvider())
+        _ = try importer.importArchive(plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot, destinationRoot: archive, options: .all, shouldCancel: { cancellation.shouldCancel() })
+        try createPlainSQLiteDatabase(at: fixture.exportRoot.appending(path: "message/message_0.db"), sql: "UPDATE \(fixture.tableName) SET message_content='changed source' WHERE local_id=1;")
+        XCTAssertThrowsError(try importer.importArchive(plainSQLiteRoot: fixture.exportRoot, accountRoot: fixture.accountRoot, destinationRoot: archive, options: .init(limit: nil, resumeIncomplete: true)))
+        XCTAssertEqual(try WeChatArchiveV1Database(url: archive.appending(path: "archive.sqlite")).messageCount(), 1)
+    }
+
     func testNativeZstdDecodesBoundedFramesAndRejectsMalformedOrOversizedOutput() throws {
         let runtime = try XCTUnwrap(NativeZstdPayloadRuntime.shared)
         let text = "synthetic native payload 中文"
@@ -37,6 +50,14 @@ final class ArchiveCoreTests: XCTestCase {
         XCTAssertEqual(try WeChatArchiveV1Database(url: archive.appending(path: "archive.sqlite")).messageCount(), 501)
         XCTAssertTrue(try WeChatArchiveV1Validator().validate(at: archive).passed)
         XCTAssertEqual(try sha256Hex(of: source), before)
+        let staging = archive.appending(path: "media/images/raw/.\(UUID().uuidString).staging")
+        try Data("synthetic interrupted copy".utf8).write(to: staging)
+        let resumed = try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(plainSQLiteRoot: plain, accountRoot: account, destinationRoot: archive, options: .init(limit: nil, resumeIncomplete: true))
+        XCTAssertEqual(resumed.messagesImported, 600)
+        XCTAssertEqual(resumed.messagesSkipped, 501)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path()))
+        XCTAssertTrue(try WeChatArchiveV1Validator().validate(at: archive).passed)
+        XCTAssertThrowsError(try WeChatArchiveV1Importer(imageKeyProvider: FixtureImageKeyProvider(materials: [])).importArchive(plainSQLiteRoot: plain, accountRoot: account, destinationRoot: archive, options: .init(limit: nil, resumeIncomplete: true)))
     }
 
     func testImageKeyProviderFailureStillArchivesRawImage() throws {

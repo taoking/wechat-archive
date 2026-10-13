@@ -103,10 +103,12 @@ public enum ArchiveV1ImportStatus: String, Codable, Equatable, Sendable {
 public struct ArchiveV1ImportOptions: Equatable, Sendable {
     public let limit: Int?
     public let batchSize: Int
+    public let resumeIncomplete: Bool
 
-    public init(limit: Int? = 100, batchSize: Int = 500) {
+    public init(limit: Int? = 100, batchSize: Int = 500, resumeIncomplete: Bool = false) {
         self.limit = limit.map { max(1, $0) }
         self.batchSize = min(max(batchSize, 1), 1_000)
+        self.resumeIncomplete = resumeIncomplete
     }
 
     public static let developmentDefault = ArchiveV1ImportOptions()

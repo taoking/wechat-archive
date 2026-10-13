@@ -683,6 +683,9 @@ private struct ArchiveTimelineMessageRow: View {
             } else {
                 Text(ArchiveMessagePresentationFormatter.displayText(for: message.textContent) ?? "").textSelection(.enabled)
             }
+            if rawTypeLow32(message.rawLocalType) == 47, message.media.contains(where: { $0.mediaType == .file && $0.rawRelativePath != nil }) {
+                Text("原始表情缓存已保存，当前暂不能显示").font(.caption).foregroundStyle(.secondary)
+            }
         case .image: imageContent
         case .video: videoContent
         case .voice: voiceContent
@@ -817,7 +820,8 @@ private struct ArchiveTimelineMessageRow: View {
         case .video: preferredVideo
         case .voice: message.media.first { $0.mediaType == .voice && ($0.decodedRelativePath != nil || $0.rawRelativePath != nil) }
         case .file: message.media.first { $0.mediaType == .file && $0.rawRelativePath != nil }
-        case .text, .unknown: nil
+        case .text: rawTypeLow32(message.rawLocalType) == 47 ? message.media.first { $0.mediaType == .file && $0.rawRelativePath != nil } : nil
+        case .unknown: nil
         }
     }
 
